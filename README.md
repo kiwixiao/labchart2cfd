@@ -5,8 +5,16 @@ Convert LabChart-exported .mat flow profile data to Star-CCM+ compatible CSV for
 ## Installation
 
 ```bash
+# Install from GitHub
+pip install git+https://github.com/kiwixiao/labchart2cfd.git
+
+# Or clone and install locally (for development)
+git clone https://github.com/kiwixiao/labchart2cfd.git
+cd labchart2cfd
 pip install -e .
 ```
+
+Requires Python >= 3.10.
 
 ## Usage
 
