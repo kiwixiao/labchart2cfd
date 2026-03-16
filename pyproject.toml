@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "labchart2cfd"
+version = "0.1.0"
+description = "Convert LabChart .mat flow profile data to Star-CCM+ compatible CSV"
+readme = "README.md"
+requires-python = ">=3.6"
+license = {text = "MIT"}
+authors = [
+    {name = "Xia Zhang"}
+]
+keywords = ["CFD", "flow profile", "LabChart", "Star-CCM+", "MATLAB migration"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
+
+dependencies = [
+    "numpy>=1.13",
+    "scipy>=1.0",
+    "matplotlib>=3.0",
+    "pydantic>=1.8",
+    "typer>=0.4",
+    "pyyaml>=5.0",
+    "rich>=10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+labchart2cfd = "labchart2cfd.cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/xiaz9n/labchart2cfd"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/labchart2cfd"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
