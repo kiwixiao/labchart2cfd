@@ -13,7 +13,7 @@ from rich.table import Table
 
 app = typer.Typer(
     name="labchart2cfd",
-    help="Convert LabChart .mat flow profile data to Star-CCM+ compatible CSV",
+    help="Convert LabChart .mat flow profile data to CSV for CFD simulation boundary conditions",
     no_args_is_help=True,
 )
 console = Console()

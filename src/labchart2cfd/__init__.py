@@ -1,4 +1,4 @@
-"""CFD Flow Profile Converter - Convert LabChart .mat to Star-CCM+ CSV."""
+"""CFD Flow Profile Converter - Convert LabChart .mat to CSV for CFD simulation."""
 
 __version__ = "0.1.0"
 
