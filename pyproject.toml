@@ -7,7 +7,7 @@ name = "labchart2cfd"
 version = "0.1.0"
 description = "Convert LabChart .mat flow profile data to Star-CCM+ compatible CSV"
 readme = "README.md"
-requires-python = ">=3.6"
+requires-python = ">=3.10"
 license = {text = "MIT"}
 authors = [
     {name = "Xia Zhang"}
@@ -44,7 +44,7 @@ dev = [
 labchart2cfd = "labchart2cfd.cli.main:app"
 
 [project.urls]
-Homepage = "https://github.com/xiaz9n/labchart2cfd"
+Homepage = "https://github.com/kiwixiao/labchart2cfd"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/labchart2cfd"]
