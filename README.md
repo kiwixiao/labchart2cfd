@@ -1,6 +1,6 @@
 # LabChart2CFD
 
-Convert LabChart-exported .mat flow profile data to Star-CCM+ compatible CSV format.
+Convert LabChart-exported .mat flow profile data to CSV format for CFD simulation boundary conditions.
 
 ## Installation
 

@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "labchart2cfd"
 version = "0.1.0"
-description = "Convert LabChart .mat flow profile data to Star-CCM+ compatible CSV"
+description = "Convert LabChart .mat flow profile data to CSV for CFD simulation boundary conditions"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
