@@ -881,7 +881,7 @@ class FlowProfileApp:
 
             # Draw landmark on both plots
             for ax in (self.ax_top, self.ax_bottom):
-                line = ax.axvline(x=x_time, color=color, linestyle="-", linewidth=1.5, alpha=0.9)
+                line = ax.axvline(x=x_time, color=color, linestyle="-", linewidth=1.5, alpha=0.9, label=label)
                 ann = ax.annotate(
                     label, xy=(x_time, 0.95), xycoords=("data", "axes fraction"),
                     fontsize=7, color=color, fontweight="bold", ha="center", va="top",
@@ -902,7 +902,7 @@ class FlowProfileApp:
             self._remove_ct_landmark_by_label("Exhale End")
 
             for ax in (self.ax_top, self.ax_bottom):
-                line = ax.axvline(x=x_time, color=color, linestyle="-", linewidth=1.5, alpha=0.9)
+                line = ax.axvline(x=x_time, color=color, linestyle="-", linewidth=1.5, alpha=0.9, label=label)
                 ann = ax.annotate(
                     label, xy=(x_time, 0.95), xycoords=("data", "axes fraction"),
                     fontsize=7, color=color, fontweight="bold", ha="center", va="top",
@@ -914,13 +914,13 @@ class FlowProfileApp:
             self.status_var.set(f"Exhale end marked at {x_time:.3f}s")
 
     def _remove_ct_landmark_by_label(self, label: str) -> None:
-        """Remove existing landmark artists with the given annotation text."""
+        """Remove existing landmark artists (lines and annotations) matching label."""
         remaining = []
         for artist in self._ct_landmark_artists:
             if hasattr(artist, "get_text") and artist.get_text() == label:
-                artist.remove()
-            elif hasattr(artist, "_label") and getattr(artist, "_label", None) == label:
-                artist.remove()
+                artist.remove()  # Annotation
+            elif hasattr(artist, "get_label") and artist.get_label() == label:
+                artist.remove()  # Line2D with label= kwarg
             else:
                 remaining.append(artist)
         self._ct_landmark_artists = remaining
@@ -1085,15 +1085,15 @@ class FlowProfileApp:
                         tf.write(f"end_time_exported: {exported_duration:.3f}\n")
 
                 # Generate sanity-check PNG plot of exported data
-                import matplotlib
-                matplotlib.use("Agg")  # non-interactive backend for file saving
-                import matplotlib.pyplot as plt
+                # Use Figure + FigureCanvasAgg directly to avoid backend switching
+                from matplotlib.figure import Figure as MplFigure
+                from matplotlib.backends.backend_agg import FigureCanvasAgg
 
                 plot_file = output_dir / f"{subject}_sanity_check.png"
                 n_plots = 2 if result.pressure is not None else 1
-                fig_export, axes = plt.subplots(n_plots, 1, figsize=(10, 3 * n_plots), dpi=150)
-                if n_plots == 1:
-                    axes = [axes]
+                fig_export = MplFigure(figsize=(10, 3 * n_plots), dpi=150)
+                FigureCanvasAgg(fig_export)
+                axes = fig_export.subplots(n_plots, 1, squeeze=False)[:, 0]
 
                 axes[0].plot(result.time, result.mass_flow, "b-", linewidth=0.5)
                 axes[0].axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
@@ -1112,10 +1112,6 @@ class FlowProfileApp:
 
                 fig_export.tight_layout()
                 fig_export.savefig(str(plot_file))
-                plt.close(fig_export)
-
-                # Restore TkAgg backend for the GUI
-                matplotlib.use("TkAgg")
 
                 # Update status on main thread
                 def _done():
