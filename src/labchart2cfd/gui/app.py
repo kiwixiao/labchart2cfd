@@ -54,6 +54,16 @@ class FlowProfileApp:
         self._time_markers: List[Tuple] = []  # (line, annotation) pairs
         self._click_cid = None  # canvas click event connection ID
 
+        # CT workflow state
+        self._ct_steps: list = []  # detected step triggers
+        self._ct_selected_step: Optional[dict] = None  # currently selected step
+        self._ct_step_markers: list = []  # artists for step span visualization
+        self._ct_landmark_mode: Optional[str] = None  # "inhale_start" or "exhale_end"
+        self._ct_inhale_start: Optional[float] = None
+        self._ct_exhale_end: Optional[float] = None
+        self._ct_landmark_artists: list = []  # artists for landmark markers
+        self._ct_interval_markers: list = []  # artists for temporal interval lines
+
         self._build_ui()
 
     def _build_ui(self) -> None:
@@ -179,9 +189,10 @@ class FlowProfileApp:
         # Proc Row 1: workflow + output dir + execute
         ttk.Label(proc_frame, text="Workflow:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
         self.workflow_var = tk.StringVar(value="MRI")
+        self.workflow_var.trace_add("write", self._on_workflow_changed)
         workflow_combo = ttk.Combobox(
             proc_frame, textvariable=self.workflow_var,
-            values=["MRI", "cpap", "phase-contrast"],
+            values=["MRI", "cpap", "phase-contrast", "CT"],
             state="readonly", width=14,
         )
         workflow_combo.grid(row=1, column=1, pady=(5, 0))
@@ -199,6 +210,63 @@ class FlowProfileApp:
 
         self.execute_btn = ttk.Button(proc_frame, text="Execute", command=self._execute_processing)
         self.execute_btn.grid(row=1, column=6, padx=(15, 0), pady=(5, 0))
+
+        # --- CT-specific controls (hidden by default) ---
+        self.ct_frame = ttk.LabelFrame(controls_frame, text="CT Step Trigger Controls", padding=5)
+        # Not packed yet — shown only when workflow == "CT"
+
+        # Row 0: Detect Steps + Step selection
+        ttk.Button(self.ct_frame, text="Detect Steps", command=self._detect_steps).grid(
+            row=0, column=0, padx=(0, 10),
+        )
+
+        ttk.Label(self.ct_frame, text="Step #:").grid(row=0, column=1, padx=(0, 5))
+        self.ct_step_var = tk.IntVar(value=1)
+        self.ct_step_spin = ttk.Spinbox(
+            self.ct_frame, from_=1, to=1, textvariable=self.ct_step_var, width=5,
+        )
+        self.ct_step_spin.grid(row=0, column=2, padx=(0, 10))
+
+        ttk.Button(self.ct_frame, text="Select Step", command=self._select_ct_step).grid(
+            row=0, column=3, padx=(0, 10),
+        )
+
+        ttk.Label(self.ct_frame, text="Temporal Res (ms):").grid(row=0, column=4, padx=(0, 5))
+        self.ct_temporal_res_var = tk.StringVar(value="200")
+        ttk.Entry(self.ct_frame, textvariable=self.ct_temporal_res_var, width=8).grid(
+            row=0, column=5, padx=(0, 10),
+        )
+
+        ttk.Label(self.ct_frame, text="Total Images:").grid(row=0, column=6, padx=(0, 5))
+        self.ct_total_images_var = tk.StringVar(value="--")
+        ttk.Label(self.ct_frame, textvariable=self.ct_total_images_var, width=6,
+                  relief=tk.SUNKEN, anchor=tk.CENTER).grid(row=0, column=7)
+
+        # Row 1: Landmark buttons + time displays
+        ttk.Button(self.ct_frame, text="Mark Inhale Start", command=self._mark_inhale_start).grid(
+            row=1, column=0, pady=(5, 0), padx=(0, 5),
+        )
+        self.ct_inhale_var = tk.StringVar(value="--")
+        ttk.Label(self.ct_frame, textvariable=self.ct_inhale_var, width=12,
+                  relief=tk.SUNKEN, anchor=tk.CENTER).grid(row=1, column=1, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        ttk.Button(self.ct_frame, text="Mark Exhale End", command=self._mark_exhale_end).grid(
+            row=1, column=3, pady=(5, 0), padx=(0, 5),
+        )
+        self.ct_exhale_var = tk.StringVar(value="--")
+        ttk.Label(self.ct_frame, textvariable=self.ct_exhale_var, width=12,
+                  relief=tk.SUNKEN, anchor=tk.CENTER).grid(row=1, column=4, columnspan=2, sticky=tk.W, pady=(5, 0))
+
+        ttk.Button(self.ct_frame, text="Clear Landmarks", command=self._clear_ct_landmarks).grid(
+            row=1, column=6, columnspan=2, pady=(5, 0),
+        )
+
+    def _on_workflow_changed(self, *_args) -> None:
+        """Toggle CT controls visibility based on workflow selection."""
+        if self.workflow_var.get() == "CT":
+            self.ct_frame.pack(fill=tk.X, pady=(0, 5))
+        else:
+            self.ct_frame.pack_forget()
 
     def _update_outdir(self, *_args) -> None:
         """Recompute output dir based on current mat file and subject."""
@@ -368,19 +436,29 @@ class FlowProfileApp:
 
         trigger_row = row - 1
         has_trigger = trigger_row >= 1 and not self.data.is_block_empty(trigger_row, col)
+        is_ct = self.workflow_var.get() == "CT"
         if has_trigger:
             trigger = self.data.get_data(trigger_row, col)
             trigger_time = self.data.get_time(trigger_row, col)
             self.ax_top.plot(trigger_time, trigger, "r-", linewidth=0.5, label="trigger info")
 
-            # Detect trigger pulses
-            self._detect_triggers(trigger, trigger_time)
+            if is_ct:
+                # CT uses step (bridge) detection, not pulsatile peak detection
+                self._detect_steps_from_data(trigger, trigger_time)
+            else:
+                # MRI/CPAP uses pulsatile peak detection
+                self._detect_triggers(trigger, trigger_time)
 
         self.ax_top.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
         self.ax_top.set_xlabel("Time (s)")
         self.ax_top.set_ylabel("Amplitude")
 
-        trigger_info = f" | {self._trigger_count} triggers" if has_trigger else ""
+        if is_ct and has_trigger:
+            trigger_info = f" | {len(self._ct_steps)} step triggers"
+        elif has_trigger:
+            trigger_info = f" | {self._trigger_count} triggers"
+        else:
+            trigger_info = ""
         self.ax_top.set_title(
             f"{self.mat_filepath.name} — Block [{row}, {col}]: Flow + Trigger{trigger_info}"
         )
@@ -451,6 +529,35 @@ class FlowProfileApp:
             )
             self.ax_top.legend(loc="upper right", fontsize="small")
 
+    def _detect_steps_from_data(self, trigger_data: np.ndarray, trigger_time: np.ndarray) -> None:
+        """Detect step (bridge) triggers from raw data and update CT UI."""
+        from labchart2cfd.processing.step_detection import detect_steps
+
+        self._ct_steps = detect_steps(trigger_data, trigger_time, min_duration_s=1.0)
+
+        if not self._ct_steps:
+            return
+
+        # Update step spinbox range
+        self.ct_step_spin.configure(to=len(self._ct_steps))
+        self.ct_step_var.set(1)
+
+        # Draw step spans on the plot
+        self._clear_ct_step_markers()
+        for step in self._ct_steps:
+            span = self.ax_top.axvspan(
+                step["start_time"], step["end_time"],
+                alpha=0.1, color="orange",
+            )
+            self._ct_step_markers.append(span)
+            ann = self.ax_top.annotate(
+                f"Step {step['index']}",
+                xy=((step["start_time"] + step["end_time"]) / 2, 1.0),
+                xycoords=("data", "axes fraction"),
+                fontsize=7, color="orange", ha="center", va="bottom",
+            )
+            self._ct_step_markers.append(ann)
+
     def _on_click(self, event) -> None:
         """Handle mouse click on the canvas for data picker."""
         if self._plot_mode != "selected":
@@ -462,7 +569,10 @@ class FlowProfileApp:
             return
 
         if event.button == 1:  # Left click — add marker
-            self._add_time_marker(event.xdata)
+            if self._ct_landmark_mode is not None:
+                self._add_ct_landmark(event.xdata)
+            else:
+                self._add_time_marker(event.xdata)
         elif event.button == 3:  # Right click — clear all markers
             self._clear_time_markers()
 
@@ -586,10 +696,234 @@ class FlowProfileApp:
         for artist in self._trigger_markers:
             artist.remove()
         self._trigger_markers.clear()
+        self._clear_ct_step_markers()
+        self._clear_ct_interval_markers()
+        self._clear_ct_landmarks()
         if self.ax_top is not None:
             self.ax_top.legend(loc="upper right", fontsize="small")
         self.canvas.draw_idle()
         self.status_var.set("All markers cleared")
+
+    def _detect_steps(self) -> None:
+        """Detect step triggers in the trigger channel for CT workflow (button handler)."""
+        if self.data is None:
+            messagebox.showwarning("No Data", "Please load a .mat file first.")
+            return
+        if self.ax_top is None:
+            messagebox.showwarning("No Plot", "Please click 'Plot Selected' first.")
+            return
+
+        row = self.row_var.get()
+        col = self.col_var.get()
+        trigger_row = row - 1
+
+        if trigger_row < 1 or self.data.is_block_empty(trigger_row, col):
+            messagebox.showwarning("No Trigger", "No trigger data found in the row above the flow channel.")
+            return
+
+        trigger_data = self.data.get_data(trigger_row, col)
+        trigger_time = self.data.get_time(trigger_row, col)
+
+        self._detect_steps_from_data(trigger_data, trigger_time)
+
+        if not self._ct_steps:
+            messagebox.showinfo("No Steps", "No step triggers detected.")
+            return
+
+        self.canvas.draw_idle()
+        self.status_var.set(f"Detected {len(self._ct_steps)} step trigger(s)")
+
+    def _clear_ct_step_markers(self) -> None:
+        """Remove step trigger visualization markers."""
+        for artist in self._ct_step_markers:
+            artist.remove()
+        self._ct_step_markers.clear()
+
+    def _select_ct_step(self) -> None:
+        """Select a specific step trigger, draw interval lines, prepare for landmarks."""
+        if not self._ct_steps:
+            messagebox.showwarning("No Steps", "Please detect steps first.")
+            return
+
+        step_num = self.ct_step_var.get()
+        if step_num < 1 or step_num > len(self._ct_steps):
+            messagebox.showwarning("Invalid Step", f"Step must be 1-{len(self._ct_steps)}.")
+            return
+
+        self._ct_selected_step = self._ct_steps[step_num - 1]
+        step = self._ct_selected_step
+
+        # Auto-fill start/end time from step boundaries
+        self.start_var.set(f"{step['start_time']:.3f}")
+        self.end_var.set(f"{step['end_time']:.3f}")
+
+        # Highlight selected step more prominently
+        self._clear_ct_step_markers()
+        for s in self._ct_steps:
+            color = "lime" if s["index"] == step_num else "orange"
+            alpha = 0.25 if s["index"] == step_num else 0.08
+            span = self.ax_top.axvspan(s["start_time"], s["end_time"], alpha=alpha, color=color)
+            self._ct_step_markers.append(span)
+
+        # Also mark on bottom plot
+        span_b = self.ax_bottom.axvspan(step["start_time"], step["end_time"], alpha=0.15, color="lime")
+        self._ct_step_markers.append(span_b)
+
+        # Draw temporal resolution interval lines within the step
+        self._draw_ct_intervals()
+
+        # Reset landmarks for new step
+        self._clear_ct_landmarks()
+
+        self.canvas.draw_idle()
+        self.status_var.set(
+            f"Step {step_num} selected ({step['duration']:.2f}s, "
+            f"{self.ct_total_images_var.get()} images) | "
+            f"Use buttons to mark Inhale Start and Exhale End"
+        )
+
+    def _mark_inhale_start(self) -> None:
+        """Activate click mode to place inhale start landmark."""
+        self._ct_landmark_mode = "inhale_start"
+        self.status_var.set("Click on plot to mark INHALE START")
+
+    def _mark_exhale_end(self) -> None:
+        """Activate click mode to place exhale end landmark."""
+        self._ct_landmark_mode = "exhale_end"
+        self.status_var.set("Click on plot to mark EXHALE END")
+
+    def _draw_ct_intervals(self) -> None:
+        """Draw temporal resolution interval lines within the step window."""
+        if self.ax_top is None or self.ax_bottom is None:
+            return
+        if self._ct_selected_step is None:
+            return
+
+        # Clear previous interval artists
+        self._clear_ct_interval_markers()
+
+        step = self._ct_selected_step
+        try:
+            temporal_res_ms = float(self.ct_temporal_res_var.get())
+            temporal_res_s = temporal_res_ms / 1000.0
+        except ValueError:
+            return
+
+        if temporal_res_s <= 0:
+            return
+
+        start_t = step["start_time"]
+        end_t = step["end_time"]
+
+        # Draw fencepost lines: N+1 lines for N intervals, each line = 1 image
+        # Use direct computation to avoid floating-point accumulation drift
+        num_lines = int(np.round((end_t - start_t) / temporal_res_s)) + 1
+        for i in range(num_lines):
+            t = start_t + i * temporal_res_s
+            for ax in (self.ax_top, self.ax_bottom):
+                line = ax.axvline(x=t, color="blue", linestyle=":", linewidth=0.7, alpha=0.6)
+                self._ct_interval_markers.append(line)
+
+            # Label AT each fencepost line (not between)
+            img_idx = i + 1
+            if img_idx <= 50:  # limit labels for readability
+                ann = self.ax_top.annotate(
+                    str(img_idx),
+                    xy=(t, 0.02), xycoords=("data", "axes fraction"),
+                    fontsize=5, color="blue", ha="center", va="bottom",
+                )
+                self._ct_interval_markers.append(ann)
+
+        total_images = num_lines
+        self.ct_total_images_var.set(str(total_images))
+
+        # Fix C: Populate Trigger Info box for CT image selection
+        self.total_triggers_var.set(str(total_images))
+        self.start_trigger_spin.configure(from_=1, to=total_images)
+        self.num_triggers_spin.configure(from_=1, to=total_images)
+        self.start_trigger_var.set(1)
+        self.num_triggers_var.set(total_images)
+
+        self.canvas.draw_idle()
+
+    def _clear_ct_interval_markers(self) -> None:
+        """Remove CT interval visualization markers."""
+        for artist in self._ct_interval_markers:
+            artist.remove()
+        self._ct_interval_markers.clear()
+
+    def _clear_ct_landmarks(self) -> None:
+        """Clear CT landmark markers and reset landmark mode."""
+        for artist in self._ct_landmark_artists:
+            artist.remove()
+        self._ct_landmark_artists.clear()
+        self._ct_landmark_mode = None
+        self._ct_inhale_start = None
+        self._ct_exhale_end = None
+        if hasattr(self, "ct_inhale_var"):
+            self.ct_inhale_var.set("--")
+            self.ct_exhale_var.set("--")
+        self.canvas.draw_idle()
+
+    def _add_ct_landmark(self, x_time: float) -> None:
+        """Place a CT landmark (inhale start or exhale end) at the clicked time."""
+        if self.ax_bottom is None or self.ax_top is None:
+            return
+
+        if self._ct_landmark_mode == "inhale_start":
+            color = "magenta"
+            label = "Inhale Start"
+            self._ct_inhale_start = x_time
+            self.ct_inhale_var.set(f"{x_time:.3f} s")
+
+            # Remove previous inhale markers if re-placing
+            self._remove_ct_landmark_by_label("Inhale Start")
+
+            # Draw landmark on both plots
+            for ax in (self.ax_top, self.ax_bottom):
+                line = ax.axvline(x=x_time, color=color, linestyle="-", linewidth=1.5, alpha=0.9)
+                ann = ax.annotate(
+                    label, xy=(x_time, 0.95), xycoords=("data", "axes fraction"),
+                    fontsize=7, color=color, fontweight="bold", ha="center", va="top",
+                )
+                self._ct_landmark_artists.extend([line, ann])
+
+            self._ct_landmark_mode = None  # Single-click mode done
+            self.canvas.draw_idle()
+            self.status_var.set(f"Inhale start marked at {x_time:.3f}s")
+
+        elif self._ct_landmark_mode == "exhale_end":
+            color = "darkviolet"
+            label = "Exhale End"
+            self._ct_exhale_end = x_time
+            self.ct_exhale_var.set(f"{x_time:.3f} s")
+
+            # Remove previous exhale markers if re-placing
+            self._remove_ct_landmark_by_label("Exhale End")
+
+            for ax in (self.ax_top, self.ax_bottom):
+                line = ax.axvline(x=x_time, color=color, linestyle="-", linewidth=1.5, alpha=0.9)
+                ann = ax.annotate(
+                    label, xy=(x_time, 0.95), xycoords=("data", "axes fraction"),
+                    fontsize=7, color=color, fontweight="bold", ha="center", va="top",
+                )
+                self._ct_landmark_artists.extend([line, ann])
+
+            self._ct_landmark_mode = None  # Single-click mode done
+            self.canvas.draw_idle()
+            self.status_var.set(f"Exhale end marked at {x_time:.3f}s")
+
+    def _remove_ct_landmark_by_label(self, label: str) -> None:
+        """Remove existing landmark artists with the given annotation text."""
+        remaining = []
+        for artist in self._ct_landmark_artists:
+            if hasattr(artist, "get_text") and artist.get_text() == label:
+                artist.remove()
+            elif hasattr(artist, "_label") and getattr(artist, "_label", None) == label:
+                artist.remove()
+            else:
+                remaining.append(artist)
+        self._ct_landmark_artists = remaining
 
     def _execute_processing(self) -> None:
         """Run the processing pipeline in a background thread."""
@@ -624,6 +958,15 @@ class FlowProfileApp:
         trigger_num = self.num_triggers_var.get()
         trigger_total = self._trigger_count
 
+        # Capture CT-specific state
+        ct_inhale_start = self._ct_inhale_start
+        ct_exhale_end = self._ct_exhale_end
+        ct_selected_step = self._ct_selected_step
+        try:
+            ct_temporal_res_ms = float(self.ct_temporal_res_var.get())
+        except ValueError:
+            ct_temporal_res_ms = 200.0
+
         # Disable button during processing
         self.execute_btn.config(state=tk.DISABLED)
         self.status_var.set("Processing...")
@@ -632,21 +975,64 @@ class FlowProfileApp:
         def _run() -> None:
             try:
                 from labchart2cfd.io.csv_export import export_flow_csv, export_pressure_csv
+                from labchart2cfd.processing.rearrangement import time_to_image_index
                 from labchart2cfd.workflows import (
                     StandardOSAMRIWorkflow,
                     CPAPWorkflow,
                     PhaseContrastWorkflow,
+                    CTWorkflow,
                 )
 
                 # Select workflow
-                if workflow_name == "phase-contrast":
+                if workflow_name == "CT":
+                    wf = CTWorkflow(density=1.2)
+                    result = wf.process(
+                        self.data, row, col, start_time, end_time,
+                        inhale_start_time=ct_inhale_start,
+                        exhale_end_time=ct_exhale_end,
+                        temporal_resolution=ct_temporal_res_ms / 1000.0,
+                    )
+
+                    # Determine selected images from inhale/exhale landmarks
+                    # All indices are 1-based to match blue fencepost line labels
+                    total_imgs = result.metadata.get("total_images", 0)
+
+                    if ct_inhale_start is not None and ct_exhale_end is not None:
+                        inhale_img = time_to_image_index(
+                            ct_inhale_start, start_time, ct_temporal_res_ms / 1000.0
+                        ) + 1  # 1-based
+                        exhale_img = time_to_image_index(
+                            ct_exhale_end, start_time, ct_temporal_res_ms / 1000.0
+                        ) + 1  # 1-based
+
+                        if inhale_img <= exhale_img:
+                            # Normal: inhale LEFT of exhale → straight sequence
+                            selected_indices = list(range(inhale_img, exhale_img + 1))
+                        else:
+                            # Wrapping: exhale LEFT of inhale → wrap around
+                            selected_indices = (
+                                list(range(inhale_img, total_imgs + 1))
+                                + list(range(1, exhale_img + 1))
+                            )
+                    else:
+                        # No landmarks → use full range
+                        inhale_img = 1
+                        exhale_img = total_imgs
+                        selected_indices = list(range(1, total_imgs + 1))
+
+                    result.metadata["inhale_image"] = inhale_img
+                    result.metadata["exhale_image"] = exhale_img
+                    result.metadata["selected_num_images"] = len(selected_indices)
+                    result.metadata["selected_image_indices"] = selected_indices
+                elif workflow_name == "phase-contrast":
                     wf = PhaseContrastWorkflow(density=5.761)
+                    result = wf.process(self.data, row, col, start_time, end_time)
                 elif workflow_name == "cpap":
                     wf = CPAPWorkflow(density=1.2)
+                    result = wf.process(self.data, row, col, start_time, end_time)
                 else:
                     wf = StandardOSAMRIWorkflow(density=1.2)
-
-                result = wf.process(self.data, row, col, start_time, end_time)
+                    result = wf.process(self.data, row, col, start_time, end_time)
 
                 output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -662,17 +1048,41 @@ class FlowProfileApp:
 
                 # Save trigger info for 4D image registration
                 trigger_file = output_dir / f"{subject}_trigger_info.txt"
-                end_trigger = trigger_start + trigger_num - 1
                 exported_duration = result.time[-1] if len(result.time) > 0 else 0.0
+
                 with open(str(trigger_file), "w") as tf:
-                    tf.write(f"start_trigger: {trigger_start}\n")
-                    tf.write(f"num_triggers: {trigger_num}\n")
-                    tf.write(f"end_trigger: {end_trigger}\n")
-                    tf.write(f"total_triggers_in_block: {trigger_total}\n")
-                    tf.write(f"start_time_original: {start_time:.3f}\n")
-                    tf.write(f"end_time_original: {end_time:.3f}\n")
-                    tf.write(f"start_time_exported: 0.000\n")
-                    tf.write(f"end_time_exported: {exported_duration:.3f}\n")
+                    if workflow_name == "CT":
+                        meta = result.metadata
+                        tf.write(f"workflow: CT\n")
+                        tf.write(f"step_start_time: {meta.get('step_start_time', 0):.3f}\n")
+                        tf.write(f"step_end_time: {meta.get('step_end_time', 0):.3f}\n")
+                        tf.write(f"step_duration: {meta.get('step_duration', 0):.3f}\n")
+                        inhale_t = meta.get("inhale_start_time")
+                        exhale_t = meta.get("exhale_end_time")
+                        tf.write(f"inhale_start_time: {inhale_t:.3f}\n" if inhale_t is not None else "inhale_start_time: N/A\n")
+                        tf.write(f"exhale_end_time: {exhale_t:.3f}\n" if exhale_t is not None else "exhale_end_time: N/A\n")
+                        tf.write(f"temporal_resolution_s: {meta.get('temporal_resolution_s', 0.2):.4f}\n")
+                        tf.write(f"total_images: {meta.get('total_images', 0)}\n")
+                        tf.write(f"cut_image_index: {meta.get('cut_image_index', 0) + 1}\n")  # 1-based to match GUI labels
+                        indices = meta.get("rearranged_image_indices", [])
+                        tf.write(f"rearranged_image_indices: {','.join(str(i + 1) for i in indices)}\n")  # 1-based
+                        tf.write(f"inhale_image: {meta.get('inhale_image', 1)}\n")
+                        tf.write(f"exhale_image: {meta.get('exhale_image', 0)}\n")
+                        tf.write(f"selected_num_images: {meta.get('selected_num_images', 0)}\n")
+                        sel_indices = meta.get("selected_image_indices", [])
+                        tf.write(f"selected_image_indices: {','.join(str(i) for i in sel_indices)}\n")
+                        tf.write(f"start_time_exported: 0.000\n")
+                        tf.write(f"end_time_exported: {exported_duration:.3f}\n")
+                    else:
+                        end_trigger = trigger_start + trigger_num - 1
+                        tf.write(f"start_trigger: {trigger_start}\n")
+                        tf.write(f"num_triggers: {trigger_num}\n")
+                        tf.write(f"end_trigger: {end_trigger}\n")
+                        tf.write(f"total_triggers_in_block: {trigger_total}\n")
+                        tf.write(f"start_time_original: {start_time:.3f}\n")
+                        tf.write(f"end_time_original: {end_time:.3f}\n")
+                        tf.write(f"start_time_exported: 0.000\n")
+                        tf.write(f"end_time_exported: {exported_duration:.3f}\n")
 
                 # Generate sanity-check PNG plot of exported data
                 import matplotlib

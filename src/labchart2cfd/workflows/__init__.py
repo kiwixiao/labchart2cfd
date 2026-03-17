@@ -4,6 +4,7 @@ from labchart2cfd.workflows.base import BaseWorkflow, WorkflowResult
 from labchart2cfd.workflows.standard_osamri import StandardOSAMRIWorkflow
 from labchart2cfd.workflows.cpap import CPAPWorkflow
 from labchart2cfd.workflows.phase_contrast import PhaseContrastWorkflow
+from labchart2cfd.workflows.ct import CTWorkflow
 
 __all__ = [
     "BaseWorkflow",
@@ -11,4 +12,5 @@ __all__ = [
     "StandardOSAMRIWorkflow",
     "CPAPWorkflow",
     "PhaseContrastWorkflow",
+    "CTWorkflow",
 ]

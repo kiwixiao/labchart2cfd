@@ -24,6 +24,7 @@ class WorkflowType(str, Enum):
     STANDARD = "standard"
     CPAP = "cpap"
     PHASE_CONTRAST = "phase-contrast"
+    CT = "ct"
 
 
 @app.command()
@@ -76,11 +77,28 @@ def process(
         float,
         typer.Option("--sample-rate", help="Target sample rate (Hz)"),
     ] = 100.0,
+    inhale_start: Annotated[
+        Optional[float],
+        typer.Option("--inhale-start", help="CT: inhale start time in seconds"),
+    ] = None,
+    exhale_end: Annotated[
+        Optional[float],
+        typer.Option("--exhale-end", help="CT: exhale end time in seconds"),
+    ] = None,
+    temporal_resolution: Annotated[
+        float,
+        typer.Option("--temporal-resolution", help="CT: temporal resolution in ms (default 200)"),
+    ] = 200.0,
+    step_number: Annotated[
+        Optional[int],
+        typer.Option("--step-number", help="CT: step trigger number to use (1-indexed)"),
+    ] = None,
 ) -> None:
     """Process a LabChart .mat file and export Star-CCM+ compatible CSV.
 
     Example:
         labchart2cfd process input.mat OSAMRI029 -s 12.97 -e 16.16
+        labchart2cfd process input.mat CT001 -w ct --step-number 1 --inhale-start 5.2 --temporal-resolution 200
     """
     from labchart2cfd.io.labchart import load_labchart_mat
     from labchart2cfd.io.csv_export import export_flow_csv, export_pressure_csv
@@ -88,6 +106,7 @@ def process(
         StandardOSAMRIWorkflow,
         CPAPWorkflow,
         PhaseContrastWorkflow,
+        CTWorkflow,
     )
 
     # Validate input file
@@ -127,7 +146,32 @@ def process(
         console.print(f"  Using full time range: {start:.2f} - {end:.2f}s")
 
     # Select and configure workflow
-    if workflow == WorkflowType.PHASE_CONTRAST:
+    if workflow == WorkflowType.CT:
+        if density is None:
+            density = 1.2  # Air
+        wf = CTWorkflow(
+            target_sample_rate=sample_rate,
+            density=density,
+        )
+        # If step_number is provided, auto-detect step boundaries
+        if step_number is not None:
+            from labchart2cfd.processing.step_detection import detect_steps
+            trigger_row = row - 1
+            if trigger_row < 1 or data.is_block_empty(trigger_row, column):
+                console.print("[red]Error:[/red] No trigger channel found (expected row above flow channel)")
+                raise typer.Exit(1)
+            trigger_data = data.get_data(trigger_row, column)
+            trigger_time = data.get_time(trigger_row, column)
+            steps = detect_steps(trigger_data, trigger_time)
+            if step_number < 1 or step_number > len(steps):
+                console.print(f"[red]Error:[/red] Step {step_number} not found. Detected {len(steps)} step(s).")
+                raise typer.Exit(1)
+            selected_step = steps[step_number - 1]
+            start = selected_step["start_time"]
+            end = selected_step["end_time"]
+            console.print(f"  Using step {step_number}: {start:.3f}s - {end:.3f}s ({selected_step['duration']:.2f}s)")
+
+    elif workflow == WorkflowType.PHASE_CONTRAST:
         if density is None:
             density = 5.761  # Xenon
         target_rate = 1000.0 if sample_rate == 100.0 else sample_rate
@@ -154,7 +198,15 @@ def process(
 
     # Process
     try:
-        if workflow == WorkflowType.PHASE_CONTRAST and bag_id:
+        if workflow == WorkflowType.CT:
+            result = wf.process(
+                data, row, column, start, end,
+                inhale_start_time=inhale_start,
+                exhale_end_time=exhale_end,
+                temporal_resolution=temporal_resolution / 1000.0,
+                include_pressure=not no_pressure,
+            )
+        elif workflow == WorkflowType.PHASE_CONTRAST and bag_id:
             result = wf.process_with_bag_config(data, row, column, bag_id)
         else:
             result = wf.process(
@@ -322,6 +374,74 @@ def visualize(
 
     if save:
         console.print(f"[green]Saved:[/green] {save}")
+
+
+@app.command(name="detect-steps")
+def detect_steps_cmd(
+    input_file: Annotated[
+        Path,
+        typer.Argument(help="Path to LabChart .mat file"),
+    ],
+    row: Annotated[
+        int,
+        typer.Option("--row", "-r", help="Flow data row (1-indexed, trigger is row-1)"),
+    ] = 2,
+    column: Annotated[
+        int,
+        typer.Option("--column", "-c", help="Block column (1-indexed)"),
+    ] = 3,
+    threshold: Annotated[
+        float,
+        typer.Option("--threshold", help="Threshold fraction of max amplitude (0-1)"),
+    ] = 0.5,
+    min_duration: Annotated[
+        float,
+        typer.Option("--min-duration", help="Minimum step duration in seconds"),
+    ] = 0.5,
+) -> None:
+    """Detect step triggers in a LabChart .mat file (for CT workflow).
+
+    Reports each detected step with start/end times and duration.
+    """
+    from labchart2cfd.io.labchart import load_labchart_mat
+    from labchart2cfd.processing.step_detection import detect_steps
+
+    if not input_file.exists():
+        console.print(f"[red]Error:[/red] File not found: {input_file}")
+        raise typer.Exit(1)
+
+    console.print(f"Loading [cyan]{input_file}[/cyan]...")
+    data = load_labchart_mat(input_file)
+
+    trigger_row = row - 1
+    if trigger_row < 1 or data.is_block_empty(trigger_row, column):
+        console.print(f"[red]Error:[/red] No trigger data at row {trigger_row}, column {column}")
+        raise typer.Exit(1)
+
+    trigger_data = data.get_data(trigger_row, column)
+    trigger_time = data.get_time(trigger_row, column)
+
+    steps = detect_steps(trigger_data, trigger_time, threshold, min_duration)
+
+    if not steps:
+        console.print("[yellow]No step triggers detected.[/yellow]")
+        return
+
+    console.print(f"\n[bold]Detected {len(steps)} step trigger(s):[/bold]")
+    table = Table()
+    table.add_column("Step #", justify="right")
+    table.add_column("Start (s)", justify="right")
+    table.add_column("End (s)", justify="right")
+    table.add_column("Duration (s)", justify="right")
+
+    for step in steps:
+        table.add_row(
+            str(step["index"]),
+            f"{step['start_time']:.3f}",
+            f"{step['end_time']:.3f}",
+            f"{step['duration']:.2f}",
+        )
+    console.print(table)
 
 
 @app.command()
