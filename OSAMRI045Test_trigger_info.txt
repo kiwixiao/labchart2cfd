@@ -1,8 +1,0 @@
-start_trigger: 5
-num_triggers: 7
-end_trigger: 11
-total_triggers_in_block: 180
-start_time_original: 7.066
-end_time_original: 9.078
-start_time_exported: 0.000
-end_time_exported: 2.012
