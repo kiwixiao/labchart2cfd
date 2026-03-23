@@ -63,6 +63,8 @@ class FlowProfileApp:
         self._ct_exhale_end: Optional[float] = None
         self._ct_landmark_artists: list = []  # artists for landmark markers
         self._ct_interval_markers: list = []  # artists for temporal interval lines
+        self._ct_detected_start: Optional[float] = None  # original auto-detected start
+        self._ct_detected_end: Optional[float] = None    # original auto-detected end
 
         self._build_ui()
 
@@ -239,8 +241,9 @@ class FlowProfileApp:
 
         ttk.Label(self.ct_frame, text="Total Images:").grid(row=0, column=6, padx=(0, 5))
         self.ct_total_images_var = tk.StringVar(value="--")
-        ttk.Label(self.ct_frame, textvariable=self.ct_total_images_var, width=6,
-                  relief=tk.SUNKEN, anchor=tk.CENTER).grid(row=0, column=7)
+        ttk.Entry(self.ct_frame, textvariable=self.ct_total_images_var, width=6).grid(
+            row=0, column=7,
+        )
 
         # Row 1: Landmark buttons + time displays
         ttk.Button(self.ct_frame, text="Mark Inhale Start", command=self._mark_inhale_start).grid(
@@ -260,6 +263,26 @@ class FlowProfileApp:
         ttk.Button(self.ct_frame, text="Clear Landmarks", command=self._clear_ct_landmarks).grid(
             row=1, column=6, columnspan=2, pady=(5, 0),
         )
+
+        # Row 2: Start Shift (manual correction) + Apply button
+        ttk.Label(self.ct_frame, text="Start Shift (ms):").grid(row=2, column=0, pady=(5, 0))
+        self.ct_shift_var = tk.StringVar(value="0")
+        self.ct_shift_entry = ttk.Entry(
+            self.ct_frame, textvariable=self.ct_shift_var, width=6,
+        )
+        self.ct_shift_entry.grid(row=2, column=1, pady=(5, 0), sticky=tk.W)
+
+        self.ct_shift_slider = tk.Scale(
+            self.ct_frame, from_=0, to=2000, orient=tk.HORIZONTAL,
+            resolution=10, length=200, showvalue=False,
+            command=self._on_shift_slider_changed,
+        )
+        self.ct_shift_slider.grid(row=2, column=2, columnspan=3, pady=(5, 0), sticky=tk.EW)
+        self.ct_shift_entry.bind("<Return>", self._on_shift_entry_changed)
+
+        ttk.Button(
+            self.ct_frame, text="Apply Correction", command=self._apply_ct_correction,
+        ).grid(row=2, column=6, columnspan=2, pady=(5, 0))
 
     def _on_workflow_changed(self, *_args) -> None:
         """Toggle CT controls visibility based on workflow selection."""
@@ -753,6 +776,21 @@ class FlowProfileApp:
         self._ct_selected_step = self._ct_steps[step_num - 1]
         step = self._ct_selected_step
 
+        # Store original detected boundaries for manual correction reference
+        self._ct_detected_start = step["start_time"]
+        self._ct_detected_end = step["end_time"]
+
+        # Reset shift to 0 when selecting a new step (suppress callback to avoid
+        # premature redraw with stale frame count before _draw_ct_intervals is called)
+        self.ct_shift_var.set("0")
+        self.ct_shift_slider.configure(command="")
+        self.ct_shift_slider.set(0)
+        step_dur_ms = (step["end_time"] - step["start_time"]) * 1000.0
+        self.ct_shift_slider.configure(
+            to=max(int(step_dur_ms * 0.5), 500),
+            command=self._on_shift_slider_changed,
+        )
+
         # Auto-fill start/end time from step boundaries
         self.start_var.set(f"{step['start_time']:.3f}")
         self.end_var.set(f"{step['end_time']:.3f}")
@@ -792,8 +830,14 @@ class FlowProfileApp:
         self._ct_landmark_mode = "exhale_end"
         self.status_var.set("Click on plot to mark EXHALE END")
 
-    def _draw_ct_intervals(self) -> None:
-        """Draw temporal resolution interval lines within the step window."""
+    def _draw_ct_intervals(self, update_total_images_field: bool = True) -> None:
+        """Draw temporal resolution interval lines within the step window.
+
+        Args:
+            update_total_images_field: If True, overwrite the Total Images entry
+                with the auto-computed value. Set to False when the user has
+                manually edited the field and we want to preserve their value.
+        """
         if self.ax_top is None or self.ax_bottom is None:
             return
         if self._ct_selected_step is None:
@@ -802,7 +846,6 @@ class FlowProfileApp:
         # Clear previous interval artists
         self._clear_ct_interval_markers()
 
-        step = self._ct_selected_step
         try:
             temporal_res_ms = float(self.ct_temporal_res_var.get())
             temporal_res_s = temporal_res_ms / 1000.0
@@ -812,12 +855,34 @@ class FlowProfileApp:
         if temporal_res_s <= 0:
             return
 
-        start_t = step["start_time"]
-        end_t = step["end_time"]
+        # Check for manual override: shift + manual frame count
+        try:
+            shift_ms = float(self.ct_shift_var.get())
+        except (ValueError, AttributeError):
+            shift_ms = 0.0
 
-        # Draw fencepost lines: N+1 lines for N intervals, each line = 1 image
-        # Use direct computation to avoid floating-point accumulation drift
-        num_lines = int(np.round((end_t - start_t) / temporal_res_s)) + 1
+        try:
+            manual_frames = int(self.ct_total_images_var.get())
+        except (ValueError, TypeError):
+            manual_frames = None
+
+        if (manual_frames is not None and manual_frames > 0
+                and self._ct_detected_start is not None and shift_ms != 0.0):
+            # Manual correction mode: use shifted start + user-specified frame count
+            start_t = self._ct_detected_start + shift_ms / 1000.0
+            num_lines = manual_frames
+        elif manual_frames is not None and manual_frames > 0 and self._ct_detected_start is not None:
+            # Frame count override only (no shift)
+            start_t = self._ct_detected_start
+            num_lines = manual_frames
+        else:
+            # Auto mode: compute from step boundaries
+            step = self._ct_selected_step
+            start_t = step["start_time"]
+            end_t = step["end_time"]
+            num_lines = int(np.round((end_t - start_t) / temporal_res_s)) + 1
+
+        # Draw fencepost lines: each line = 1 image
         for i in range(num_lines):
             t = start_t + i * temporal_res_s
             for ax in (self.ax_top, self.ax_bottom):
@@ -835,16 +900,92 @@ class FlowProfileApp:
                 self._ct_interval_markers.append(ann)
 
         total_images = num_lines
-        self.ct_total_images_var.set(str(total_images))
+        if update_total_images_field:
+            self.ct_total_images_var.set(str(total_images))
 
-        # Fix C: Populate Trigger Info box for CT image selection
-        self.total_triggers_var.set(str(total_images))
-        self.start_trigger_spin.configure(from_=1, to=total_images)
-        self.num_triggers_spin.configure(from_=1, to=total_images)
-        self.start_trigger_var.set(1)
-        self.num_triggers_var.set(total_images)
+        # Populate Trigger Info box only on step selection, not during slider preview
+        if update_total_images_field:
+            self.total_triggers_var.set(str(total_images))
+            self.start_trigger_spin.configure(from_=1, to=total_images)
+            self.num_triggers_spin.configure(from_=1, to=total_images)
+            self.start_trigger_var.set(1)
+            self.num_triggers_var.set(total_images)
 
         self.canvas.draw_idle()
+
+    def _on_shift_slider_changed(self, value: str) -> None:
+        """Sync slider value to entry and redraw interval lines as live preview."""
+        self.ct_shift_var.set(value)
+        self._draw_ct_intervals(update_total_images_field=False)
+
+    def _on_shift_entry_changed(self, _event=None) -> None:
+        """Sync entry value to slider and redraw interval lines."""
+        try:
+            val = float(self.ct_shift_var.get())
+            # Clamp to slider range to avoid desync
+            slider_min = float(self.ct_shift_slider.cget("from"))
+            slider_max = float(self.ct_shift_slider.cget("to"))
+            val = max(slider_min, min(val, slider_max))
+            self.ct_shift_var.set(str(int(val)))
+            # Suppress command callback to avoid double-redraw
+            self.ct_shift_slider.configure(command="")
+            self.ct_shift_slider.set(val)
+            self.ct_shift_slider.configure(command=self._on_shift_slider_changed)
+        except ValueError:
+            pass
+        self._draw_ct_intervals(update_total_images_field=False)
+
+    def _apply_ct_correction(self) -> None:
+        """Apply manual correction: update start/end times from shift + frame count."""
+        if self._ct_detected_start is None:
+            messagebox.showwarning("No Step", "Please select a step first.")
+            return
+
+        try:
+            shift_ms = float(self.ct_shift_var.get())
+        except ValueError:
+            messagebox.showwarning("Invalid Shift", "Start shift must be a number.")
+            return
+
+        try:
+            manual_frames = int(self.ct_total_images_var.get())
+        except (ValueError, TypeError):
+            messagebox.showwarning("Invalid Frames", "Total images must be an integer.")
+            return
+
+        if manual_frames < 1:
+            messagebox.showwarning("Invalid Frames", "Total images must be at least 1.")
+            return
+
+        try:
+            temporal_res_ms = float(self.ct_temporal_res_var.get())
+            temporal_res_s = temporal_res_ms / 1000.0
+        except ValueError:
+            temporal_res_s = 0.2
+
+        # Compute corrected boundaries
+        corrected_start = self._ct_detected_start + shift_ms / 1000.0
+        corrected_end = corrected_start + (manual_frames - 1) * temporal_res_s
+
+        # Update the processing fields
+        self.start_var.set(f"{corrected_start:.3f}")
+        self.end_var.set(f"{corrected_end:.3f}")
+
+        # Update trigger info box with corrected frame count
+        self.total_triggers_var.set(str(manual_frames))
+        self.start_trigger_spin.configure(from_=1, to=manual_frames)
+        self.num_triggers_spin.configure(from_=1, to=manual_frames)
+        self.start_trigger_var.set(1)
+        self.num_triggers_var.set(manual_frames)
+
+        # Redraw fencepost lines with corrected values
+        self._draw_ct_intervals(update_total_images_field=False)
+
+        self.status_var.set(
+            f"Correction applied: start shifted +{shift_ms:.0f}ms, "
+            f"{manual_frames} images, "
+            f"window {corrected_start:.3f}s - {corrected_end:.3f}s"
+        )
 
     def _clear_ct_interval_markers(self) -> None:
         """Remove CT interval visualization markers."""
