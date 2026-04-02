@@ -1,4 +1,4 @@
-"""Tkinter GUI for interactive flow profile selection and processing.
+"""PyQt5 GUI for interactive flow profile selection and processing.
 
 Provides a desktop application that:
 1. Loads LabChart .mat files via file browser
@@ -11,30 +11,37 @@ Provides a desktop application that:
 8. Runs the processing pipeline and exports CSV files
 """
 
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
+import sys
 from pathlib import Path
 from threading import Thread
 from typing import Optional, List, Tuple
 
 import numpy as np
 import matplotlib
-matplotlib.use("TkAgg")
+matplotlib.use("QtAgg")
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from scipy.signal import find_peaks
+
+from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QGroupBox, QLabel, QPushButton, QLineEdit, QComboBox,
+    QSpinBox, QDoubleSpinBox, QSlider, QFileDialog, QMessageBox,
+    QStatusBar, QGridLayout, QSizePolicy, QFrame,
+)
 
 from labchart2cfd.io.labchart import LabChartData, load_labchart_mat
 
 
-class FlowProfileApp:
+class FlowProfileApp(QMainWindow):
     """Main GUI application for flow profile processing."""
 
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.root.title("CFD Flow Profile Processor")
-        self.root.geometry("1200x800")
-        self.root.minsize(900, 600)
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("CFD Flow Profile Processor")
+        self.resize(1200, 800)
+        self.setMinimumSize(900, 600)
 
         # State
         self.data: Optional[LabChartData] = None
@@ -66,26 +73,21 @@ class FlowProfileApp:
         self._ct_detected_start: Optional[float] = None  # original auto-detected start
         self._ct_detected_end: Optional[float] = None    # original auto-detected end
 
+        # Internal flag to suppress slider callback during programmatic changes
+        self._suppress_shift_slider = False
+
         self._build_ui()
 
     def _build_ui(self) -> None:
         """Build the complete UI layout."""
-        # Main container
-        main_frame = ttk.Frame(self.root, padding=5)
-        main_frame.pack(fill=tk.BOTH, expand=True)
-
-        # --- Controls area (bottom, packed FIRST so it always gets space) ---
-        controls_frame = ttk.Frame(main_frame)
-        controls_frame.pack(side=tk.BOTTOM, fill=tk.X)
-
-        # --- Status bar (above controls packing order, below controls visually) ---
-        self.status_var = tk.StringVar(value="Ready")
-        status_bar = ttk.Label(main_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X, pady=(5, 0))
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(5, 5, 5, 5)
 
         # --- Plot area (takes remaining space) ---
-        plot_frame = ttk.LabelFrame(main_frame, text="Flow & Trigger Signals", padding=5)
-        plot_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 5))
+        plot_group = QGroupBox("Flow & Trigger Signals")
+        plot_layout = QVBoxLayout(plot_group)
 
         self.fig = Figure(figsize=(12, 6), dpi=100)
         # Show placeholder text instead of pre-created axes
@@ -94,230 +96,299 @@ class FlowProfileApp:
             ha="center", va="center", fontsize=14, color="gray",
         )
 
-        self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
-        self.canvas.draw()
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Matplotlib navigation toolbar (zoom, pan, home, save)
-        self.toolbar = NavigationToolbar2Tk(self.canvas, plot_frame)
-        self.toolbar.update()
+        self.toolbar = NavigationToolbar2QT(self.canvas, plot_group)
 
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        plot_layout.addWidget(self.toolbar)
+        plot_layout.addWidget(self.canvas)
+        main_layout.addWidget(plot_group, stretch=1)
 
-        # Row 1: File loading — multi-row layout for responsiveness
-        file_frame = ttk.LabelFrame(controls_frame, text="Data Source", padding=5)
-        file_frame.pack(fill=tk.X, pady=(0, 5))
+        # --- Controls area (bottom, fixed height) ---
+        controls_widget = QWidget()
+        controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
 
-        # File frame Row 0: file path + browse
-        ttk.Label(file_frame, text="File:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        self.file_var = tk.StringVar(value="No file selected")
-        ttk.Label(file_frame, textvariable=self.file_var).grid(
-            row=0, column=1, sticky=tk.EW, padx=(0, 5),
-        )
-        ttk.Button(file_frame, text="Browse...", command=self._browse_file).grid(
-            row=0, column=2, sticky=tk.E,
-        )
-        file_frame.columnconfigure(1, weight=1)  # path label stretches
+        # -- Data Source group --
+        file_group = QGroupBox("Data Source")
+        file_grid = QGridLayout(file_group)
 
-        # File frame Row 1: row/col spinboxes + Load Overview + Plot Selected
-        ttk.Label(file_frame, text="Row:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
+        # Row 0: file path + browse
+        file_grid.addWidget(QLabel("File:"), 0, 0)
+        self.file_label = QLabel("No file selected")
+        self.file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        file_grid.addWidget(self.file_label, 0, 1)
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self._browse_file)
+        file_grid.addWidget(browse_btn, 0, 2)
+        file_grid.setColumnStretch(1, 1)
 
-        spin_frame = ttk.Frame(file_frame)
-        spin_frame.grid(row=1, column=1, sticky=tk.W, pady=(5, 0))
+        # Row 1: row/col spinboxes + Load Overview + Plot Selected
+        file_grid.addWidget(QLabel("Row:"), 1, 0)
+        spin_widget = QWidget()
+        spin_hlayout = QHBoxLayout(spin_widget)
+        spin_hlayout.setContentsMargins(0, 0, 0, 0)
 
-        self.row_var = tk.IntVar(value=2)
-        self.row_spin = ttk.Spinbox(spin_frame, from_=1, to=20, textvariable=self.row_var, width=5)
-        self.row_spin.pack(side=tk.LEFT)
+        self.row_spin = QSpinBox()
+        self.row_spin.setRange(1, 20)
+        self.row_spin.setValue(2)
+        self.row_spin.setFixedWidth(60)
+        spin_hlayout.addWidget(self.row_spin)
 
-        ttk.Label(spin_frame, text="  Column:").pack(side=tk.LEFT)
-        self.col_var = tk.IntVar(value=3)
-        self.col_spin = ttk.Spinbox(spin_frame, from_=1, to=20, textvariable=self.col_var, width=5)
-        self.col_spin.pack(side=tk.LEFT)
+        spin_hlayout.addWidget(QLabel("  Column:"))
+        self.col_spin = QSpinBox()
+        self.col_spin.setRange(1, 20)
+        self.col_spin.setValue(3)
+        self.col_spin.setFixedWidth(60)
+        spin_hlayout.addWidget(self.col_spin)
 
-        ttk.Button(spin_frame, text="Load Overview", command=self._load_and_overview).pack(
-            side=tk.LEFT, padx=(15, 5),
-        )
-        ttk.Button(spin_frame, text="Plot Selected", command=self._plot_selected).pack(
-            side=tk.LEFT, padx=(5, 0),
-        )
+        load_overview_btn = QPushButton("Load Overview")
+        load_overview_btn.clicked.connect(self._load_and_overview)
+        spin_hlayout.addSpacing(15)
+        spin_hlayout.addWidget(load_overview_btn)
 
-        # --- Trigger range frame ---
-        trigger_frame = ttk.LabelFrame(controls_frame, text="Trigger Info", padding=5)
-        trigger_frame.pack(fill=tk.X, pady=(0, 5))
+        plot_selected_btn = QPushButton("Plot Selected")
+        plot_selected_btn.clicked.connect(self._plot_selected)
+        spin_hlayout.addSpacing(5)
+        spin_hlayout.addWidget(plot_selected_btn)
 
-        ttk.Label(trigger_frame, text="Total Triggers:").pack(side=tk.LEFT, padx=(0, 5))
-        self.total_triggers_var = tk.StringVar(value="--")
-        ttk.Label(trigger_frame, textvariable=self.total_triggers_var, width=6,
-                  relief=tk.SUNKEN, anchor=tk.CENTER).pack(side=tk.LEFT, padx=(0, 15))
+        spin_hlayout.addStretch()
+        file_grid.addWidget(spin_widget, 1, 1, 1, 2)
 
-        ttk.Label(trigger_frame, text="Start Trigger #:").pack(side=tk.LEFT, padx=(0, 5))
-        self.start_trigger_var = tk.IntVar(value=1)
-        self.start_trigger_spin = ttk.Spinbox(
-            trigger_frame, from_=1, to=1, textvariable=self.start_trigger_var, width=5,
-        )
-        self.start_trigger_spin.pack(side=tk.LEFT, padx=(0, 15))
+        controls_layout.addWidget(file_group)
 
-        ttk.Label(trigger_frame, text="# Triggers:").pack(side=tk.LEFT, padx=(0, 5))
-        self.num_triggers_var = tk.IntVar(value=1)
-        self.num_triggers_spin = ttk.Spinbox(
-            trigger_frame, from_=1, to=1, textvariable=self.num_triggers_var, width=5,
-        )
-        self.num_triggers_spin.pack(side=tk.LEFT, padx=(0, 15))
+        # -- Trigger Info group --
+        trigger_group = QGroupBox("Trigger Info")
+        trigger_hlayout = QHBoxLayout(trigger_group)
 
-        ttk.Button(trigger_frame, text="Mark Triggers", command=self._mark_trigger_range).pack(
-            side=tk.LEFT, padx=(5, 5),
-        )
-        ttk.Button(trigger_frame, text="Clear Markers", command=self._clear_all_markers).pack(
-            side=tk.LEFT, padx=(5, 0),
-        )
+        trigger_hlayout.addWidget(QLabel("Total Triggers:"))
+        self.total_triggers_label = QLabel("--")
+        self.total_triggers_label.setFixedWidth(50)
+        self.total_triggers_label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        self.total_triggers_label.setAlignment(Qt.AlignCenter)
+        trigger_hlayout.addWidget(self.total_triggers_label)
+        trigger_hlayout.addSpacing(15)
 
-        # Row 2: Time window and processing — multi-row layout
-        proc_frame = ttk.LabelFrame(controls_frame, text="Processing", padding=5)
-        proc_frame.pack(fill=tk.X, pady=(0, 5))
+        trigger_hlayout.addWidget(QLabel("Start Trigger #:"))
+        self.start_trigger_spin = QSpinBox()
+        self.start_trigger_spin.setRange(1, 1)
+        self.start_trigger_spin.setValue(1)
+        self.start_trigger_spin.setFixedWidth(60)
+        trigger_hlayout.addWidget(self.start_trigger_spin)
+        trigger_hlayout.addSpacing(15)
 
-        # Proc Row 0: start/end time + subject ID
-        ttk.Label(proc_frame, text="Start Time (s):").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
-        self.start_var = tk.StringVar(value="0.0")
-        ttk.Entry(proc_frame, textvariable=self.start_var, width=12).grid(row=0, column=1)
+        trigger_hlayout.addWidget(QLabel("# Triggers:"))
+        self.num_triggers_spin = QSpinBox()
+        self.num_triggers_spin.setRange(1, 1)
+        self.num_triggers_spin.setValue(1)
+        self.num_triggers_spin.setFixedWidth(60)
+        trigger_hlayout.addWidget(self.num_triggers_spin)
+        trigger_hlayout.addSpacing(15)
 
-        ttk.Label(proc_frame, text="End Time (s):").grid(row=0, column=2, padx=(10, 5))
-        self.end_var = tk.StringVar(value="0.0")
-        ttk.Entry(proc_frame, textvariable=self.end_var, width=12).grid(row=0, column=3)
+        mark_triggers_btn = QPushButton("Mark Triggers")
+        mark_triggers_btn.clicked.connect(self._mark_trigger_range)
+        trigger_hlayout.addWidget(mark_triggers_btn)
 
-        ttk.Label(proc_frame, text="Subject ID:").grid(row=0, column=4, padx=(10, 5))
-        self.subject_var = tk.StringVar(value="")
-        self.subject_var.trace_add("write", self._update_outdir)
-        ttk.Entry(proc_frame, textvariable=self.subject_var, width=15).grid(row=0, column=5)
+        clear_markers_btn = QPushButton("Clear Markers")
+        clear_markers_btn.clicked.connect(self._clear_all_markers)
+        trigger_hlayout.addWidget(clear_markers_btn)
+        trigger_hlayout.addStretch()
 
-        # Proc Row 1: workflow + output dir + execute
-        ttk.Label(proc_frame, text="Workflow:").grid(row=1, column=0, sticky=tk.W, padx=(0, 5), pady=(5, 0))
-        self.workflow_var = tk.StringVar(value="MRI")
-        self.workflow_var.trace_add("write", self._on_workflow_changed)
-        workflow_combo = ttk.Combobox(
-            proc_frame, textvariable=self.workflow_var,
-            values=["MRI", "cpap", "phase-contrast", "CT"],
-            state="readonly", width=14,
-        )
-        workflow_combo.grid(row=1, column=1, pady=(5, 0))
+        controls_layout.addWidget(trigger_group)
 
-        ttk.Label(proc_frame, text="Output Dir:").grid(row=1, column=2, padx=(10, 5), pady=(5, 0))
-        self.outdir_var = tk.StringVar(value=str(Path.cwd()))
-        ttk.Entry(proc_frame, textvariable=self.outdir_var).grid(
-            row=1, column=3, columnspan=2, sticky=tk.EW, pady=(5, 0),
-        )
-        proc_frame.columnconfigure(3, weight=1)  # output dir stretches
+        # -- Processing group --
+        proc_group = QGroupBox("Processing")
+        proc_grid = QGridLayout(proc_group)
 
-        ttk.Button(proc_frame, text="...", command=self._browse_outdir, width=3).grid(
-            row=1, column=5, padx=(5, 0), pady=(5, 0),
-        )
+        # Row 0: start/end time + subject ID
+        proc_grid.addWidget(QLabel("Start Time (s):"), 0, 0)
+        self.start_spin = QDoubleSpinBox()
+        self.start_spin.setRange(0, 99999)
+        self.start_spin.setDecimals(3)
+        self.start_spin.setSingleStep(0.001)
+        self.start_spin.setValue(0.0)
+        self.start_spin.setFixedWidth(100)
+        proc_grid.addWidget(self.start_spin, 0, 1)
 
-        self.execute_btn = ttk.Button(proc_frame, text="Execute", command=self._execute_processing)
-        self.execute_btn.grid(row=1, column=6, padx=(15, 0), pady=(5, 0))
+        proc_grid.addWidget(QLabel("End Time (s):"), 0, 2)
+        self.end_spin = QDoubleSpinBox()
+        self.end_spin.setRange(0, 99999)
+        self.end_spin.setDecimals(3)
+        self.end_spin.setSingleStep(0.001)
+        self.end_spin.setValue(0.0)
+        self.end_spin.setFixedWidth(100)
+        proc_grid.addWidget(self.end_spin, 0, 3)
 
-        # --- CT-specific controls (hidden by default) ---
-        self.ct_frame = ttk.LabelFrame(controls_frame, text="CT Step Trigger Controls", padding=5)
-        # Not packed yet — shown only when workflow == "CT"
+        proc_grid.addWidget(QLabel("Subject ID:"), 0, 4)
+        self.subject_edit = QLineEdit()
+        self.subject_edit.setFixedWidth(120)
+        self.subject_edit.textChanged.connect(self._update_outdir)
+        proc_grid.addWidget(self.subject_edit, 0, 5)
 
-        # Row 0: Detect Steps + Step selection
-        ttk.Button(self.ct_frame, text="Detect Steps", command=self._detect_steps).grid(
-            row=0, column=0, padx=(0, 10),
-        )
+        # Row 1: workflow + output dir + execute
+        proc_grid.addWidget(QLabel("Workflow:"), 1, 0)
+        self.workflow_combo = QComboBox()
+        self.workflow_combo.addItems(["MRI", "cpap", "phase-contrast", "CT"])
+        self.workflow_combo.setFixedWidth(120)
+        self.workflow_combo.currentTextChanged.connect(self._on_workflow_changed)
+        proc_grid.addWidget(self.workflow_combo, 1, 1)
 
-        ttk.Label(self.ct_frame, text="Step #:").grid(row=0, column=1, padx=(0, 5))
-        self.ct_step_var = tk.IntVar(value=1)
-        self.ct_step_spin = ttk.Spinbox(
-            self.ct_frame, from_=1, to=1, textvariable=self.ct_step_var, width=5,
-        )
-        self.ct_step_spin.grid(row=0, column=2, padx=(0, 10))
+        proc_grid.addWidget(QLabel("Output Dir:"), 1, 2)
+        self.outdir_edit = QLineEdit(str(Path.cwd()))
+        proc_grid.addWidget(self.outdir_edit, 1, 3, 1, 2)
+        proc_grid.setColumnStretch(3, 1)
 
-        ttk.Button(self.ct_frame, text="Select Step", command=self._select_ct_step).grid(
-            row=0, column=3, padx=(0, 10),
-        )
+        outdir_browse_btn = QPushButton("...")
+        outdir_browse_btn.setFixedWidth(30)
+        outdir_browse_btn.clicked.connect(self._browse_outdir)
+        proc_grid.addWidget(outdir_browse_btn, 1, 5)
 
-        ttk.Label(self.ct_frame, text="Temporal Res (ms):").grid(row=0, column=4, padx=(0, 5))
-        self.ct_temporal_res_var = tk.StringVar(value="200")
-        ttk.Entry(self.ct_frame, textvariable=self.ct_temporal_res_var, width=8).grid(
-            row=0, column=5, padx=(0, 10),
-        )
+        self.execute_btn = QPushButton("Execute")
+        self.execute_btn.clicked.connect(self._execute_processing)
+        proc_grid.addWidget(self.execute_btn, 1, 6)
 
-        ttk.Label(self.ct_frame, text="Total Images:").grid(row=0, column=6, padx=(0, 5))
-        self.ct_total_images_var = tk.StringVar(value="--")
-        ttk.Entry(self.ct_frame, textvariable=self.ct_total_images_var, width=6).grid(
-            row=0, column=7,
-        )
+        controls_layout.addWidget(proc_group)
+
+        # -- CT-specific controls (hidden by default) --
+        self.ct_group = QGroupBox("CT Step Trigger Controls")
+        ct_grid = QGridLayout(self.ct_group)
+
+        # Row 0: Detect Steps + Step selection + Temporal Res + Total Images
+        detect_steps_btn = QPushButton("Detect Steps")
+        detect_steps_btn.clicked.connect(self._detect_steps)
+        ct_grid.addWidget(detect_steps_btn, 0, 0)
+
+        ct_grid.addWidget(QLabel("Step #:"), 0, 1)
+        self.ct_step_spin = QSpinBox()
+        self.ct_step_spin.setRange(1, 1)
+        self.ct_step_spin.setValue(1)
+        self.ct_step_spin.setFixedWidth(60)
+        ct_grid.addWidget(self.ct_step_spin, 0, 2)
+
+        select_step_btn = QPushButton("Select Step")
+        select_step_btn.clicked.connect(self._select_ct_step)
+        ct_grid.addWidget(select_step_btn, 0, 3)
+
+        ct_grid.addWidget(QLabel("Temporal Res (ms):"), 0, 4)
+        self.ct_temporal_res_spin = QSpinBox()
+        self.ct_temporal_res_spin.setRange(10, 2000)
+        self.ct_temporal_res_spin.setSingleStep(10)
+        self.ct_temporal_res_spin.setValue(200)
+        self.ct_temporal_res_spin.setFixedWidth(70)
+        ct_grid.addWidget(self.ct_temporal_res_spin, 0, 5)
+
+        ct_grid.addWidget(QLabel("Total Images:"), 0, 6)
+        self.ct_total_images_spin = QSpinBox()
+        self.ct_total_images_spin.setRange(1, 500)
+        self.ct_total_images_spin.setValue(1)
+        self.ct_total_images_spin.setFixedWidth(60)
+        ct_grid.addWidget(self.ct_total_images_spin, 0, 7)
 
         # Row 1: Landmark buttons + time displays
-        ttk.Button(self.ct_frame, text="Mark Inhale Start", command=self._mark_inhale_start).grid(
-            row=1, column=0, pady=(5, 0), padx=(0, 5),
-        )
-        self.ct_inhale_var = tk.StringVar(value="--")
-        ttk.Label(self.ct_frame, textvariable=self.ct_inhale_var, width=12,
-                  relief=tk.SUNKEN, anchor=tk.CENTER).grid(row=1, column=1, columnspan=2, sticky=tk.W, pady=(5, 0))
+        mark_inhale_btn = QPushButton("Mark Inhale Start")
+        mark_inhale_btn.clicked.connect(self._mark_inhale_start)
+        ct_grid.addWidget(mark_inhale_btn, 1, 0)
 
-        ttk.Button(self.ct_frame, text="Mark Exhale End", command=self._mark_exhale_end).grid(
-            row=1, column=3, pady=(5, 0), padx=(0, 5),
-        )
-        self.ct_exhale_var = tk.StringVar(value="--")
-        ttk.Label(self.ct_frame, textvariable=self.ct_exhale_var, width=12,
-                  relief=tk.SUNKEN, anchor=tk.CENTER).grid(row=1, column=4, columnspan=2, sticky=tk.W, pady=(5, 0))
+        self.ct_inhale_label = QLabel("--")
+        self.ct_inhale_label.setFixedWidth(100)
+        self.ct_inhale_label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        self.ct_inhale_label.setAlignment(Qt.AlignCenter)
+        ct_grid.addWidget(self.ct_inhale_label, 1, 1, 1, 2)
 
-        ttk.Button(self.ct_frame, text="Clear Landmarks", command=self._clear_ct_landmarks).grid(
-            row=1, column=6, columnspan=2, pady=(5, 0),
-        )
+        mark_exhale_btn = QPushButton("Mark Exhale End")
+        mark_exhale_btn.clicked.connect(self._mark_exhale_end)
+        ct_grid.addWidget(mark_exhale_btn, 1, 3)
+
+        self.ct_exhale_label = QLabel("--")
+        self.ct_exhale_label.setFixedWidth(100)
+        self.ct_exhale_label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        self.ct_exhale_label.setAlignment(Qt.AlignCenter)
+        ct_grid.addWidget(self.ct_exhale_label, 1, 4, 1, 2)
+
+        clear_landmarks_btn = QPushButton("Clear Landmarks")
+        clear_landmarks_btn.clicked.connect(self._clear_ct_landmarks)
+        ct_grid.addWidget(clear_landmarks_btn, 1, 6, 1, 2)
 
         # Row 2: Start Shift (manual correction) + Apply button
-        ttk.Label(self.ct_frame, text="Start Shift (ms):").grid(row=2, column=0, pady=(5, 0))
-        self.ct_shift_var = tk.StringVar(value="0")
-        self.ct_shift_entry = ttk.Entry(
-            self.ct_frame, textvariable=self.ct_shift_var, width=6,
-        )
-        self.ct_shift_entry.grid(row=2, column=1, pady=(5, 0), sticky=tk.W)
+        ct_grid.addWidget(QLabel("Start Shift (ms):"), 2, 0)
+        self.ct_shift_spin = QSpinBox()
+        self.ct_shift_spin.setRange(0, 2000)
+        self.ct_shift_spin.setSingleStep(10)
+        self.ct_shift_spin.setValue(0)
+        self.ct_shift_spin.setFixedWidth(70)
+        self.ct_shift_spin.editingFinished.connect(self._on_shift_entry_changed)
+        ct_grid.addWidget(self.ct_shift_spin, 2, 1)
 
-        self.ct_shift_slider = tk.Scale(
-            self.ct_frame, from_=0, to=2000, orient=tk.HORIZONTAL,
-            resolution=10, length=200, showvalue=False,
-            command=self._on_shift_slider_changed,
-        )
-        self.ct_shift_slider.grid(row=2, column=2, columnspan=3, pady=(5, 0), sticky=tk.EW)
-        self.ct_shift_entry.bind("<Return>", self._on_shift_entry_changed)
+        self.ct_shift_slider = QSlider(Qt.Horizontal)
+        self.ct_shift_slider.setRange(0, 2000)
+        self.ct_shift_slider.setSingleStep(10)
+        self.ct_shift_slider.setPageStep(10)
+        self.ct_shift_slider.setValue(0)
+        self.ct_shift_slider.setMinimumWidth(200)
+        self.ct_shift_slider.valueChanged.connect(self._on_shift_slider_changed)
+        ct_grid.addWidget(self.ct_shift_slider, 2, 2, 1, 4)
 
-        ttk.Button(
-            self.ct_frame, text="Apply Correction", command=self._apply_ct_correction,
-        ).grid(row=2, column=6, columnspan=2, pady=(5, 0))
+        apply_correction_btn = QPushButton("Apply Correction")
+        apply_correction_btn.clicked.connect(self._apply_ct_correction)
+        ct_grid.addWidget(apply_correction_btn, 2, 6, 1, 2)
 
-    def _on_workflow_changed(self, *_args) -> None:
+        self.ct_group.setVisible(False)
+        controls_layout.addWidget(self.ct_group)
+
+        main_layout.addWidget(controls_widget, stretch=0)
+
+        # --- Status bar ---
+        self.status_bar = QStatusBar()
+        self.status_bar.showMessage("Ready")
+        self.setStatusBar(self.status_bar)
+
+    # ------------------------------------------------------------------
+    # Helpers for Tk-StringVar-like access (thin wrappers)
+    # ------------------------------------------------------------------
+
+    def _get_start_var(self) -> str:
+        return f"{self.start_spin.value():.3f}"
+
+    def _get_end_var(self) -> str:
+        return f"{self.end_spin.value():.3f}"
+
+    # ------------------------------------------------------------------
+    # Callbacks
+    # ------------------------------------------------------------------
+
+    def _on_workflow_changed(self, text: str) -> None:
         """Toggle CT controls visibility based on workflow selection."""
-        if self.workflow_var.get() == "CT":
-            self.ct_frame.pack(fill=tk.X, pady=(0, 5))
-        else:
-            self.ct_frame.pack_forget()
+        self.ct_group.setVisible(text == "CT")
 
     def _update_outdir(self, *_args) -> None:
         """Recompute output dir based on current mat file and subject."""
-        if not hasattr(self, "mat_filepath") or self.mat_filepath is None:
+        if self.mat_filepath is None:
             return
-        subject = self.subject_var.get().strip()
+        subject = self.subject_edit.text().strip()
         if subject:
             results_dir = self.mat_filepath.parent / f"FlowResults_{subject}"
         else:
             results_dir = self.mat_filepath.parent / "FlowResults"
-        self.outdir_var.set(str(results_dir))
+        self.outdir_edit.setText(str(results_dir))
 
     def _browse_file(self) -> None:
         """Open file dialog to select a .mat file."""
-        filepath = filedialog.askopenfilename(
-            title="Select LabChart .mat file",
-            filetypes=[("MAT files", "*.mat"), ("All files", "*.*")],
+        filepath, _ = QFileDialog.getOpenFileName(
+            self, "Select LabChart .mat file", "",
+            "MAT files (*.mat);;All files (*.*)",
         )
         if filepath:
             self.mat_filepath = Path(filepath)
-            self.file_var.set(str(self.mat_filepath))
+            self.file_label.setText(str(self.mat_filepath))
             self._update_outdir()
 
     def _browse_outdir(self) -> None:
         """Open directory dialog to select output directory."""
-        dirpath = filedialog.askdirectory(title="Select Output Directory")
+        dirpath = QFileDialog.getExistingDirectory(self, "Select Output Directory")
         if dirpath:
-            self.outdir_var.set(dirpath)
+            self.outdir_edit.setText(dirpath)
 
     def _disconnect_click(self) -> None:
         """Disconnect canvas click callback if connected."""
@@ -328,36 +399,36 @@ class FlowProfileApp:
     def _load_and_overview(self) -> None:
         """Load .mat file and show overview grid of all channels x blocks."""
         if self.mat_filepath is None:
-            messagebox.showwarning("No File", "Please select a .mat file first.")
+            QMessageBox.warning(self, "No File", "Please select a .mat file first.")
             return
 
         self._disconnect_click()
         self._time_markers.clear()
         self._trigger_times = np.array([])
         self._trigger_count = 0
-        self.total_triggers_var.set("--")
+        self.total_triggers_label.setText("--")
 
-        self.status_var.set(f"Loading {self.mat_filepath.name}...")
-        self.root.update_idletasks()
+        self.status_bar.showMessage(f"Loading {self.mat_filepath.name}...")
+        QApplication.processEvents()
 
         try:
             self.data = load_labchart_mat(self.mat_filepath)
         except Exception as e:
-            messagebox.showerror("Load Error", str(e))
-            self.status_var.set("Error loading file")
+            QMessageBox.critical(self, "Load Error", str(e))
+            self.status_bar.showMessage("Error loading file")
             return
 
         nch = self.data.num_channels
         nbl = self.data.num_blocks
 
         # Update spinbox ranges to match actual data dimensions
-        self.row_spin.configure(to=nch)
-        self.col_spin.configure(to=nbl)
+        self.row_spin.setMaximum(nch)
+        self.col_spin.setMaximum(nbl)
         # Clamp current values into valid range
-        if self.row_var.get() > nch:
-            self.row_var.set(nch)
-        if self.col_var.get() > nbl:
-            self.col_var.set(nbl)
+        if self.row_spin.value() > nch:
+            self.row_spin.setValue(nch)
+        if self.col_spin.value() > nbl:
+            self.col_spin.setValue(nbl)
 
         # Build overview grid
         self.fig.clear()
@@ -406,7 +477,7 @@ class FlowProfileApp:
         self.canvas.draw()
         self.toolbar.update()
 
-        self.status_var.set(
+        self.status_bar.showMessage(
             f"Overview: {nch} channels x {nbl} blocks | "
             f"Select row/col and click 'Plot Selected' for detail"
         )
@@ -414,29 +485,29 @@ class FlowProfileApp:
     def _plot_selected(self) -> None:
         """Plot a specific block in detail (flow + trigger top, flow-only bottom)."""
         if self.data is None:
-            messagebox.showwarning("No Data", "Please load a .mat file first (click 'Load Overview').")
+            QMessageBox.warning(self, "No Data", "Please load a .mat file first (click 'Load Overview').")
             return
 
-        row = self.row_var.get()
-        col = self.col_var.get()
+        row = self.row_spin.value()
+        col = self.col_spin.value()
 
         # Bounds check
         if row < 1 or row > self.data.num_channels:
-            messagebox.showwarning(
-                "Invalid Row",
+            QMessageBox.warning(
+                self, "Invalid Row",
                 f"Row must be between 1 and {self.data.num_channels}.",
             )
             return
         if col < 1 or col > self.data.num_blocks:
-            messagebox.showwarning(
-                "Invalid Column",
+            QMessageBox.warning(
+                self, "Invalid Column",
                 f"Column must be between 1 and {self.data.num_blocks}.",
             )
             return
 
         if self.data.is_block_empty(row, col):
-            messagebox.showwarning("Empty Block", f"Block [{row}, {col}] is empty.")
-            self.status_var.set("Block is empty")
+            QMessageBox.warning(self, "Empty Block", f"Block [{row}, {col}] is empty.")
+            self.status_bar.showMessage("Block is empty")
             return
 
         # Clean up previous state
@@ -459,7 +530,7 @@ class FlowProfileApp:
 
         trigger_row = row - 1
         has_trigger = trigger_row >= 1 and not self.data.is_block_empty(trigger_row, col)
-        is_ct = self.workflow_var.get() == "CT"
+        is_ct = self.workflow_combo.currentText() == "CT"
         if has_trigger:
             trigger = self.data.get_data(trigger_row, col)
             trigger_time = self.data.get_time(trigger_row, col)
@@ -504,7 +575,7 @@ class FlowProfileApp:
         # Connect click handler for data picker
         self._click_cid = self.canvas.mpl_connect("button_press_event", self._on_click)
 
-        self.status_var.set(
+        self.status_bar.showMessage(
             f"Block [{row}, {col}]: {len(time)} samples, {time[-1]:.2f}s{trigger_info} | "
             f"Left-click bottom plot to mark time, right-click to clear"
         )
@@ -514,7 +585,7 @@ class FlowProfileApp:
         if len(trigger_data) == 0:
             self._trigger_times = np.array([])
             self._trigger_count = 0
-            self.total_triggers_var.set("0")
+            self.total_triggers_label.setText("0")
             return
 
         # Find peaks: height at half-max, minimum distance between peaks
@@ -522,7 +593,7 @@ class FlowProfileApp:
         if max_val == 0:
             self._trigger_times = np.array([])
             self._trigger_count = 0
-            self.total_triggers_var.set("0")
+            self.total_triggers_label.setText("0")
             return
 
         height_threshold = 0.5 * max_val
@@ -534,15 +605,15 @@ class FlowProfileApp:
         self._trigger_count = len(peaks)
 
         # Update trigger UI
-        self.total_triggers_var.set(str(self._trigger_count))
+        self.total_triggers_label.setText(str(self._trigger_count))
         if self._trigger_count > 0:
-            self.start_trigger_spin.configure(to=self._trigger_count)
-            self.num_triggers_spin.configure(to=self._trigger_count)
+            self.start_trigger_spin.setMaximum(self._trigger_count)
+            self.num_triggers_spin.setMaximum(self._trigger_count)
             # Clamp values
-            if self.start_trigger_var.get() > self._trigger_count:
-                self.start_trigger_var.set(1)
-            if self.num_triggers_var.get() > self._trigger_count:
-                self.num_triggers_var.set(1)
+            if self.start_trigger_spin.value() > self._trigger_count:
+                self.start_trigger_spin.setValue(1)
+            if self.num_triggers_spin.value() > self._trigger_count:
+                self.num_triggers_spin.setValue(1)
 
         # Plot small markers on detected peaks
         if self._trigger_count > 0 and self.ax_top is not None:
@@ -562,8 +633,8 @@ class FlowProfileApp:
             return
 
         # Update step spinbox range
-        self.ct_step_spin.configure(to=len(self._ct_steps))
-        self.ct_step_var.set(1)
+        self.ct_step_spin.setMaximum(len(self._ct_steps))
+        self.ct_step_spin.setValue(1)
 
         # Draw step spans on the plot
         self._clear_ct_step_markers()
@@ -625,23 +696,20 @@ class FlowProfileApp:
         # Auto-populate Start/End Time from first two markers
         marker_count = len(self._time_markers)
         if marker_count == 1:
-            self.start_var.set(f"{x_time:.3f}")
+            self.start_spin.setValue(x_time)
         elif marker_count == 2:
-            self.end_var.set(f"{x_time:.3f}")
+            self.end_spin.setValue(x_time)
             # Ensure start < end
-            try:
-                s = float(self.start_var.get())
-                e = float(self.end_var.get())
-                if e < s:
-                    self.start_var.set(f"{e:.3f}")
-                    self.end_var.set(f"{s:.3f}")
-            except ValueError:
-                pass
+            s = self.start_spin.value()
+            e = self.end_spin.value()
+            if e < s:
+                self.start_spin.setValue(e)
+                self.end_spin.setValue(s)
 
         self.canvas.draw_idle()
-        self.status_var.set(
+        self.status_bar.showMessage(
             f"Marker {marker_count} at {x_time:.3f}s | "
-            f"Start={self.start_var.get()}s, End={self.end_var.get()}s"
+            f"Start={self._get_start_var()}s, End={self._get_end_var()}s"
         )
 
     def _clear_time_markers(self) -> None:
@@ -651,15 +719,15 @@ class FlowProfileApp:
                 artist.remove()
         self._time_markers.clear()
         self.canvas.draw_idle()
-        self.status_var.set("Time markers cleared")
+        self.status_bar.showMessage("Time markers cleared")
 
     def _mark_trigger_range(self) -> None:
         """Highlight selected trigger range on the top plot."""
         if self._trigger_count == 0:
-            messagebox.showwarning("No Triggers", "No triggers detected. Load a block with trigger data first.")
+            QMessageBox.warning(self, "No Triggers", "No triggers detected. Load a block with trigger data first.")
             return
         if self.ax_top is None:
-            messagebox.showwarning("No Plot", "Please click 'Plot Selected' first.")
+            QMessageBox.warning(self, "No Plot", "Please click 'Plot Selected' first.")
             return
 
         # Clear previous trigger range markers
@@ -667,17 +735,17 @@ class FlowProfileApp:
             artist.remove()
         self._trigger_markers.clear()
 
-        start_idx = self.start_trigger_var.get()  # 1-indexed
-        num_triggers = self.num_triggers_var.get()
+        start_idx = self.start_trigger_spin.value()  # 1-indexed
+        num_triggers = self.num_triggers_spin.value()
 
         # Validate range
         if start_idx < 1 or start_idx > self._trigger_count:
-            messagebox.showwarning("Invalid Start", f"Start trigger must be 1-{self._trigger_count}.")
+            QMessageBox.warning(self, "Invalid Start", f"Start trigger must be 1-{self._trigger_count}.")
             return
         end_idx = start_idx + num_triggers - 1
         if end_idx > self._trigger_count:
-            messagebox.showwarning(
-                "Out of Range",
+            QMessageBox.warning(
+                self, "Out of Range",
                 f"Only {self._trigger_count - start_idx + 1} triggers available from #{start_idx}.",
             )
             return
@@ -704,10 +772,10 @@ class FlowProfileApp:
         self.canvas.draw_idle()
 
         # Auto-populate Start/End Time
-        self.start_var.set(f"{t_start:.3f}")
-        self.end_var.set(f"{t_end:.3f}")
+        self.start_spin.setValue(t_start)
+        self.end_spin.setValue(t_end)
 
-        self.status_var.set(
+        self.status_bar.showMessage(
             f"Triggers: starting at #{start_idx}, counting {num_triggers} "
             f"(frames {start_idx}-{end_idx}) | "
             f"Time: {t_start:.3f}s - {t_end:.3f}s"
@@ -725,23 +793,23 @@ class FlowProfileApp:
         if self.ax_top is not None:
             self.ax_top.legend(loc="upper right", fontsize="small")
         self.canvas.draw_idle()
-        self.status_var.set("All markers cleared")
+        self.status_bar.showMessage("All markers cleared")
 
     def _detect_steps(self) -> None:
         """Detect step triggers in the trigger channel for CT workflow (button handler)."""
         if self.data is None:
-            messagebox.showwarning("No Data", "Please load a .mat file first.")
+            QMessageBox.warning(self, "No Data", "Please load a .mat file first.")
             return
         if self.ax_top is None:
-            messagebox.showwarning("No Plot", "Please click 'Plot Selected' first.")
+            QMessageBox.warning(self, "No Plot", "Please click 'Plot Selected' first.")
             return
 
-        row = self.row_var.get()
-        col = self.col_var.get()
+        row = self.row_spin.value()
+        col = self.col_spin.value()
         trigger_row = row - 1
 
         if trigger_row < 1 or self.data.is_block_empty(trigger_row, col):
-            messagebox.showwarning("No Trigger", "No trigger data found in the row above the flow channel.")
+            QMessageBox.warning(self, "No Trigger", "No trigger data found in the row above the flow channel.")
             return
 
         trigger_data = self.data.get_data(trigger_row, col)
@@ -750,11 +818,11 @@ class FlowProfileApp:
         self._detect_steps_from_data(trigger_data, trigger_time)
 
         if not self._ct_steps:
-            messagebox.showinfo("No Steps", "No step triggers detected.")
+            QMessageBox.information(self, "No Steps", "No step triggers detected.")
             return
 
         self.canvas.draw_idle()
-        self.status_var.set(f"Detected {len(self._ct_steps)} step trigger(s)")
+        self.status_bar.showMessage(f"Detected {len(self._ct_steps)} step trigger(s)")
 
     def _clear_ct_step_markers(self) -> None:
         """Remove step trigger visualization markers."""
@@ -765,12 +833,12 @@ class FlowProfileApp:
     def _select_ct_step(self) -> None:
         """Select a specific step trigger, draw interval lines, prepare for landmarks."""
         if not self._ct_steps:
-            messagebox.showwarning("No Steps", "Please detect steps first.")
+            QMessageBox.warning(self, "No Steps", "Please detect steps first.")
             return
 
-        step_num = self.ct_step_var.get()
+        step_num = self.ct_step_spin.value()
         if step_num < 1 or step_num > len(self._ct_steps):
-            messagebox.showwarning("Invalid Step", f"Step must be 1-{len(self._ct_steps)}.")
+            QMessageBox.warning(self, "Invalid Step", f"Step must be 1-{len(self._ct_steps)}.")
             return
 
         self._ct_selected_step = self._ct_steps[step_num - 1]
@@ -782,18 +850,18 @@ class FlowProfileApp:
 
         # Reset shift to 0 when selecting a new step (suppress callback to avoid
         # premature redraw with stale frame count before _draw_ct_intervals is called)
-        self.ct_shift_var.set("0")
-        self.ct_shift_slider.configure(command="")
-        self.ct_shift_slider.set(0)
+        self._suppress_shift_slider = True
+        self.ct_shift_spin.setValue(0)
+        self.ct_shift_slider.setValue(0)
         step_dur_ms = (step["end_time"] - step["start_time"]) * 1000.0
-        self.ct_shift_slider.configure(
-            to=max(int(step_dur_ms * 0.5), 500),
-            command=self._on_shift_slider_changed,
-        )
+        slider_max = max(int(step_dur_ms * 0.5), 500)
+        self.ct_shift_slider.setMaximum(slider_max)
+        self.ct_shift_spin.setMaximum(slider_max)
+        self._suppress_shift_slider = False
 
         # Auto-fill start/end time from step boundaries
-        self.start_var.set(f"{step['start_time']:.3f}")
-        self.end_var.set(f"{step['end_time']:.3f}")
+        self.start_spin.setValue(step["start_time"])
+        self.end_spin.setValue(step["end_time"])
 
         # Highlight selected step more prominently
         self._clear_ct_step_markers()
@@ -814,21 +882,21 @@ class FlowProfileApp:
         self._clear_ct_landmarks()
 
         self.canvas.draw_idle()
-        self.status_var.set(
+        self.status_bar.showMessage(
             f"Step {step_num} selected ({step['duration']:.2f}s, "
-            f"{self.ct_total_images_var.get()} images) | "
+            f"{self.ct_total_images_spin.value()} images) | "
             f"Use buttons to mark Inhale Start and Exhale End"
         )
 
     def _mark_inhale_start(self) -> None:
         """Activate click mode to place inhale start landmark."""
         self._ct_landmark_mode = "inhale_start"
-        self.status_var.set("Click on plot to mark INHALE START")
+        self.status_bar.showMessage("Click on plot to mark INHALE START")
 
     def _mark_exhale_end(self) -> None:
         """Activate click mode to place exhale end landmark."""
         self._ct_landmark_mode = "exhale_end"
-        self.status_var.set("Click on plot to mark EXHALE END")
+        self.status_bar.showMessage("Click on plot to mark EXHALE END")
 
     def _draw_ct_intervals(self, update_total_images_field: bool = True) -> None:
         """Draw temporal resolution interval lines within the step window.
@@ -846,28 +914,22 @@ class FlowProfileApp:
         # Clear previous interval artists
         self._clear_ct_interval_markers()
 
-        try:
-            temporal_res_ms = float(self.ct_temporal_res_var.get())
-            temporal_res_s = temporal_res_ms / 1000.0
-        except ValueError:
-            return
+        temporal_res_ms = self.ct_temporal_res_spin.value()
+        temporal_res_s = temporal_res_ms / 1000.0
 
         if temporal_res_s <= 0:
             return
 
         # Check for manual override: shift + manual frame count
-        try:
-            shift_ms = float(self.ct_shift_var.get())
-        except (ValueError, AttributeError):
-            shift_ms = 0.0
+        shift_ms = self.ct_shift_spin.value()
 
         try:
-            manual_frames = int(self.ct_total_images_var.get())
+            manual_frames = self.ct_total_images_spin.value()
         except (ValueError, TypeError):
             manual_frames = None
 
         if (manual_frames is not None and manual_frames > 0
-                and self._ct_detected_start is not None and shift_ms != 0.0):
+                and self._ct_detected_start is not None and shift_ms != 0):
             # Manual correction mode: use shifted start + user-specified frame count
             start_t = self._ct_detected_start + shift_ms / 1000.0
             num_lines = manual_frames
@@ -901,87 +963,73 @@ class FlowProfileApp:
 
         total_images = num_lines
         if update_total_images_field:
-            self.ct_total_images_var.set(str(total_images))
+            self.ct_total_images_spin.setValue(total_images)
 
         # Populate Trigger Info box only on step selection, not during slider preview
         if update_total_images_field:
-            self.total_triggers_var.set(str(total_images))
-            self.start_trigger_spin.configure(from_=1, to=total_images)
-            self.num_triggers_spin.configure(from_=1, to=total_images)
-            self.start_trigger_var.set(1)
-            self.num_triggers_var.set(total_images)
+            self.total_triggers_label.setText(str(total_images))
+            self.start_trigger_spin.setRange(1, total_images)
+            self.num_triggers_spin.setRange(1, total_images)
+            self.start_trigger_spin.setValue(1)
+            self.num_triggers_spin.setValue(total_images)
 
         self.canvas.draw_idle()
 
-    def _on_shift_slider_changed(self, value: str) -> None:
+    def _on_shift_slider_changed(self, value: int) -> None:
         """Sync slider value to entry and redraw interval lines as live preview."""
-        self.ct_shift_var.set(value)
+        if self._suppress_shift_slider:
+            return
+        self.ct_shift_spin.setValue(value)
         self._draw_ct_intervals(update_total_images_field=False)
 
-    def _on_shift_entry_changed(self, _event=None) -> None:
+    def _on_shift_entry_changed(self) -> None:
         """Sync entry value to slider and redraw interval lines."""
-        try:
-            val = float(self.ct_shift_var.get())
-            # Clamp to slider range to avoid desync
-            slider_min = float(self.ct_shift_slider.cget("from"))
-            slider_max = float(self.ct_shift_slider.cget("to"))
-            val = max(slider_min, min(val, slider_max))
-            self.ct_shift_var.set(str(int(val)))
-            # Suppress command callback to avoid double-redraw
-            self.ct_shift_slider.configure(command="")
-            self.ct_shift_slider.set(val)
-            self.ct_shift_slider.configure(command=self._on_shift_slider_changed)
-        except ValueError:
-            pass
+        val = self.ct_shift_spin.value()
+        # Clamp to slider range to avoid desync
+        slider_max = self.ct_shift_slider.maximum()
+        val = max(0, min(val, slider_max))
+        self.ct_shift_spin.setValue(val)
+        # Suppress slider callback to avoid double-redraw
+        self._suppress_shift_slider = True
+        self.ct_shift_slider.setValue(val)
+        self._suppress_shift_slider = False
         self._draw_ct_intervals(update_total_images_field=False)
 
     def _apply_ct_correction(self) -> None:
         """Apply manual correction: update start/end times from shift + frame count."""
         if self._ct_detected_start is None:
-            messagebox.showwarning("No Step", "Please select a step first.")
+            QMessageBox.warning(self, "No Step", "Please select a step first.")
             return
 
-        try:
-            shift_ms = float(self.ct_shift_var.get())
-        except ValueError:
-            messagebox.showwarning("Invalid Shift", "Start shift must be a number.")
-            return
+        shift_ms = self.ct_shift_spin.value()
 
-        try:
-            manual_frames = int(self.ct_total_images_var.get())
-        except (ValueError, TypeError):
-            messagebox.showwarning("Invalid Frames", "Total images must be an integer.")
-            return
-
+        manual_frames = self.ct_total_images_spin.value()
         if manual_frames < 1:
-            messagebox.showwarning("Invalid Frames", "Total images must be at least 1.")
+            QMessageBox.warning(self, "Invalid Frames", "Total images must be at least 1.")
             return
 
-        try:
-            temporal_res_ms = float(self.ct_temporal_res_var.get())
-            temporal_res_s = temporal_res_ms / 1000.0
-        except ValueError:
-            temporal_res_s = 0.2
+        temporal_res_ms = self.ct_temporal_res_spin.value()
+        temporal_res_s = temporal_res_ms / 1000.0
 
         # Compute corrected boundaries
         corrected_start = self._ct_detected_start + shift_ms / 1000.0
         corrected_end = corrected_start + (manual_frames - 1) * temporal_res_s
 
         # Update the processing fields
-        self.start_var.set(f"{corrected_start:.3f}")
-        self.end_var.set(f"{corrected_end:.3f}")
+        self.start_spin.setValue(corrected_start)
+        self.end_spin.setValue(corrected_end)
 
         # Update trigger info box with corrected frame count
-        self.total_triggers_var.set(str(manual_frames))
-        self.start_trigger_spin.configure(from_=1, to=manual_frames)
-        self.num_triggers_spin.configure(from_=1, to=manual_frames)
-        self.start_trigger_var.set(1)
-        self.num_triggers_var.set(manual_frames)
+        self.total_triggers_label.setText(str(manual_frames))
+        self.start_trigger_spin.setRange(1, manual_frames)
+        self.num_triggers_spin.setRange(1, manual_frames)
+        self.start_trigger_spin.setValue(1)
+        self.num_triggers_spin.setValue(manual_frames)
 
         # Redraw fencepost lines with corrected values
         self._draw_ct_intervals(update_total_images_field=False)
 
-        self.status_var.set(
+        self.status_bar.showMessage(
             f"Correction applied: start shifted +{shift_ms:.0f}ms, "
             f"{manual_frames} images, "
             f"window {corrected_start:.3f}s - {corrected_end:.3f}s"
@@ -1001,9 +1049,8 @@ class FlowProfileApp:
         self._ct_landmark_mode = None
         self._ct_inhale_start = None
         self._ct_exhale_end = None
-        if hasattr(self, "ct_inhale_var"):
-            self.ct_inhale_var.set("--")
-            self.ct_exhale_var.set("--")
+        self.ct_inhale_label.setText("--")
+        self.ct_exhale_label.setText("--")
         self.canvas.draw_idle()
 
     def _add_ct_landmark(self, x_time: float) -> None:
@@ -1015,7 +1062,7 @@ class FlowProfileApp:
             color = "magenta"
             label = "Inhale Start"
             self._ct_inhale_start = x_time
-            self.ct_inhale_var.set(f"{x_time:.3f} s")
+            self.ct_inhale_label.setText(f"{x_time:.3f} s")
 
             # Remove previous inhale markers if re-placing
             self._remove_ct_landmark_by_label("Inhale Start")
@@ -1031,13 +1078,13 @@ class FlowProfileApp:
 
             self._ct_landmark_mode = None  # Single-click mode done
             self.canvas.draw_idle()
-            self.status_var.set(f"Inhale start marked at {x_time:.3f}s")
+            self.status_bar.showMessage(f"Inhale start marked at {x_time:.3f}s")
 
         elif self._ct_landmark_mode == "exhale_end":
             color = "darkviolet"
             label = "Exhale End"
             self._ct_exhale_end = x_time
-            self.ct_exhale_var.set(f"{x_time:.3f} s")
+            self.ct_exhale_label.setText(f"{x_time:.3f} s")
 
             # Remove previous exhale markers if re-placing
             self._remove_ct_landmark_by_label("Exhale End")
@@ -1052,7 +1099,7 @@ class FlowProfileApp:
 
             self._ct_landmark_mode = None  # Single-click mode done
             self.canvas.draw_idle()
-            self.status_var.set(f"Exhale end marked at {x_time:.3f}s")
+            self.status_bar.showMessage(f"Exhale end marked at {x_time:.3f}s")
 
     def _remove_ct_landmark_by_label(self, label: str) -> None:
         """Remove existing landmark artists (lines and annotations) matching label."""
@@ -1070,48 +1117,41 @@ class FlowProfileApp:
         """Run the processing pipeline in a background thread."""
         # Validate inputs
         if self.data is None:
-            messagebox.showwarning("No Data", "Please load a .mat file first.")
+            QMessageBox.warning(self, "No Data", "Please load a .mat file first.")
             return
 
-        subject = self.subject_var.get().strip()
+        subject = self.subject_edit.text().strip()
         if not subject:
-            messagebox.showwarning("Missing Subject", "Please enter a Subject ID.")
+            QMessageBox.warning(self, "Missing Subject", "Please enter a Subject ID.")
             return
 
-        try:
-            start_time = float(self.start_var.get())
-            end_time = float(self.end_var.get())
-        except ValueError:
-            messagebox.showerror("Invalid Times", "Start and End times must be numbers.")
-            return
+        start_time = self.start_spin.value()
+        end_time = self.end_spin.value()
 
         if end_time <= start_time:
-            messagebox.showerror("Invalid Times", "End time must be greater than start time.")
+            QMessageBox.critical(self, "Invalid Times", "End time must be greater than start time.")
             return
 
-        row = self.row_var.get()
-        col = self.col_var.get()
-        workflow_name = self.workflow_var.get()
-        output_dir = Path(self.outdir_var.get())
+        row = self.row_spin.value()
+        col = self.col_spin.value()
+        workflow_name = self.workflow_combo.currentText()
+        output_dir = Path(self.outdir_edit.text())
 
         # Capture trigger info from main thread for the background thread
-        trigger_start = self.start_trigger_var.get()
-        trigger_num = self.num_triggers_var.get()
+        trigger_start = self.start_trigger_spin.value()
+        trigger_num = self.num_triggers_spin.value()
         trigger_total = self._trigger_count
 
         # Capture CT-specific state
         ct_inhale_start = self._ct_inhale_start
         ct_exhale_end = self._ct_exhale_end
         ct_selected_step = self._ct_selected_step
-        try:
-            ct_temporal_res_ms = float(self.ct_temporal_res_var.get())
-        except ValueError:
-            ct_temporal_res_ms = 200.0
+        ct_temporal_res_ms = float(self.ct_temporal_res_spin.value())
 
         # Disable button during processing
-        self.execute_btn.config(state=tk.DISABLED)
-        self.status_var.set("Processing...")
-        self.root.update_idletasks()
+        self.execute_btn.setEnabled(False)
+        self.status_bar.showMessage("Processing...")
+        QApplication.processEvents()
 
         def _run() -> None:
             try:
@@ -1147,16 +1187,16 @@ class FlowProfileApp:
                         ) + 1  # 1-based
 
                         if inhale_img <= exhale_img:
-                            # Normal: inhale LEFT of exhale → straight sequence
+                            # Normal: inhale LEFT of exhale -> straight sequence
                             selected_indices = list(range(inhale_img, exhale_img + 1))
                         else:
-                            # Wrapping: exhale LEFT of inhale → wrap around
+                            # Wrapping: exhale LEFT of inhale -> wrap around
                             selected_indices = (
                                 list(range(inhale_img, total_imgs + 1))
                                 + list(range(1, exhale_img + 1))
                             )
                     else:
-                        # No landmarks → use full range
+                        # No landmarks -> use full range
                         inhale_img = 1
                         exhale_img = total_imgs
                         selected_indices = list(range(1, total_imgs + 1))
@@ -1255,36 +1295,42 @@ class FlowProfileApp:
                 fig_export.savefig(str(plot_file))
 
                 # Update status on main thread
-                def _done():
-                    msg = f"Done! Saved: {flow_file}"
-                    if pressure_file:
-                        msg += f" and {pressure_file}"
-                    msg += f" and {trigger_file.name} and {plot_file.name}"
-                    msg += (
-                        f" | Duration: {result.time[-1]:.2f}s"
-                        f" | Rate: {result.sample_rate:.0f}Hz"
-                        f" | Samples: {len(result.time)}"
-                        f" | Drift: {result.drift_error:.6f}"
-                        f" | Time zeroed for STAR-CCM+"
-                    )
-                    self.status_var.set(msg)
-                    self.execute_btn.config(state=tk.NORMAL)
+                msg = f"Done! Saved: {flow_file}"
+                if pressure_file:
+                    msg += f" and {pressure_file}"
+                msg += f" and {trigger_file.name} and {plot_file.name}"
+                msg += (
+                    f" | Duration: {result.time[-1]:.2f}s"
+                    f" | Rate: {result.sample_rate:.0f}Hz"
+                    f" | Samples: {len(result.time)}"
+                    f" | Drift: {result.drift_error:.6f}"
+                    f" | Time zeroed for STAR-CCM+"
+                )
 
-                self.root.after(0, _done)
+                def _done():
+                    self.status_bar.showMessage(msg)
+                    self.execute_btn.setEnabled(True)
+
+                QTimer.singleShot(0, _done)
 
             except Exception as e:
-                def _error():
-                    messagebox.showerror("Processing Error", str(e))
-                    self.status_var.set(f"Error: {e}")
-                    self.execute_btn.config(state=tk.NORMAL)
+                error_msg = str(e)
 
-                self.root.after(0, _error)
+                def _error():
+                    QMessageBox.critical(self, "Processing Error", error_msg)
+                    self.status_bar.showMessage(f"Error: {error_msg}")
+                    self.execute_btn.setEnabled(True)
+
+                QTimer.singleShot(0, _error)
 
         Thread(target=_run, daemon=True).start()
 
 
 def launch_gui() -> None:
     """Launch the Flow Profile GUI application."""
-    root = tk.Tk()
-    FlowProfileApp(root)
-    root.mainloop()
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication(sys.argv)
+    window = FlowProfileApp()
+    window.show()
+    app.exec()

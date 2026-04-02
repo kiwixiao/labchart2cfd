@@ -460,6 +460,22 @@ def gui() -> None:
     - Interactive plot with zoom/pan for identifying breath windows
     - Time window input and processing controls
     """
+    import sys
+    import os
+
+    # macOS: must launch via 'open python.app' so macOS treats it as a real
+    # GUI app with keyboard focus. Use env var to prevent infinite relaunch.
+    if (sys.platform == "darwin"
+            and os.environ.get("LABCHART2CFD_GUI") != "1"):
+        env_dir = os.path.dirname(os.path.dirname(sys.executable))
+        python_app = os.path.join(env_dir, "python.app")
+        if os.path.isdir(python_app):
+            os.execlp(
+                "open", "open",
+                "--env", "LABCHART2CFD_GUI=1",
+                python_app, "--args", "-m", "labchart2cfd", "gui",
+            )
+
     from labchart2cfd.gui.app import launch_gui
     launch_gui()
 
