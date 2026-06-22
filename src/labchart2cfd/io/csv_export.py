@@ -38,7 +38,7 @@ def export_flow_csv(filepath, time, mass_flow, precision=5):
         lines.append("{},{}".format(fmt % t, fmt % m))
 
     # Write with Windows line endings (as MATLAB's fprintf does)
-    with open(str(filepath), "w") as f:
+    with open(str(filepath), "w", newline="") as f:
         f.write("\r\n".join(lines) + "\r\n")
 
     return filepath
@@ -69,7 +69,40 @@ def export_pressure_csv(filepath, time, pressure, precision=5):
         lines.append("{},{}".format(fmt % t, fmt % p))
 
     # Write with Windows line endings
-    with open(str(filepath), "w") as f:
+    with open(str(filepath), "w", newline="") as f:
+        f.write("\r\n".join(lines) + "\r\n")
+
+    return filepath
+
+
+def export_reorder_map_csv(filepath, reorder_map, precision=5):
+    # type: (Union[str, Path], list, int) -> Path
+    """Export the CT image reorder map to a Star-CCM+ style CSV.
+
+    The map tells you, for each position in the assembled synthetic profile,
+    which original image number it came from — so the CT image stack can be
+    re-aligned to the synthetic breathing cycle.
+
+    Args:
+        filepath: Output file path.
+        reorder_map: List of (new_frame, original_image, original_time_s) rows.
+        precision: Decimal precision for the time column.
+
+    Returns:
+        Path to the created file.
+    """
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    header = "new_frame,original_image,original_time_s"
+    fmt = "%.{}f".format(precision)
+    lines = [header]
+    for new_frame, original_image, original_time_s in reorder_map:
+        lines.append(
+            "{},{},{}".format(int(new_frame), int(original_image), fmt % original_time_s)
+        )
+
+    with open(str(filepath), "w", newline="") as f:
         f.write("\r\n".join(lines) + "\r\n")
 
     return filepath
@@ -105,7 +138,7 @@ def export_generic_csv(filepath, time, data, data_header, precision=5):
         lines.append("{},{}".format(fmt % t, fmt % d))
 
     # Write with Windows line endings
-    with open(str(filepath), "w") as f:
+    with open(str(filepath), "w", newline="") as f:
         f.write("\r\n".join(lines) + "\r\n")
 
     return filepath

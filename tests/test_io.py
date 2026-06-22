@@ -14,6 +14,7 @@ from labchart2cfd.io.csv_export import (
     export_flow_csv,
     export_pressure_csv,
     export_generic_csv,
+    export_reorder_map_csv,
 )
 
 
@@ -78,18 +79,38 @@ class TestCSVExport:
             assert header == '"time (s)","Pressure (Pa)"'
 
     def test_export_csv_line_endings(self):
-        """CSV should use Windows line endings (CRLF)."""
+        """CSV uses CRLF exactly — never the doubled \\r\\r\\n Windows produced."""
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = Path(tmpdir) / "test.csv"
-            time = np.array([0.0])
-            flow = np.array([0.001])
+            time = np.array([0.0, 0.1, 0.2])
+            flow = np.array([0.001, 0.002, 0.003])
 
             export_flow_csv(filepath, time, flow)
 
             with open(filepath, "rb") as f:
                 content = f.read()
 
-            assert b"\r\n" in content
+            # 1 header + 3 data rows, each terminated by exactly one CRLF
+            assert content.count(b"\r\n") == 4
+            assert b"\r\r\n" not in content
+            # no bare CR left once CRLFs are removed
+            assert b"\r" not in content.replace(b"\r\n", b"")
+
+    def test_export_reorder_map_csv(self):
+        """Reorder map writes header + (new_frame, original_image, time) rows."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "map.csv"
+            reorder_map = [(1, 4, 0.6), (2, 5, 0.8), (3, 1, 0.0)]
+
+            export_reorder_map_csv(filepath, reorder_map)
+
+            with open(filepath, "rb") as f:
+                content = f.read()
+            lines = content.decode().split("\r\n")
+            assert lines[0] == "new_frame,original_image,original_time_s"
+            assert lines[1] == "1,4,0.60000"
+            assert lines[3] == "3,1,0.00000"
+            assert b"\r\r\n" not in content
 
     def test_export_generic_csv_custom_header(self):
         """Generic CSV export should use custom header."""
