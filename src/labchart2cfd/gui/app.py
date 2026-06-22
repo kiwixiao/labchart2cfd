@@ -29,9 +29,35 @@ from PyQt5.QtWidgets import (
     QGroupBox, QLabel, QPushButton, QLineEdit, QComboBox,
     QSpinBox, QDoubleSpinBox, QSlider, QFileDialog, QMessageBox,
     QStatusBar, QGridLayout, QSizePolicy, QFrame,
+    QCheckBox, QListWidget, QListWidgetItem, QInputDialog, QDialog,
 )
 
 from labchart2cfd.io.labchart import LabChartData, load_labchart_mat
+from labchart2cfd.processing.profile_assembly import ProfilePart, assemble_parts
+
+
+class AssemblyPreviewDialog(QDialog):
+    """Popup showing the assembled synthetic flow profile."""
+
+    def __init__(self, time, flow, n_images, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Synthetic Profile Preview")
+        self.resize(640, 420)
+        layout = QVBoxLayout(self)
+        fig = Figure(figsize=(6, 3.5))
+        canvas = FigureCanvasQTAgg(fig)
+        ax = fig.add_subplot(111)
+        ax.plot(time, flow, "b-", linewidth=0.8)
+        ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
+        ax.set_xlabel("Synthetic time (s)")
+        ax.set_ylabel("Mass flow (kg/s)")
+        ax.set_title(f"Assembled profile: {len(flow)} samples, {n_images} images")
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        layout.addWidget(canvas)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
 
 
 class FlowProfileApp(QMainWindow):
@@ -51,6 +77,7 @@ class FlowProfileApp(QMainWindow):
         # Axes references (set during _plot_selected)
         self.ax_top = None
         self.ax_bottom = None
+        self.ax_top_trig = None  # twin y-axis for trigger (separate scale from flow)
 
         # Trigger detection state
         self._trigger_times: np.ndarray = np.array([])
@@ -73,6 +100,19 @@ class FlowProfileApp(QMainWindow):
         self._ct_detected_start: Optional[float] = None  # original auto-detected start
         self._ct_detected_end: Optional[float] = None    # original auto-detected end
 
+        # CT cycle-labeling state (independent alternative to inhale/exhale trim)
+        self._ct_cycle_mode: bool = False
+        self._ct_cycle_frames: list = []  # original image indices in click order
+        self._ct_cycle_artists: list = []  # artists for green numbered labels
+
+        # Full-manual synthetic-profile state (window + ordered parts)
+        self._synth_mode: bool = False
+        self._parts: List[ProfilePart] = []      # ordered parts = assembly order
+        self._part_artists: list = []            # span + number artists per part
+        self._grid_artists: list = []            # fencepost grid lines + numbers
+        self._capturing_part: bool = False       # collecting 2 clicks for a part
+        self._part_click_buffer: List[int] = []  # snapped image #s during capture
+
         # Internal flag to suppress slider callback during programmatic changes
         self._suppress_shift_slider = False
 
@@ -89,7 +129,7 @@ class FlowProfileApp(QMainWindow):
         plot_group = QGroupBox("Flow & Trigger Signals")
         plot_layout = QVBoxLayout(plot_group)
 
-        self.fig = Figure(figsize=(12, 6), dpi=100)
+        self.fig = Figure(figsize=(12, 6), dpi=100, constrained_layout=True)
         # Show placeholder text instead of pre-created axes
         self.fig.text(
             0.5, 0.5, "Load a .mat file and click 'Load Overview' to begin",
@@ -125,23 +165,40 @@ class FlowProfileApp(QMainWindow):
         file_grid.addWidget(browse_btn, 0, 2)
         file_grid.setColumnStretch(1, 1)
 
-        # Row 1: row/col spinboxes + Load Overview + Plot Selected
-        file_grid.addWidget(QLabel("Row:"), 1, 0)
+        # Row 1: channel assignment (flow/trigger/pressure rows) + column
+        file_grid.addWidget(QLabel("Channels:"), 1, 0)
         spin_widget = QWidget()
         spin_hlayout = QHBoxLayout(spin_widget)
         spin_hlayout.setContentsMargins(0, 0, 0, 0)
 
-        self.row_spin = QSpinBox()
-        self.row_spin.setRange(1, 20)
-        self.row_spin.setValue(2)
-        self.row_spin.setFixedWidth(60)
-        spin_hlayout.addWidget(self.row_spin)
+        spin_hlayout.addWidget(QLabel("Flow Row:"))
+        self.flow_row_spin = QSpinBox()
+        self.flow_row_spin.setRange(1, 20)
+        self.flow_row_spin.setValue(2)
+        self.flow_row_spin.setFixedWidth(55)
+        spin_hlayout.addWidget(self.flow_row_spin)
+
+        spin_hlayout.addWidget(QLabel("  Trigger Row:"))
+        self.trigger_row_spin = QSpinBox()
+        self.trigger_row_spin.setRange(0, 20)  # 0 = no trigger
+        self.trigger_row_spin.setValue(1)
+        self.trigger_row_spin.setSpecialValueText("none")
+        self.trigger_row_spin.setFixedWidth(65)
+        spin_hlayout.addWidget(self.trigger_row_spin)
+
+        spin_hlayout.addWidget(QLabel("  Pressure Row:"))
+        self.pressure_row_spin = QSpinBox()
+        self.pressure_row_spin.setRange(0, 20)  # 0 = no pressure export
+        self.pressure_row_spin.setValue(4)
+        self.pressure_row_spin.setSpecialValueText("none")
+        self.pressure_row_spin.setFixedWidth(65)
+        spin_hlayout.addWidget(self.pressure_row_spin)
 
         spin_hlayout.addWidget(QLabel("  Column:"))
         self.col_spin = QSpinBox()
         self.col_spin.setRange(1, 20)
         self.col_spin.setValue(3)
-        self.col_spin.setFixedWidth(60)
+        self.col_spin.setFixedWidth(55)
         spin_hlayout.addWidget(self.col_spin)
 
         load_overview_btn = QPushButton("Load Overview")
@@ -334,8 +391,84 @@ class FlowProfileApp(QMainWindow):
         apply_correction_btn.clicked.connect(self._apply_ct_correction)
         ct_grid.addWidget(apply_correction_btn, 2, 6, 1, 2)
 
+        # Row 3: Cycle frame labeling (alternative to inhale/exhale trim)
+        ct_grid.addWidget(QLabel("Cycle:"), 3, 0)
+        self.cycle_mode_btn = QPushButton("Label Cycle Frames")
+        self.cycle_mode_btn.setCheckable(True)
+        self.cycle_mode_btn.setToolTip(
+            "Toggle: click fenceposts in order to build a breathing cycle. "
+            "Right-click removes the most recent label. Overrides inhale/exhale trim on export."
+        )
+        self.cycle_mode_btn.toggled.connect(self._on_cycle_mode_toggled)
+        ct_grid.addWidget(self.cycle_mode_btn, 3, 1, 1, 2)
+
+        self.cycle_count_label = QLabel("0 frames")
+        self.cycle_count_label.setFixedWidth(100)
+        self.cycle_count_label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        self.cycle_count_label.setAlignment(Qt.AlignCenter)
+        ct_grid.addWidget(self.cycle_count_label, 3, 3)
+
+        clear_cycle_btn = QPushButton("Clear Cycle Labels")
+        clear_cycle_btn.clicked.connect(self._clear_cycle_labels)
+        ct_grid.addWidget(clear_cycle_btn, 3, 4, 1, 2)
+
+        self.cycle_seq_label = QLabel("seq: —")
+        self.cycle_seq_label.setToolTip("Original image indices in click order")
+        ct_grid.addWidget(self.cycle_seq_label, 3, 6, 1, 2)
+
         self.ct_group.setVisible(False)
         controls_layout.addWidget(self.ct_group)
+
+        # ---- Full-manual synthetic-profile controls (shown with CT) ----
+        self.synth_group = QGroupBox("Synthetic Profile (Full Manual)")
+        synth_layout = QVBoxLayout(self.synth_group)
+
+        srow1 = QHBoxLayout()
+        self.synth_enable_chk = QCheckBox("Enable full-manual mode")
+        self.synth_enable_chk.setToolTip(
+            "Use Start/End (above) as the window and Temporal Res for the image "
+            "grid; click image frames to build ordered parts; assemble a "
+            "synthetic breathing profile + image reorder map."
+        )
+        self.synth_enable_chk.toggled.connect(self._on_synth_mode_toggled)
+        srow1.addWidget(self.synth_enable_chk)
+        show_grid_btn = QPushButton("Show Image Grid")
+        show_grid_btn.clicked.connect(self._draw_synth_grid)
+        srow1.addWidget(show_grid_btn)
+        self.synth_grid_label = QLabel("images: —")
+        srow1.addWidget(self.synth_grid_label)
+        srow1.addStretch(1)
+        synth_layout.addLayout(srow1)
+
+        srow2 = QHBoxLayout()
+        add_part_btn = QPushButton("Add Part (click 2 frames)")
+        add_part_btn.clicked.connect(self._arm_add_part)
+        srow2.addWidget(add_part_btn)
+        for _text, _slot in [
+            ("Up", self._move_part_up), ("Down", self._move_part_down),
+            ("Edit Label", self._edit_part_label), ("Delete", self._delete_part),
+            ("Clear All", self._clear_parts),
+        ]:
+            _b = QPushButton(_text)
+            _b.clicked.connect(_slot)
+            srow2.addWidget(_b)
+        synth_layout.addLayout(srow2)
+
+        self.parts_list = QListWidget()
+        self.parts_list.setMaximumHeight(110)
+        synth_layout.addWidget(self.parts_list)
+
+        srow3 = QHBoxLayout()
+        assemble_btn = QPushButton("Assemble && Export")
+        assemble_btn.clicked.connect(self._assemble_and_export)
+        srow3.addWidget(assemble_btn)
+        self.synth_status_label = QLabel("no parts")
+        srow3.addWidget(self.synth_status_label)
+        srow3.addStretch(1)
+        synth_layout.addLayout(srow3)
+
+        self.synth_group.setVisible(False)
+        controls_layout.addWidget(self.synth_group)
 
         main_layout.addWidget(controls_widget, stretch=0)
 
@@ -360,7 +493,11 @@ class FlowProfileApp(QMainWindow):
 
     def _on_workflow_changed(self, text: str) -> None:
         """Toggle CT controls visibility based on workflow selection."""
-        self.ct_group.setVisible(text == "CT")
+        is_ct = text == "CT"
+        self.ct_group.setVisible(is_ct)
+        self.synth_group.setVisible(is_ct)
+        if not is_ct and self.synth_enable_chk.isChecked():
+            self.synth_enable_chk.setChecked(False)
 
     def _update_outdir(self, *_args) -> None:
         """Recompute output dir based on current mat file and subject."""
@@ -396,17 +533,53 @@ class FlowProfileApp(QMainWindow):
             self.canvas.mpl_disconnect(self._click_cid)
             self._click_cid = None
 
+    def _reset_plot_state(self) -> None:
+        """Drop references to old plot artists and reset trigger/CT state.
+
+        Call this before ``fig.clear()`` or any replot. Lists are reassigned to
+        ``[]`` rather than ``.clear()``-ed because ``fig.clear()`` invalidates
+        the artists; later ``artist.remove()`` calls would raise and abort the
+        replot (symptom: GUI stops drawing after switching blocks).
+        """
+        self._disconnect_click()
+        self._time_markers = []
+        self._trigger_markers = []
+        self._ct_step_markers = []
+        self._ct_interval_markers = []
+        self._ct_landmark_artists = []
+        self._trigger_times = np.array([])
+        self._trigger_count = 0
+        self._ct_steps = []
+        self._ct_selected_step = None
+        self._ct_inhale_start = None
+        self._ct_exhale_end = None
+        self._ct_detected_start = None
+        self._ct_detected_end = None
+        self._ct_landmark_mode = None
+        # Cycle labeling state (new mode, independent from landmarks)
+        self._ct_cycle_frames = []
+        self._ct_cycle_artists = []
+        # Do not change self._ct_cycle_mode — it's a UI toggle, user controls it.
+        # Full-manual synthetic-profile artists become invalid after fig.clear();
+        # drop the references but keep self._parts (the user's labeling data) and
+        # the UI toggle. Grid/overlay are redrawn on demand via "Show Image Grid".
+        self._grid_artists = []
+        self._part_artists = []
+        self._capturing_part = False
+        self._part_click_buffer = []
+        self.total_triggers_label.setText("--")
+        self.ct_inhale_label.setText("--")
+        self.ct_exhale_label.setText("--")
+        if hasattr(self, "cycle_count_label"):
+            self.cycle_count_label.setText("0 frames")
+
     def _load_and_overview(self) -> None:
         """Load .mat file and show overview grid of all channels x blocks."""
         if self.mat_filepath is None:
             QMessageBox.warning(self, "No File", "Please select a .mat file first.")
             return
 
-        self._disconnect_click()
-        self._time_markers.clear()
-        self._trigger_times = np.array([])
-        self._trigger_count = 0
-        self.total_triggers_label.setText("--")
+        self._reset_plot_state()
 
         self.status_bar.showMessage(f"Loading {self.mat_filepath.name}...")
         QApplication.processEvents()
@@ -422,11 +595,17 @@ class FlowProfileApp(QMainWindow):
         nbl = self.data.num_blocks
 
         # Update spinbox ranges to match actual data dimensions
-        self.row_spin.setMaximum(nch)
+        self.flow_row_spin.setMaximum(nch)
+        self.trigger_row_spin.setMaximum(nch)  # 0 still allowed (= none)
+        self.pressure_row_spin.setMaximum(nch)  # 0 still allowed (= none)
         self.col_spin.setMaximum(nbl)
         # Clamp current values into valid range
-        if self.row_spin.value() > nch:
-            self.row_spin.setValue(nch)
+        if self.flow_row_spin.value() > nch:
+            self.flow_row_spin.setValue(nch)
+        if self.trigger_row_spin.value() > nch:
+            self.trigger_row_spin.setValue(nch)
+        if self.pressure_row_spin.value() > nch:
+            self.pressure_row_spin.setValue(nch)
         if self.col_spin.value() > nbl:
             self.col_spin.setValue(nbl)
 
@@ -435,6 +614,7 @@ class FlowProfileApp(QMainWindow):
         self._plot_mode = "overview"
         self.ax_top = None
         self.ax_bottom = None
+        self.ax_top_trig = None
 
         axes = []
         for ch_idx in range(nch):
@@ -468,12 +648,6 @@ class FlowProfileApp(QMainWindow):
                 row_axes.append(ax)
             axes.append(row_axes)
 
-        try:
-            self.fig.subplots_adjust(hspace=0.4, wspace=0.3)
-            self.fig.tight_layout()
-        except Exception:
-            self.fig.subplots_adjust(hspace=0.4, wspace=0.3)
-
         self.canvas.draw()
         self.toolbar.update()
 
@@ -488,14 +662,22 @@ class FlowProfileApp(QMainWindow):
             QMessageBox.warning(self, "No Data", "Please load a .mat file first (click 'Load Overview').")
             return
 
-        row = self.row_spin.value()
+        flow_row = self.flow_row_spin.value()
+        trigger_row = self.trigger_row_spin.value()  # 0 = none
         col = self.col_spin.value()
+        nch = self.data.num_channels
 
         # Bounds check
-        if row < 1 or row > self.data.num_channels:
+        if flow_row < 1 or flow_row > nch:
             QMessageBox.warning(
-                self, "Invalid Row",
-                f"Row must be between 1 and {self.data.num_channels}.",
+                self, "Invalid Flow Row",
+                f"Flow Row must be between 1 and {nch}.",
+            )
+            return
+        if trigger_row > nch:
+            QMessageBox.warning(
+                self, "Invalid Trigger Row",
+                f"Trigger Row must be 0 (none) or between 1 and {nch}.",
             )
             return
         if col < 1 or col > self.data.num_blocks:
@@ -505,18 +687,16 @@ class FlowProfileApp(QMainWindow):
             )
             return
 
-        if self.data.is_block_empty(row, col):
-            QMessageBox.warning(self, "Empty Block", f"Block [{row}, {col}] is empty.")
+        if self.data.is_block_empty(flow_row, col):
+            QMessageBox.warning(self, "Empty Block", f"Flow block [{flow_row}, {col}] is empty.")
             self.status_bar.showMessage("Block is empty")
             return
 
-        # Clean up previous state
-        self._disconnect_click()
-        self._time_markers.clear()
-        self._trigger_markers.clear()
+        # Clean up previous state (safe to call before fig.clear)
+        self._reset_plot_state()
 
-        time = self.data.get_time(row, col)
-        flow = self.data.get_data(row, col)
+        time = self.data.get_time(flow_row, col)
+        flow = self.data.get_data(flow_row, col)
 
         # Recreate detail axes with shared x-axis
         self.fig.clear()
@@ -524,17 +704,21 @@ class FlowProfileApp(QMainWindow):
 
         self.ax_top = self.fig.add_subplot(211)
         self.ax_bottom = self.fig.add_subplot(212, sharex=self.ax_top)
+        self.ax_top_trig = None
 
-        # Top subplot: flow + trigger overlay
+        # Top subplot: flow on primary y-axis
         self.ax_top.plot(time, flow, "b-", linewidth=0.5, label="flow info")
 
-        trigger_row = row - 1
         has_trigger = trigger_row >= 1 and not self.data.is_block_empty(trigger_row, col)
         is_ct = self.workflow_combo.currentText() == "CT"
         if has_trigger:
             trigger = self.data.get_data(trigger_row, col)
             trigger_time = self.data.get_time(trigger_row, col)
-            self.ax_top.plot(trigger_time, trigger, "r-", linewidth=0.5, label="trigger info")
+            # Trigger on twin y-axis: different amplitude range won't squeeze flow.
+            self.ax_top_trig = self.ax_top.twinx()
+            self.ax_top_trig.plot(trigger_time, trigger, "r-", linewidth=0.5, label="trigger info")
+            self.ax_top_trig.set_ylabel("Trigger", color="red")
+            self.ax_top_trig.tick_params(axis="y", labelcolor="red")
 
             if is_ct:
                 # CT uses step (bridge) detection, not pulsatile peak detection
@@ -554,10 +738,12 @@ class FlowProfileApp(QMainWindow):
         else:
             trigger_info = ""
         self.ax_top.set_title(
-            f"{self.mat_filepath.name} — Block [{row}, {col}]: Flow + Trigger{trigger_info}"
+            f"{self.mat_filepath.name} — Flow [{flow_row}, {col}]"
+            f"{f' + Trigger [{trigger_row}, {col}]' if has_trigger else ''}"
+            f"{trigger_info}"
         )
         self.ax_top.grid(True, alpha=0.3)
-        self.ax_top.legend(loc="upper right", fontsize="small")
+        self._refresh_top_legend()
 
         # Bottom subplot: flow only (for zoom/selection)
         self.ax_bottom.plot(time, flow, "b-", linewidth=0.5)
@@ -568,7 +754,6 @@ class FlowProfileApp(QMainWindow):
         self.ax_bottom.grid(True, alpha=0.3)
         self.ax_bottom.format_coord = lambda x, y: f"time={x:.3f}s, flow={y:.4f}"
 
-        self.fig.tight_layout()
         self.canvas.draw()
         self.toolbar.update()
 
@@ -576,9 +761,21 @@ class FlowProfileApp(QMainWindow):
         self._click_cid = self.canvas.mpl_connect("button_press_event", self._on_click)
 
         self.status_bar.showMessage(
-            f"Block [{row}, {col}]: {len(time)} samples, {time[-1]:.2f}s{trigger_info} | "
+            f"Flow [{flow_row}, {col}]: {len(time)} samples, {time[-1]:.2f}s{trigger_info} | "
             f"Left-click bottom plot to mark time, right-click to clear"
         )
+
+    def _refresh_top_legend(self) -> None:
+        """Combine handles from ax_top and ax_top_trig into one legend."""
+        if self.ax_top is None:
+            return
+        handles, labels = self.ax_top.get_legend_handles_labels()
+        if self.ax_top_trig is not None:
+            h2, l2 = self.ax_top_trig.get_legend_handles_labels()
+            handles.extend(h2)
+            labels.extend(l2)
+        if handles:
+            self.ax_top.legend(handles, labels, loc="upper right", fontsize="small")
 
     def _detect_triggers(self, trigger_data: np.ndarray, trigger_time: np.ndarray) -> None:
         """Detect trigger pulses and update UI."""
@@ -615,13 +812,14 @@ class FlowProfileApp(QMainWindow):
             if self.num_triggers_spin.value() > self._trigger_count:
                 self.num_triggers_spin.setValue(1)
 
-        # Plot small markers on detected peaks
+        # Plot small markers on detected peaks (on trigger axis so y-scale matches)
         if self._trigger_count > 0 and self.ax_top is not None:
-            self.ax_top.plot(
+            trig_ax = self.ax_top_trig if self.ax_top_trig is not None else self.ax_top
+            trig_ax.plot(
                 trigger_time[peaks], trigger_data[peaks],
                 "rv", markersize=4, label=f"triggers ({self._trigger_count})",
             )
-            self.ax_top.legend(loc="upper right", fontsize="small")
+            self._refresh_top_legend()
 
     def _detect_steps_from_data(self, trigger_data: np.ndarray, trigger_time: np.ndarray) -> None:
         """Detect step (bridge) triggers from raw data and update CT UI."""
@@ -656,19 +854,30 @@ class FlowProfileApp(QMainWindow):
         """Handle mouse click on the canvas for data picker."""
         if self._plot_mode != "selected":
             return
-        if event.inaxes not in (self.ax_top, self.ax_bottom):
+        # Include ax_top_trig (twin y-axis) so clicks over the trigger curve also register.
+        valid_axes = (self.ax_top, self.ax_bottom, self.ax_top_trig)
+        if event.inaxes not in valid_axes or event.inaxes is None:
             return
         # Ignore clicks when toolbar is in zoom/pan mode
         if self.toolbar.mode:
             return
 
-        if event.button == 1:  # Left click — add marker
-            if self._ct_landmark_mode is not None:
+        if event.button == 1:  # Left click
+            if self._capturing_part:
+                self._capture_part_click(event.xdata)
+            elif self._ct_cycle_mode:
+                self._add_cycle_label(event.xdata)
+            elif self._ct_landmark_mode is not None:
                 self._add_ct_landmark(event.xdata)
             else:
                 self._add_time_marker(event.xdata)
-        elif event.button == 3:  # Right click — clear all markers
-            self._clear_time_markers()
+        elif event.button == 3:  # Right click
+            if self._capturing_part:
+                self._cancel_part_capture()
+            elif self._ct_cycle_mode:
+                self._remove_last_cycle_label()
+            else:
+                self._clear_time_markers()
 
     def _add_time_marker(self, x_time: float) -> None:
         """Add a vertical time marker on both top and bottom plots."""
@@ -768,7 +977,7 @@ class FlowProfileApp(QMainWindow):
         span_b = self.ax_bottom.axvspan(t_start, t_end, alpha=0.1, color="green")
         self._trigger_markers.append(span_b)
 
-        self.ax_top.legend(loc="upper right", fontsize="small")
+        self._refresh_top_legend()
         self.canvas.draw_idle()
 
         # Auto-populate Start/End Time
@@ -790,8 +999,9 @@ class FlowProfileApp(QMainWindow):
         self._clear_ct_step_markers()
         self._clear_ct_interval_markers()
         self._clear_ct_landmarks()
+        self._clear_cycle_labels()  # drop stale cycle frames + artists
         if self.ax_top is not None:
-            self.ax_top.legend(loc="upper right", fontsize="small")
+            self._refresh_top_legend()
         self.canvas.draw_idle()
         self.status_bar.showMessage("All markers cleared")
 
@@ -804,12 +1014,14 @@ class FlowProfileApp(QMainWindow):
             QMessageBox.warning(self, "No Plot", "Please click 'Plot Selected' first.")
             return
 
-        row = self.row_spin.value()
+        trigger_row = self.trigger_row_spin.value()
         col = self.col_spin.value()
-        trigger_row = row - 1
 
         if trigger_row < 1 or self.data.is_block_empty(trigger_row, col):
-            QMessageBox.warning(self, "No Trigger", "No trigger data found in the row above the flow channel.")
+            QMessageBox.warning(
+                self, "No Trigger",
+                "No trigger data. Set Trigger Row (in Data Source) to a non-empty channel.",
+            )
             return
 
         trigger_data = self.data.get_data(trigger_row, col)
@@ -878,8 +1090,10 @@ class FlowProfileApp(QMainWindow):
         # Draw temporal resolution interval lines within the step
         self._draw_ct_intervals()
 
-        # Reset landmarks for new step
+        # Reset landmarks AND cycle frames for the new step (stale cycle frames
+        # from a prior step must not leak into this step's export).
         self._clear_ct_landmarks()
+        self._clear_cycle_labels()
 
         self.canvas.draw_idle()
         self.status_bar.showMessage(
@@ -1113,6 +1327,403 @@ class FlowProfileApp(QMainWindow):
                 remaining.append(artist)
         self._ct_landmark_artists = remaining
 
+    # ------------------------------------------------------------------
+    # Cycle frame labeling (new mode, independent of inhale/exhale)
+    # ------------------------------------------------------------------
+
+    def _on_cycle_mode_toggled(self, checked: bool) -> None:
+        """Toggle cycle-labeling click mode."""
+        self._ct_cycle_mode = checked
+        if checked:
+            # Stop landmark placement so clicks don't race.
+            self._ct_landmark_mode = None
+            self.status_bar.showMessage(
+                "CYCLE LABEL MODE: left-click fenceposts in order (right-click undoes last)."
+            )
+        else:
+            self.status_bar.showMessage("Cycle label mode off.")
+
+    def _cycle_start_time_dt(self) -> Optional[tuple]:
+        """Return (start_t, dt, total_imgs) matching what _draw_ct_intervals uses.
+
+        Returns None if a step hasn't been selected yet.
+        """
+        if self._ct_selected_step is None:
+            return None
+        dt = self.ct_temporal_res_spin.value() / 1000.0
+        if dt <= 0:
+            return None
+        total_imgs = self.ct_total_images_spin.value()
+        shift_ms = self.ct_shift_spin.value()
+        if self._ct_detected_start is not None and (shift_ms != 0 or total_imgs > 0):
+            start_t = self._ct_detected_start + shift_ms / 1000.0
+        else:
+            start_t = self._ct_selected_step["start_time"]
+        return start_t, dt, total_imgs
+
+    def _snap_to_fencepost(self, x_time: float) -> Optional[int]:
+        """Snap a click time to the nearest fencepost 1-based image index."""
+        meta = self._cycle_start_time_dt()
+        if meta is None:
+            return None
+        start_t, dt, total_imgs = meta
+        img = int(round((x_time - start_t) / dt)) + 1
+        return max(1, min(img, total_imgs))
+
+    def _add_cycle_label(self, x_time: float) -> None:
+        """Add a cycle label at the fencepost nearest to the click."""
+        if self._ct_selected_step is None:
+            QMessageBox.warning(self, "No Step", "Select a CT step before labeling frames.")
+            return
+
+        img_idx = self._snap_to_fencepost(x_time)
+        if img_idx is None:
+            return
+
+        # Stack repeated labels vertically so multiple visits to the same
+        # fencepost stay visible. 0 prior visits → y=0.55, then +0.14 each.
+        prior_visits = self._ct_cycle_frames.count(img_idx)
+        self._ct_cycle_frames.append(img_idx)
+        new_frame_num = len(self._ct_cycle_frames)
+
+        start_t, dt, _ = self._cycle_start_time_dt()
+        fencepost_time = start_t + (img_idx - 1) * dt
+        y_pos = min(0.55 + prior_visits * 0.14, 0.95)
+
+        ann = self.ax_top.annotate(
+            str(new_frame_num),
+            xy=(fencepost_time, y_pos),
+            xycoords=("data", "axes fraction"),
+            fontsize=9, color="white", fontweight="bold",
+            ha="center", va="center",
+            bbox=dict(boxstyle="circle,pad=0.25", fc="green", ec="darkgreen", lw=1),
+        )
+        self._ct_cycle_artists.append(ann)
+
+        self._update_cycle_ui()
+        self.canvas.draw_idle()
+
+    def _remove_last_cycle_label(self) -> None:
+        """Undo the most recently added cycle label."""
+        if not self._ct_cycle_frames:
+            return
+        removed = self._ct_cycle_frames.pop()
+        if self._ct_cycle_artists:
+            last_artist = self._ct_cycle_artists.pop()
+            try:
+                last_artist.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._update_cycle_ui()
+        self.canvas.draw_idle()
+        self.status_bar.showMessage(f"Removed cycle label for original frame {removed}.")
+
+    def _clear_cycle_labels(self) -> None:
+        """Remove every cycle label and its artists."""
+        for artist in self._ct_cycle_artists:
+            try:
+                artist.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._ct_cycle_artists = []
+        self._ct_cycle_frames = []
+        self._update_cycle_ui()
+        self.canvas.draw_idle()
+        self.status_bar.showMessage("Cycle labels cleared.")
+
+    def _update_cycle_ui(self) -> None:
+        """Refresh the count + sequence labels in the CT controls."""
+        n = len(self._ct_cycle_frames)
+        self.cycle_count_label.setText(f"{n} frame{'s' if n != 1 else ''}")
+        if n == 0:
+            self.cycle_seq_label.setText("seq: —")
+        else:
+            seq = ",".join(str(i) for i in self._ct_cycle_frames)
+            if len(seq) > 80:
+                seq = seq[:77] + "..."
+            self.cycle_seq_label.setText(f"seq: {seq}")
+
+    # ------------------------------------------------------------------
+    # Full-manual synthetic-profile mode
+    # ------------------------------------------------------------------
+
+    _PART_COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
+                    "#8c564b", "#e377c2", "#17becf"]
+
+    def _on_synth_mode_toggled(self, checked: bool) -> None:
+        """Enter/leave full-manual synthetic-profile mode."""
+        self._synth_mode = checked
+        if checked:
+            # Avoid click conflicts with the other CT interaction modes.
+            if self._ct_cycle_mode and hasattr(self, "cycle_mode_btn"):
+                self.cycle_mode_btn.setChecked(False)
+            self._ct_landmark_mode = None
+            self._draw_synth_grid()
+            self.status_bar.showMessage(
+                "FULL MANUAL: set Start/End + Temporal Res, then 'Add Part' and "
+                "click two image frames per part."
+            )
+        else:
+            self._cancel_part_capture()
+            self.status_bar.showMessage("Full-manual mode off.")
+
+    def _synth_grid(self):
+        """Return (start_t, dt, total_images) for the manual window, or None."""
+        start_t = self.start_spin.value()
+        end_t = self.end_spin.value()
+        dt = self.ct_temporal_res_spin.value() / 1000.0
+        if dt <= 0 or end_t <= start_t:
+            return None
+        total = int(round((end_t - start_t) / dt)) + 1
+        return start_t, dt, total
+
+    def _clear_synth_grid(self) -> None:
+        for artist in self._grid_artists:
+            try:
+                artist.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._grid_artists = []
+
+    def _draw_synth_grid(self) -> None:
+        """Draw the numbered image fencepost grid for the manual window."""
+        if self.ax_top is None or self._plot_mode != "selected":
+            QMessageBox.warning(self, "No Plot", "Select a block to view first.")
+            return
+        meta = self._synth_grid()
+        if meta is None:
+            QMessageBox.warning(self, "Bad Window", "Set Start < End and a positive Temporal Res.")
+            return
+        start_t, dt, total = meta
+        # Keep Total Images consistent with the window (fixes desync).
+        self.ct_total_images_spin.setValue(total)
+        self.synth_grid_label.setText(f"images: 1..{total}  (dt={dt*1000:.0f} ms)")
+
+        self._clear_synth_grid()
+        label_every = max(1, total // 40)  # avoid clutter for long windows
+        for i in range(1, total + 1):
+            t = start_t + (i - 1) * dt
+            line = self.ax_top.axvline(x=t, color="0.6", linestyle=":", linewidth=0.5, alpha=0.7)
+            self._grid_artists.append(line)
+            if (i - 1) % label_every == 0 or i == total:
+                ann = self.ax_top.annotate(
+                    str(i), xy=(t, 1.0), xycoords=("data", "axes fraction"),
+                    fontsize=6, color="0.4", ha="center", va="bottom",
+                )
+                self._grid_artists.append(ann)
+        self._draw_parts_overlay()
+        self.canvas.draw_idle()
+
+    def _snap_synth(self, x_time: float):
+        """Snap a click time to the nearest image number (1..N), or None."""
+        meta = self._synth_grid()
+        if meta is None:
+            return None
+        start_t, dt, total = meta
+        img = int(round((x_time - start_t) / dt)) + 1
+        return max(1, min(img, total))
+
+    def _arm_add_part(self) -> None:
+        if not self.synth_enable_chk.isChecked():
+            QMessageBox.information(self, "Enable Mode", "Enable full-manual mode first.")
+            return
+        if self._synth_grid() is None:
+            QMessageBox.warning(self, "Bad Window", "Set Start < End and a positive Temporal Res.")
+            return
+        self._capturing_part = True
+        self._part_click_buffer = []
+        self.status_bar.showMessage("Click the FIRST image frame of the part (right-click cancels).")
+
+    def _cancel_part_capture(self) -> None:
+        self._capturing_part = False
+        self._part_click_buffer = []
+
+    def _capture_part_click(self, x_time: float) -> None:
+        img = self._snap_synth(x_time)
+        if img is None:
+            self._cancel_part_capture()
+            return
+        self._part_click_buffer.append(img)
+        if len(self._part_click_buffer) == 1:
+            self.status_bar.showMessage(f"First frame = image {img}. Click the SECOND frame.")
+            return
+        a, b = sorted(self._part_click_buffer)
+        self._capturing_part = False
+        self._part_click_buffer = []
+        if a == b:
+            QMessageBox.warning(self, "Same Frame", "A part needs two different frames.")
+            return
+        self._parts.append(ProfilePart(start_image=a, end_image=b, label=""))
+        self._refresh_parts_list()
+        self._draw_parts_overlay()
+        self.canvas.draw_idle()
+        self.status_bar.showMessage(f"Added part: images {a}-{b} (part {len(self._parts)}).")
+
+    def _draw_parts_overlay(self) -> None:
+        """Shade each part's span on the top plot with its order number."""
+        if self.ax_top is None:
+            return
+        for artist in self._part_artists:
+            try:
+                artist.remove()
+            except (ValueError, AttributeError):
+                pass
+        self._part_artists = []
+        meta = self._synth_grid()
+        if meta is None:
+            return
+        start_t, dt, _ = meta
+        for idx, part in enumerate(self._parts):
+            color = self._PART_COLORS[idx % len(self._PART_COLORS)]
+            t_a = start_t + (part.start_image - 1) * dt
+            t_b = start_t + (part.end_image - 1) * dt
+            span = self.ax_top.axvspan(t_a, t_b, color=color, alpha=0.18)
+            self._part_artists.append(span)
+            ann = self.ax_top.annotate(
+                str(idx + 1), xy=((t_a + t_b) / 2, 0.92),
+                xycoords=("data", "axes fraction"),
+                fontsize=9, color="white", fontweight="bold", ha="center", va="center",
+                bbox=dict(boxstyle="circle,pad=0.2", fc=color, ec="black", lw=0.5),
+            )
+            self._part_artists.append(ann)
+
+    def _refresh_parts_list(self) -> None:
+        self.parts_list.clear()
+        meta = self._synth_grid()
+        dt = meta[1] if meta else 0.2
+        for idx, part in enumerate(self._parts):
+            dur = (part.end_image - part.start_image) * dt
+            lbl = f" [{part.label}]" if part.label else ""
+            QListWidgetItem(
+                f"{idx + 1}.{lbl} images {part.start_image}-{part.end_image}  ({dur:.2f}s)",
+                self.parts_list,
+            )
+        n = len(self._parts)
+        self.synth_status_label.setText("no parts" if n == 0 else f"{n} part{'s' if n != 1 else ''}")
+
+    def _selected_part_row(self) -> int:
+        return self.parts_list.currentRow()
+
+    def _move_part_up(self) -> None:
+        i = self._selected_part_row()
+        if i > 0:
+            self._parts[i - 1], self._parts[i] = self._parts[i], self._parts[i - 1]
+            self._refresh_parts_list()
+            self.parts_list.setCurrentRow(i - 1)
+            self._draw_parts_overlay()
+            self.canvas.draw_idle()
+
+    def _move_part_down(self) -> None:
+        i = self._selected_part_row()
+        if 0 <= i < len(self._parts) - 1:
+            self._parts[i + 1], self._parts[i] = self._parts[i], self._parts[i + 1]
+            self._refresh_parts_list()
+            self.parts_list.setCurrentRow(i + 1)
+            self._draw_parts_overlay()
+            self.canvas.draw_idle()
+
+    def _edit_part_label(self) -> None:
+        i = self._selected_part_row()
+        if not (0 <= i < len(self._parts)):
+            return
+        text, ok = QInputDialog.getText(self, "Edit Label", "Part label:", text=self._parts[i].label)
+        if ok:
+            self._parts[i].label = text.strip()
+            self._refresh_parts_list()
+
+    def _delete_part(self) -> None:
+        i = self._selected_part_row()
+        if 0 <= i < len(self._parts):
+            self._parts.pop(i)
+            self._refresh_parts_list()
+            self._draw_parts_overlay()
+            self.canvas.draw_idle()
+
+    def _clear_parts(self) -> None:
+        self._parts = []
+        self._refresh_parts_list()
+        self._draw_parts_overlay()
+        self.canvas.draw_idle()
+
+    def _assemble_and_export(self) -> None:
+        """Process the window, assemble parts, preview, and export 3 CSVs."""
+        if self.data is None:
+            QMessageBox.warning(self, "No Data", "Load a .mat file first.")
+            return
+        if not self._parts:
+            QMessageBox.warning(self, "No Parts", "Add at least one part.")
+            return
+        subject = self.subject_edit.text().strip()
+        if not subject:
+            QMessageBox.warning(self, "Missing Subject", "Enter a Subject ID.")
+            return
+        meta = self._synth_grid()
+        if meta is None:
+            QMessageBox.warning(self, "Bad Window", "Set Start < End and a positive Temporal Res.")
+            return
+        start_t, dt, _total = meta
+        flow_row = self.flow_row_spin.value()
+        col = self.col_spin.value()
+        pressure_row = self.pressure_row_spin.value()
+        include_pressure = pressure_row > 0
+        output_dir = Path(self.outdir_edit.text())
+
+        try:
+            from labchart2cfd.io.csv_export import (
+                export_flow_csv, export_pressure_csv, export_reorder_map_csv,
+            )
+            from labchart2cfd.workflows import CTWorkflow
+
+            wf = CTWorkflow(
+                target_sample_rate=100.0, density=1.2,
+                pressure_row=pressure_row if include_pressure else 1,
+            )
+            result = wf.process(
+                self.data, flow_row, col, self.start_spin.value(), self.end_spin.value(),
+                inhale_start_time=None, exhale_end_time=None,
+                temporal_resolution=dt, include_pressure=include_pressure,
+            )
+            total_images = result.metadata["total_images"]
+            asm = assemble_parts(
+                result.mass_flow, self._parts, dt=dt,
+                sample_rate=result.sample_rate, total_images=total_images,
+                pressure=result.pressure,
+            )
+        except Exception as exc:  # surface engine/workflow errors clearly
+            QMessageBox.critical(self, "Assembly Failed", str(exc))
+            return
+
+        # Preview
+        AssemblyPreviewDialog(asm.time, asm.flow, len(asm.reorder_map), parent=self).exec_()
+
+        # Export
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+            flow_file = output_dir / f"{subject}FlowProfile.csv"
+            export_flow_csv(flow_file, asm.time, asm.flow)
+            written = [flow_file.name]
+            if asm.pressure is not None:
+                pfile = output_dir / f"{subject}PressureProfile.csv"
+                export_pressure_csv(pfile, asm.time, asm.pressure)
+                written.append(pfile.name)
+            map_file = output_dir / f"{subject}ImageReorderMap.csv"
+            export_reorder_map_csv(map_file, asm.reorder_map)
+            written.append(map_file.name)
+        except Exception as exc:
+            QMessageBox.critical(self, "Export Failed", str(exc))
+            return
+
+        order = ",".join(str(m[1]) for m in asm.reorder_map)
+        if len(order) > 120:
+            order = order[:117] + "..."
+        QMessageBox.information(
+            self, "Exported",
+            f"Wrote to {output_dir}:\n  " + "\n  ".join(written)
+            + f"\n\nAssembled {len(asm.flow)} samples, {len(asm.reorder_map)} images."
+            + f"\nReorder (original image order):\n{order}",
+        )
+        self.status_bar.showMessage(f"Exported synthetic profile + reorder map for {subject}.")
+
     def _execute_processing(self) -> None:
         """Run the processing pipeline in a background thread."""
         # Validate inputs
@@ -1132,10 +1743,15 @@ class FlowProfileApp(QMainWindow):
             QMessageBox.critical(self, "Invalid Times", "End time must be greater than start time.")
             return
 
-        row = self.row_spin.value()
+        flow_row = self.flow_row_spin.value()
+        pressure_row = self.pressure_row_spin.value()  # 0 = skip pressure
         col = self.col_spin.value()
         workflow_name = self.workflow_combo.currentText()
         output_dir = Path(self.outdir_edit.text())
+        include_pressure = pressure_row > 0
+        # Standard/CPAP/CT read pressure from self.pressure_row on the workflow;
+        # pick a safe default when user set "none" so the attribute exists.
+        effective_pressure_row = pressure_row if include_pressure else 1
 
         # Capture trigger info from main thread for the background thread
         trigger_start = self.start_trigger_spin.value()
@@ -1147,6 +1763,11 @@ class FlowProfileApp(QMainWindow):
         ct_exhale_end = self._ct_exhale_end
         ct_selected_step = self._ct_selected_step
         ct_temporal_res_ms = float(self.ct_temporal_res_spin.value())
+        # Cycle-labeling: ordered original image indices (empty → landmark path)
+        ct_cycle_frames = list(self._ct_cycle_frames)
+        # Manual "Total Images" the user set in the GUI (may be smaller than
+        # the workflow's auto-computed fencepost count for the raw step window).
+        ct_total_images_manual = int(self.ct_total_images_spin.value())
 
         # Disable button during processing
         self.execute_btn.setEnabled(False)
@@ -1166,37 +1787,98 @@ class FlowProfileApp(QMainWindow):
 
                 # Select workflow
                 if workflow_name == "CT":
-                    wf = CTWorkflow(density=1.2)
-                    result = wf.process(
-                        self.data, row, col, start_time, end_time,
-                        inhale_start_time=ct_inhale_start,
-                        exhale_end_time=ct_exhale_end,
-                        temporal_resolution=ct_temporal_res_ms / 1000.0,
-                    )
+                    wf = CTWorkflow(density=1.2, pressure_row=effective_pressure_row)
+                    # Cycle mode: skip rearrangement so result.time fencepost
+                    # positions (i-1)*dt map to original image index i.
+                    if ct_cycle_frames:
+                        result = wf.process(
+                            self.data, flow_row, col, start_time, end_time,
+                            inhale_start_time=None,
+                            exhale_end_time=None,
+                            temporal_resolution=ct_temporal_res_ms / 1000.0,
+                            include_pressure=include_pressure,
+                        )
+                    else:
+                        result = wf.process(
+                            self.data, flow_row, col, start_time, end_time,
+                            inhale_start_time=ct_inhale_start,
+                            exhale_end_time=ct_exhale_end,
+                            temporal_resolution=ct_temporal_res_ms / 1000.0,
+                            include_pressure=include_pressure,
+                        )
 
-                    # Determine selected images from inhale/exhale landmarks
-                    # All indices are 1-based to match blue fencepost line labels
                     total_imgs = result.metadata.get("total_images", 0)
+                    dt_s = ct_temporal_res_ms / 1000.0
 
-                    if ct_inhale_start is not None and ct_exhale_end is not None:
+                    if ct_cycle_frames:
+                        # Split into ascending sub-sequences; each non-last
+                        # contributes m*dt, the last contributes (m-1)*dt, so
+                        # total = (N-1)*dt. Wrap boundaries add no gap.
+                        subseqs = []
+                        current = [ct_cycle_frames[0]]
+                        for i in range(1, len(ct_cycle_frames)):
+                            if ct_cycle_frames[i] == ct_cycle_frames[i - 1] + 1:
+                                current.append(ct_cycle_frames[i])
+                            else:
+                                subseqs.append(current)
+                                current = [ct_cycle_frames[i]]
+                        subseqs.append(current)
+
+                        chunks_flow = []
+                        chunks_pressure = []
+                        last_subseq_idx = len(subseqs) - 1
+                        for idx, subseq in enumerate(subseqs):
+                            a, b = subseq[0], subseq[-1]
+                            t_lo = (a - 1) * dt_s
+                            t_hi = ((b - 1) * dt_s) if idx == last_subseq_idx else (b * dt_s)
+                            mask = (result.time >= t_lo) & (result.time < t_hi)
+                            chunks_flow.append(result.mass_flow[mask])
+                            if result.pressure is not None:
+                                chunks_pressure.append(result.pressure[mask])
+
+                        if not any(len(c) for c in chunks_flow):
+                            raise RuntimeError(
+                                "Cycle labels produced an empty signal. Label at least "
+                                "one pair of consecutive frames within each sub-sequence."
+                            )
+                        concat_flow = np.concatenate(chunks_flow)
+                        sample_rate = result.sample_rate
+                        result.time = np.arange(len(concat_flow)) / sample_rate
+                        result.mass_flow = concat_flow
+                        if result.pressure is not None:
+                            result.pressure = np.concatenate(chunks_pressure)
+
+                        inhale_img = ct_cycle_frames[0]
+                        exhale_img = ct_cycle_frames[-1]
+                        selected_indices = list(ct_cycle_frames)
+                        result.metadata["cycle_mode"] = True
+                        result.metadata["cycle_original_indices"] = list(ct_cycle_frames)
+                        result.metadata["cycle_frame_count"] = len(ct_cycle_frames)
+                        # The workflow's auto-computed total_images reflects the
+                        # full step window, which may exceed what the user set
+                        # manually (and labeled against). Override so the output
+                        # matches the fencepost grid the user actually saw.
+                        result.metadata["total_images"] = ct_total_images_manual
+                        result.metadata["rearranged_image_indices"] = list(
+                            range(ct_total_images_manual)
+                        )
+                        total_imgs = ct_total_images_manual
+                    elif ct_inhale_start is not None and ct_exhale_end is not None:
                         inhale_img = time_to_image_index(
-                            ct_inhale_start, start_time, ct_temporal_res_ms / 1000.0
+                            ct_inhale_start, start_time, dt_s
                         ) + 1  # 1-based
                         exhale_img = time_to_image_index(
-                            ct_exhale_end, start_time, ct_temporal_res_ms / 1000.0
+                            ct_exhale_end, start_time, dt_s
                         ) + 1  # 1-based
 
                         if inhale_img <= exhale_img:
-                            # Normal: inhale LEFT of exhale -> straight sequence
                             selected_indices = list(range(inhale_img, exhale_img + 1))
                         else:
-                            # Wrapping: exhale LEFT of inhale -> wrap around
                             selected_indices = (
                                 list(range(inhale_img, total_imgs + 1))
                                 + list(range(1, exhale_img + 1))
                             )
                     else:
-                        # No landmarks -> use full range
                         inhale_img = 1
                         exhale_img = total_imgs
                         selected_indices = list(range(1, total_imgs + 1))
@@ -1207,13 +1889,19 @@ class FlowProfileApp(QMainWindow):
                     result.metadata["selected_image_indices"] = selected_indices
                 elif workflow_name == "phase-contrast":
                     wf = PhaseContrastWorkflow(density=5.761)
-                    result = wf.process(self.data, row, col, start_time, end_time)
+                    result = wf.process(self.data, flow_row, col, start_time, end_time)
                 elif workflow_name == "cpap":
-                    wf = CPAPWorkflow(density=1.2)
-                    result = wf.process(self.data, row, col, start_time, end_time)
+                    wf = CPAPWorkflow(density=1.2, pressure_row=effective_pressure_row)
+                    result = wf.process(
+                        self.data, flow_row, col, start_time, end_time,
+                        include_pressure=include_pressure,
+                    )
                 else:
-                    wf = StandardOSAMRIWorkflow(density=1.2)
-                    result = wf.process(self.data, row, col, start_time, end_time)
+                    wf = StandardOSAMRIWorkflow(density=1.2, pressure_row=effective_pressure_row)
+                    result = wf.process(
+                        self.data, flow_row, col, start_time, end_time,
+                        include_pressure=include_pressure,
+                    )
 
                 output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1252,6 +1940,17 @@ class FlowProfileApp(QMainWindow):
                         tf.write(f"selected_num_images: {meta.get('selected_num_images', 0)}\n")
                         sel_indices = meta.get("selected_image_indices", [])
                         tf.write(f"selected_image_indices: {','.join(str(i) for i in sel_indices)}\n")
+                        if meta.get("cycle_mode"):
+                            cycle_orig = meta.get("cycle_original_indices", [])
+                            tf.write(f"cycle_mode: true\n")
+                            tf.write(f"cycle_frame_count: {meta.get('cycle_frame_count', 0)}\n")
+                            tf.write(f"cycle_original_indices: {','.join(str(i) for i in cycle_orig)}\n")
+                            mapping = ";".join(
+                                f"{new_i+1}->{orig}" for new_i, orig in enumerate(cycle_orig)
+                            )
+                            tf.write(f"cycle_new_to_original: {mapping}\n")
+                        else:
+                            tf.write(f"cycle_mode: false\n")
                         tf.write(f"start_time_exported: 0.000\n")
                         tf.write(f"end_time_exported: {exported_duration:.3f}\n")
                     else:
@@ -1314,7 +2013,9 @@ class FlowProfileApp(QMainWindow):
                 QTimer.singleShot(0, _done)
 
             except Exception as e:
-                error_msg = str(e)
+                import traceback
+                traceback.print_exc()  # so the real error shows in the terminal
+                error_msg = f"{type(e).__name__}: {e}"
 
                 def _error():
                     QMessageBox.critical(self, "Processing Error", error_msg)
@@ -1322,6 +2023,11 @@ class FlowProfileApp(QMainWindow):
                     self.execute_btn.setEnabled(True)
 
                 QTimer.singleShot(0, _error)
+            finally:
+                # Safety net: guarantee the button re-enables even if both
+                # scheduled callbacks somehow fail to fire. Re-enabling an
+                # already-enabled button is a harmless no-op.
+                QTimer.singleShot(0, lambda: self.execute_btn.setEnabled(True))
 
         Thread(target=_run, daemon=True).start()
 
