@@ -17,6 +17,11 @@ from labchart2cfd.processing.rearrangement import (
     time_to_image_index,
     rearrange_image_indices,
 )
+from labchart2cfd.processing.profile_assembly import (
+    ProfilePart,
+    AssemblyResult,
+    assemble_parts,
+)
 
 __all__ = [
     "calculate_drift_error",
@@ -30,4 +35,7 @@ __all__ = [
     "compute_image_count",
     "time_to_image_index",
     "rearrange_image_indices",
+    "ProfilePart",
+    "AssemblyResult",
+    "assemble_parts",
 ]
