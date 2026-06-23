@@ -113,6 +113,7 @@ class FlowProfileApp(QMainWindow):
         self._grid_artists: list = []            # fencepost grid lines + numbers
         self._capturing_part: bool = False       # collecting 2 clicks for a part
         self._part_click_buffer: List[int] = []  # snapped image #s during capture
+        self._capture_marker = None              # red line at the start frame
 
         # Internal flag to suppress slider callback during programmatic changes
         self._suppress_shift_slider = False
@@ -150,7 +151,7 @@ class FlowProfileApp(QMainWindow):
         # --- Controls area: tabbed + scrollable + height-capped so the plot
         # always dominates and panels never overlap/clip. ---
         self.tabs = QTabWidget()
-        self.tabs.setMaximumHeight(320)
+        self.tabs.setMaximumHeight(370)
         self._tab_data_w = QWidget()
         self._tab_data_layout = QVBoxLayout(self._tab_data_w)
         self._tab_trig_w = QWidget()
@@ -448,23 +449,55 @@ class FlowProfileApp(QMainWindow):
         srow1.addStretch(1)
         synth_layout.addLayout(srow1)
 
-        srow2 = QHBoxLayout()
-        add_part_btn = QPushButton("Add Part (click 2 frames)")
-        add_part_btn.clicked.connect(self._arm_add_part)
-        srow2.addWidget(add_part_btn)
+        help_lbl = QLabel(
+            "① Enable + Show Image Grid   ② set From/To (or 'Pick on Plot')   "
+            "③ Add Part   ④ repeat → Assemble && Export"
+        )
+        help_lbl.setWordWrap(True)
+        help_lbl.setStyleSheet("color: #555;")
+        synth_layout.addWidget(help_lbl)
+
+        # Range entry: explicit begin/end image numbers
+        srow_range = QHBoxLayout()
+        srow_range.addWidget(QLabel("From image:"))
+        self.part_from_spin = QSpinBox()
+        self.part_from_spin.setRange(1, 1)
+        self.part_from_spin.setFixedWidth(70)
+        srow_range.addWidget(self.part_from_spin)
+        srow_range.addWidget(QLabel("To image:"))
+        self.part_to_spin = QSpinBox()
+        self.part_to_spin.setRange(1, 1)
+        self.part_to_spin.setFixedWidth(70)
+        srow_range.addWidget(self.part_to_spin)
+        add_part_btn = QPushButton("Add Part")
+        add_part_btn.setToolTip("Add a part covering From..To images, in assembly order.")
+        add_part_btn.clicked.connect(self._add_part_from_spins)
+        srow_range.addWidget(add_part_btn)
+        self.pick_part_btn = QPushButton("Pick on Plot")
+        self.pick_part_btn.setToolTip("Click two frames on the plot to fill From/To.")
+        self.pick_part_btn.clicked.connect(self._arm_add_part)
+        srow_range.addWidget(self.pick_part_btn)
+        self.capture_hint = QLabel("")
+        self.capture_hint.setStyleSheet("color: #c00; font-weight: bold;")
+        srow_range.addWidget(self.capture_hint)
+        srow_range.addStretch(1)
+        synth_layout.addLayout(srow_range)
+
+        self.parts_list = QListWidget()
+        self.parts_list.setMaximumHeight(88)
+        synth_layout.addWidget(self.parts_list)
+
+        srow_actions = QHBoxLayout()
         for _text, _slot in [
-            ("Up", self._move_part_up), ("Down", self._move_part_down),
+            ("Move Up", self._move_part_up), ("Move Down", self._move_part_down),
             ("Edit Label", self._edit_part_label), ("Delete", self._delete_part),
             ("Clear All", self._clear_parts),
         ]:
             _b = QPushButton(_text)
             _b.clicked.connect(_slot)
-            srow2.addWidget(_b)
-        synth_layout.addLayout(srow2)
-
-        self.parts_list = QListWidget()
-        self.parts_list.setMaximumHeight(110)
-        synth_layout.addWidget(self.parts_list)
+            srow_actions.addWidget(_b)
+        srow_actions.addStretch(1)
+        synth_layout.addLayout(srow_actions)
 
         srow3 = QHBoxLayout()
         assemble_btn = QPushButton("Assemble && Export")
@@ -598,6 +631,7 @@ class FlowProfileApp(QMainWindow):
         self._part_artists = []
         self._capturing_part = False
         self._part_click_buffer = []
+        self._capture_marker = None
         self.total_triggers_label.setText("--")
         self.ct_inhale_label.setText("--")
         self.ct_exhale_label.setText("--")
@@ -1529,6 +1563,11 @@ class FlowProfileApp(QMainWindow):
         # Keep Total Images consistent with the window (fixes desync).
         self.ct_total_images_spin.setValue(total)
         self.synth_grid_label.setText(f"images: 1..{total}  (dt={dt*1000:.0f} ms)")
+        # Bound the From/To image entry boxes to the grid.
+        self.part_from_spin.setRange(1, total)
+        self.part_to_spin.setRange(1, total)
+        if self.part_to_spin.value() < 2 and total >= 2:
+            self.part_to_spin.setValue(2)
 
         self._clear_synth_grid()
         label_every = max(1, total // 40)  # avoid clutter for long windows
@@ -1554,41 +1593,94 @@ class FlowProfileApp(QMainWindow):
         img = int(round((x_time - start_t) / dt)) + 1
         return max(1, min(img, total))
 
+    def _add_part_from_spins(self) -> None:
+        """Add a part using the From/To image number boxes (the explicit path)."""
+        if self._synth_grid() is None:
+            QMessageBox.warning(
+                self, "Bad Window",
+                "Set Start < End and a positive Temporal Res, then 'Show Image Grid'.",
+            )
+            return
+        a = self.part_from_spin.value()
+        b = self.part_to_spin.value()
+        if a >= b:
+            QMessageBox.warning(self, "Bad Range", "'From image' must be less than 'To image'.")
+            return
+        self._parts.append(ProfilePart(start_image=a, end_image=b, label=""))
+        self._refresh_parts_list()
+        self._draw_parts_overlay()
+        self.canvas.draw_idle()
+        self.capture_hint.setText("")
+        self.status_bar.showMessage(f"Added part: images {a}-{b} (part {len(self._parts)}).")
+
     def _arm_add_part(self) -> None:
+        """Arm two-click capture that fills the From/To boxes from plot clicks."""
         if not self.synth_enable_chk.isChecked():
-            QMessageBox.information(self, "Enable Mode", "Enable full-manual mode first.")
+            QMessageBox.information(self, "Enable Mode", "Tick 'Enable full-manual mode' first.")
             return
         if self._synth_grid() is None:
-            QMessageBox.warning(self, "Bad Window", "Set Start < End and a positive Temporal Res.")
+            QMessageBox.warning(
+                self, "Bad Window",
+                "Set Start < End and a positive Temporal Res, then 'Show Image Grid'.",
+            )
             return
         self._capturing_part = True
         self._part_click_buffer = []
-        self.status_bar.showMessage("Click the FIRST image frame of the part (right-click cancels).")
+        self.capture_hint.setText("Click the START frame on the plot…")
+        self.status_bar.showMessage("Click the START frame on the plot (right-click cancels).")
 
     def _cancel_part_capture(self) -> None:
         self._capturing_part = False
         self._part_click_buffer = []
+        self._clear_capture_marker()
+        if hasattr(self, "capture_hint"):
+            self.capture_hint.setText("")
+
+    def _draw_capture_marker(self, img: int) -> None:
+        self._clear_capture_marker()
+        meta = self._synth_grid()
+        if meta is None or self.ax_top is None:
+            return
+        start_t, dt, _ = meta
+        t = start_t + (img - 1) * dt
+        self._capture_marker = self.ax_top.axvline(
+            x=t, color="red", linestyle="-", linewidth=1.5, alpha=0.9
+        )
+        self.canvas.draw_idle()
+
+    def _clear_capture_marker(self) -> None:
+        if self._capture_marker is not None:
+            try:
+                self._capture_marker.remove()
+            except (ValueError, AttributeError):
+                pass
+            self._capture_marker = None
 
     def _capture_part_click(self, x_time: float) -> None:
+        """Fill From (1st click) / To (2nd click) from snapped plot clicks."""
         img = self._snap_synth(x_time)
         if img is None:
             self._cancel_part_capture()
             return
         self._part_click_buffer.append(img)
         if len(self._part_click_buffer) == 1:
-            self.status_bar.showMessage(f"First frame = image {img}. Click the SECOND frame.")
+            self.part_from_spin.setValue(img)
+            self._draw_capture_marker(img)
+            self.capture_hint.setText(f"START = image {img} — click END frame")
+            self.status_bar.showMessage(f"START = image {img}. Click the END frame.")
             return
         a, b = sorted(self._part_click_buffer)
         self._capturing_part = False
         self._part_click_buffer = []
+        self._clear_capture_marker()
         if a == b:
-            QMessageBox.warning(self, "Same Frame", "A part needs two different frames.")
+            self.capture_hint.setText("")
+            QMessageBox.warning(self, "Same Frame", "Pick two different frames.")
             return
-        self._parts.append(ProfilePart(start_image=a, end_image=b, label=""))
-        self._refresh_parts_list()
-        self._draw_parts_overlay()
-        self.canvas.draw_idle()
-        self.status_bar.showMessage(f"Added part: images {a}-{b} (part {len(self._parts)}).")
+        self.part_from_spin.setValue(a)
+        self.part_to_spin.setValue(b)
+        self.capture_hint.setText(f"range {a}..{b} ready — click 'Add Part'")
+        self.status_bar.showMessage(f"Range {a}-{b} set. Click 'Add Part' to add it.")
 
     def _draw_parts_overlay(self) -> None:
         """Shade each part's span on the top plot with its order number."""
