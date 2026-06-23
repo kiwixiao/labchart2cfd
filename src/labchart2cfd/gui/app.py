@@ -30,6 +30,7 @@ from PyQt5.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QSlider, QFileDialog, QMessageBox,
     QStatusBar, QGridLayout, QSizePolicy, QFrame,
     QCheckBox, QListWidget, QListWidgetItem, QInputDialog, QDialog,
+    QTabWidget, QScrollArea,
 )
 
 from labchart2cfd.io.labchart import LabChartData, load_labchart_mat
@@ -146,10 +147,18 @@ class FlowProfileApp(QMainWindow):
         plot_layout.addWidget(self.canvas)
         main_layout.addWidget(plot_group, stretch=1)
 
-        # --- Controls area (bottom, fixed height) ---
-        controls_widget = QWidget()
-        controls_layout = QVBoxLayout(controls_widget)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
+        # --- Controls area: tabbed + scrollable + height-capped so the plot
+        # always dominates and panels never overlap/clip. ---
+        self.tabs = QTabWidget()
+        self.tabs.setMaximumHeight(320)
+        self._tab_data_w = QWidget()
+        self._tab_data_layout = QVBoxLayout(self._tab_data_w)
+        self._tab_trig_w = QWidget()
+        self._tab_trig_layout = QVBoxLayout(self._tab_trig_w)
+        self._tab_ctstep_w = QWidget()
+        self._tab_ctstep_layout = QVBoxLayout(self._tab_ctstep_w)
+        self._tab_synth_w = QWidget()
+        self._tab_synth_layout = QVBoxLayout(self._tab_synth_w)
 
         # -- Data Source group --
         file_group = QGroupBox("Data Source")
@@ -214,7 +223,7 @@ class FlowProfileApp(QMainWindow):
         spin_hlayout.addStretch()
         file_grid.addWidget(spin_widget, 1, 1, 1, 2)
 
-        controls_layout.addWidget(file_group)
+        self._tab_data_layout.addWidget(file_group)
 
         # -- Trigger Info group --
         trigger_group = QGroupBox("Trigger Info")
@@ -253,7 +262,7 @@ class FlowProfileApp(QMainWindow):
         trigger_hlayout.addWidget(clear_markers_btn)
         trigger_hlayout.addStretch()
 
-        controls_layout.addWidget(trigger_group)
+        self._tab_trig_layout.addWidget(trigger_group)
 
         # -- Processing group --
         proc_group = QGroupBox("Processing")
@@ -306,7 +315,7 @@ class FlowProfileApp(QMainWindow):
         self.execute_btn.clicked.connect(self._execute_processing)
         proc_grid.addWidget(self.execute_btn, 1, 6)
 
-        controls_layout.addWidget(proc_group)
+        self._tab_data_layout.addWidget(proc_group)
 
         # -- CT-specific controls (hidden by default) --
         self.ct_group = QGroupBox("CT Step Trigger Controls")
@@ -416,8 +425,7 @@ class FlowProfileApp(QMainWindow):
         self.cycle_seq_label.setToolTip("Original image indices in click order")
         ct_grid.addWidget(self.cycle_seq_label, 3, 6, 1, 2)
 
-        self.ct_group.setVisible(False)
-        controls_layout.addWidget(self.ct_group)
+        self._tab_ctstep_layout.addWidget(self.ct_group)
 
         # ---- Full-manual synthetic-profile controls (shown with CT) ----
         self.synth_group = QGroupBox("Synthetic Profile (Full Manual)")
@@ -467,10 +475,29 @@ class FlowProfileApp(QMainWindow):
         srow3.addStretch(1)
         synth_layout.addLayout(srow3)
 
-        self.synth_group.setVisible(False)
-        controls_layout.addWidget(self.synth_group)
+        self._tab_synth_layout.addWidget(self.synth_group)
 
-        main_layout.addWidget(controls_widget, stretch=0)
+        # Finalize the tabbed control strip
+        for _lay in (self._tab_data_layout, self._tab_trig_layout,
+                     self._tab_ctstep_layout, self._tab_synth_layout):
+            _lay.setContentsMargins(6, 6, 6, 6)
+            _lay.addStretch(1)
+
+        def _scroll(widget):
+            sa = QScrollArea()
+            sa.setWidgetResizable(True)
+            sa.setFrameShape(QFrame.NoFrame)
+            sa.setWidget(widget)
+            return sa
+
+        self.tabs.addTab(_scroll(self._tab_data_w), "1. Data && Window")
+        self.tabs.addTab(_scroll(self._tab_trig_w), "2. Triggers (4D)")
+        self._ct_step_tab = self.tabs.addTab(_scroll(self._tab_ctstep_w), "3. CT Step-Trigger")
+        self._ct_synth_tab = self.tabs.addTab(_scroll(self._tab_synth_w), "4. CT Synthetic Profile")
+        main_layout.addWidget(self.tabs, stretch=0)
+
+        # Initialize CT-tab enablement from the current workflow.
+        self._on_workflow_changed(self.workflow_combo.currentText())
 
         # --- Status bar ---
         self.status_bar = QStatusBar()
@@ -492,12 +519,16 @@ class FlowProfileApp(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_workflow_changed(self, text: str) -> None:
-        """Toggle CT controls visibility based on workflow selection."""
+        """Enable the CT-only tabs and focus them when CT is selected."""
+        if not hasattr(self, "_ct_synth_tab"):
+            return  # tabs not built yet (called during construction)
         is_ct = text == "CT"
-        self.ct_group.setVisible(is_ct)
-        self.synth_group.setVisible(is_ct)
+        self.tabs.setTabEnabled(self._ct_step_tab, is_ct)
+        self.tabs.setTabEnabled(self._ct_synth_tab, is_ct)
         if not is_ct and self.synth_enable_chk.isChecked():
             self.synth_enable_chk.setChecked(False)
+        if is_ct:
+            self.tabs.setCurrentIndex(self._ct_synth_tab)
 
     def _update_outdir(self, *_args) -> None:
         """Recompute output dir based on current mat file and subject."""
