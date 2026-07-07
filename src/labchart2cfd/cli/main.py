@@ -11,6 +11,11 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from labchart2cfd.processing.step_detection import (
+    DEFAULT_STEP_THRESHOLD_FRACTION,
+    DEFAULT_STEP_MIN_DURATION_S,
+)
+
 app = typer.Typer(
     name="labchart2cfd",
     help="Convert LabChart .mat flow profile data to CSV for CFD simulation boundary conditions",
@@ -93,6 +98,14 @@ def process(
         Optional[int],
         typer.Option("--step-number", help="CT: step trigger number to use (1-indexed)"),
     ] = None,
+    threshold: Annotated[
+        float,
+        typer.Option("--threshold", help="CT: step threshold fraction of max amplitude (0-1)"),
+    ] = DEFAULT_STEP_THRESHOLD_FRACTION,
+    min_duration: Annotated[
+        float,
+        typer.Option("--min-duration", help="CT: minimum step duration in seconds"),
+    ] = DEFAULT_STEP_MIN_DURATION_S,
 ) -> None:
     """Process a LabChart .mat file and export Star-CCM+ compatible CSV.
 
@@ -102,12 +115,7 @@ def process(
     """
     from labchart2cfd.io.labchart import load_labchart_mat
     from labchart2cfd.io.csv_export import export_flow_csv, export_pressure_csv
-    from labchart2cfd.workflows import (
-        StandardOSAMRIWorkflow,
-        CPAPWorkflow,
-        PhaseContrastWorkflow,
-        CTWorkflow,
-    )
+    from labchart2cfd.workflows.factory import build_workflow
 
     # Validate input file
     if not input_file.exists():
@@ -145,14 +153,9 @@ def process(
         end = float(time_array[-1])
         console.print(f"  Using full time range: {start:.2f} - {end:.2f}s")
 
-    # Select and configure workflow
+    # Select and configure workflow (density defaults resolved in the factory)
     if workflow == WorkflowType.CT:
-        if density is None:
-            density = 1.2  # Air
-        wf = CTWorkflow(
-            target_sample_rate=sample_rate,
-            density=density,
-        )
+        wf = build_workflow("ct", density=density, target_sample_rate=sample_rate)
         # If step_number is provided, auto-detect step boundaries
         if step_number is not None:
             from labchart2cfd.processing.step_detection import detect_steps
@@ -162,7 +165,9 @@ def process(
                 raise typer.Exit(1)
             trigger_data = data.get_data(trigger_row, column)
             trigger_time = data.get_time(trigger_row, column)
-            steps = detect_steps(trigger_data, trigger_time)
+            # Use the same detection parameters as the `detect-steps` command
+            # so step numbers reported there line up with those selected here.
+            steps = detect_steps(trigger_data, trigger_time, threshold, min_duration)
             if step_number < 1 or step_number > len(steps):
                 console.print(f"[red]Error:[/red] Step {step_number} not found. Detected {len(steps)} step(s).")
                 raise typer.Exit(1)
@@ -172,27 +177,12 @@ def process(
             console.print(f"  Using step {step_number}: {start:.3f}s - {end:.3f}s ({selected_step['duration']:.2f}s)")
 
     elif workflow == WorkflowType.PHASE_CONTRAST:
-        if density is None:
-            density = 5.761  # Xenon
         target_rate = 1000.0 if sample_rate == 100.0 else sample_rate
-        wf = PhaseContrastWorkflow(
-            target_sample_rate=target_rate,
-            density=density,
-        )
+        wf = build_workflow("phase-contrast", density=density, target_sample_rate=target_rate)
     elif workflow == WorkflowType.CPAP:
-        if density is None:
-            density = 1.2  # Air
-        wf = CPAPWorkflow(
-            target_sample_rate=sample_rate,
-            density=density,
-        )
+        wf = build_workflow("cpap", density=density, target_sample_rate=sample_rate)
     else:  # STANDARD
-        if density is None:
-            density = 1.2  # Air
-        wf = StandardOSAMRIWorkflow(
-            target_sample_rate=sample_rate,
-            density=density,
-        )
+        wf = build_workflow("standard", density=density, target_sample_rate=sample_rate)
 
     console.print(f"Using [green]{wf.name}[/green] workflow")
 
@@ -393,11 +383,11 @@ def detect_steps_cmd(
     threshold: Annotated[
         float,
         typer.Option("--threshold", help="Threshold fraction of max amplitude (0-1)"),
-    ] = 0.5,
+    ] = DEFAULT_STEP_THRESHOLD_FRACTION,
     min_duration: Annotated[
         float,
         typer.Option("--min-duration", help="Minimum step duration in seconds"),
-    ] = 0.5,
+    ] = DEFAULT_STEP_MIN_DURATION_S,
 ) -> None:
     """Detect step triggers in a LabChart .mat file (for CT workflow).
 

@@ -890,7 +890,9 @@ class FlowProfileApp(QMainWindow):
         """Detect step (bridge) triggers from raw data and update CT UI."""
         from labchart2cfd.processing.step_detection import detect_steps
 
-        self._ct_steps = detect_steps(trigger_data, trigger_time, min_duration_s=1.0)
+        # Rely on the shared default (DEFAULT_STEP_MIN_DURATION_S) so step
+        # numbers stay consistent across the GUI and both CLI commands.
+        self._ct_steps = detect_steps(trigger_data, trigger_time)
 
         if not self._ct_steps:
             return
@@ -1795,10 +1797,10 @@ class FlowProfileApp(QMainWindow):
             from labchart2cfd.io.csv_export import (
                 export_flow_csv, export_pressure_csv, export_reorder_map_csv,
             )
-            from labchart2cfd.workflows import CTWorkflow
+            from labchart2cfd.workflows.factory import build_workflow
 
-            wf = CTWorkflow(
-                target_sample_rate=100.0, density=1.2,
+            wf = build_workflow(
+                "ct", density=1.2, target_sample_rate=100.0,
                 pressure_row=pressure_row if include_pressure else 1,
             )
             result = wf.process(
@@ -1901,16 +1903,11 @@ class FlowProfileApp(QMainWindow):
             try:
                 from labchart2cfd.io.csv_export import export_flow_csv, export_pressure_csv
                 from labchart2cfd.processing.rearrangement import time_to_image_index
-                from labchart2cfd.workflows import (
-                    StandardOSAMRIWorkflow,
-                    CPAPWorkflow,
-                    PhaseContrastWorkflow,
-                    CTWorkflow,
-                )
+                from labchart2cfd.workflows.factory import build_workflow
 
                 # Select workflow
                 if workflow_name == "CT":
-                    wf = CTWorkflow(density=1.2, pressure_row=effective_pressure_row)
+                    wf = build_workflow("ct", density=1.2, pressure_row=effective_pressure_row)
                     # Cycle mode: skip rearrangement so result.time fencepost
                     # positions (i-1)*dt map to original image index i.
                     if ct_cycle_frames:
@@ -2011,16 +2008,16 @@ class FlowProfileApp(QMainWindow):
                     result.metadata["selected_num_images"] = len(selected_indices)
                     result.metadata["selected_image_indices"] = selected_indices
                 elif workflow_name == "phase-contrast":
-                    wf = PhaseContrastWorkflow(density=5.761)
+                    wf = build_workflow("phase-contrast", density=5.761)
                     result = wf.process(self.data, flow_row, col, start_time, end_time)
                 elif workflow_name == "cpap":
-                    wf = CPAPWorkflow(density=1.2, pressure_row=effective_pressure_row)
+                    wf = build_workflow("cpap", density=1.2, pressure_row=effective_pressure_row)
                     result = wf.process(
                         self.data, flow_row, col, start_time, end_time,
                         include_pressure=include_pressure,
                     )
                 else:
-                    wf = StandardOSAMRIWorkflow(density=1.2, pressure_row=effective_pressure_row)
+                    wf = build_workflow("standard", density=1.2, pressure_row=effective_pressure_row)
                     result = wf.process(
                         self.data, flow_row, col, start_time, end_time,
                         include_pressure=include_pressure,

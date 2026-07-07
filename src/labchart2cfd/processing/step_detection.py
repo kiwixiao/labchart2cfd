@@ -10,11 +10,18 @@ import numpy as np
 from numpy.typing import NDArray
 
 
+# Shared defaults so the CLI (`process` and `detect-steps`) and the GUI all
+# detect the same steps. Keeping these in one place prevents the call sites from
+# drifting apart (a past divergence bug came from mismatched min-duration values).
+DEFAULT_STEP_THRESHOLD_FRACTION = 0.5
+DEFAULT_STEP_MIN_DURATION_S = 0.5
+
+
 def detect_steps(
     trigger_data: NDArray[np.float64],
     trigger_time: NDArray[np.float64],
-    threshold_fraction: float = 0.5,
-    min_duration_s: float = 1.0,
+    threshold_fraction: float = DEFAULT_STEP_THRESHOLD_FRACTION,
+    min_duration_s: float = DEFAULT_STEP_MIN_DURATION_S,
 ) -> List[dict]:
     """Detect step triggers (sustained high-level regions) in trigger data.
 
