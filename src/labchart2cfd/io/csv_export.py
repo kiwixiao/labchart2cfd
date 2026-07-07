@@ -25,23 +25,9 @@ def export_flow_csv(filepath, time, mass_flow, precision=5):
     Returns:
         Path to the created file
     """
-    filepath = Path(filepath)
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-
-    # Star-CCM+ expects quoted headers
-    header = '"time (s)","Massflowrate (kg/s)"'
-
-    # Build data lines with specified precision
-    fmt = "%.{}f".format(precision)
-    lines = [header]
-    for t, m in zip(time, mass_flow):
-        lines.append("{},{}".format(fmt % t, fmt % m))
-
-    # Write with Windows line endings (as MATLAB's fprintf does)
-    with open(str(filepath), "w", newline="") as f:
-        f.write("\r\n".join(lines) + "\r\n")
-
-    return filepath
+    return export_generic_csv(
+        filepath, time, mass_flow, '"Massflowrate (kg/s)"', precision
+    )
 
 
 def export_pressure_csv(filepath, time, pressure, precision=5):
@@ -56,23 +42,9 @@ def export_pressure_csv(filepath, time, pressure, precision=5):
     Returns:
         Path to the created file
     """
-    filepath = Path(filepath)
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-
-    # Star-CCM+ expects quoted headers
-    header = '"time (s)","Pressure (Pa)"'
-
-    # Build data lines with specified precision
-    fmt = "%.{}f".format(precision)
-    lines = [header]
-    for t, p in zip(time, pressure):
-        lines.append("{},{}".format(fmt % t, fmt % p))
-
-    # Write with Windows line endings
-    with open(str(filepath), "w", newline="") as f:
-        f.write("\r\n".join(lines) + "\r\n")
-
-    return filepath
+    return export_generic_csv(
+        filepath, time, pressure, '"Pressure (Pa)"', precision
+    )
 
 
 def export_reorder_map_csv(filepath, reorder_map, precision=5):

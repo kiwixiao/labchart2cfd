@@ -126,6 +126,30 @@ class TestCSVExport:
 
             assert header == '"time (s)","Custom Value (units)"'
 
+    def test_flow_and_pressure_byte_exact(self):
+        """Pin the exact bytes of the flow and pressure writers so the
+        de-duplication refactor stays provably output-preserving."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            time = np.array([0.0, 0.1])
+            flow = np.array([1.5, -2.25])
+            pressure = np.array([100.0, 200.0])
+
+            fp = Path(tmpdir) / "f.csv"
+            pp = Path(tmpdir) / "p.csv"
+            export_flow_csv(fp, time, flow)
+            export_pressure_csv(pp, time, pressure)
+
+            assert fp.read_bytes() == (
+                b'"time (s)","Massflowrate (kg/s)"\r\n'
+                b"0.00000,1.50000\r\n"
+                b"0.10000,-2.25000\r\n"
+            )
+            assert pp.read_bytes() == (
+                b'"time (s)","Pressure (Pa)"\r\n'
+                b"0.00000,100.00000\r\n"
+                b"0.10000,200.00000\r\n"
+            )
+
 
 class TestLabChartData:
     """Tests for LabChartData class."""
