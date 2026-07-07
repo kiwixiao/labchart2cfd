@@ -23,7 +23,7 @@ from typing import Optional
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.integrate import trapezoid
+from scipy.integrate import cumulative_trapezoid
 
 from labchart2cfd.io.labchart import LabChartData
 from labchart2cfd.processing.resampling import resample_to_rate
@@ -134,11 +134,17 @@ class PhaseContrastWorkflow(BaseWorkflow):
     ) -> float:
         """Calculate voltage-to-volume calibration factor.
 
-        Uses cumulative trapezoid integration to find total voltage-seconds,
-        which corresponds to 1 liter of gas.
+        Uses the PEAK of the cumulative voltage integral (voltage-seconds),
+        which corresponds to the known reference volume (1 liter of gas).
 
         MATLAB: vol = cumtrapz(timeU, flowV);
                 v_v = max(vol);  # voltage-seconds per liter
+
+        The peak (not the final/total integral) is required because the
+        zero-shifted breath integrates back toward zero over a full cycle:
+        the cumulative curve rises to a peak during inhale and falls during
+        exhale, so the total integral is ~0 and would give a meaningless
+        (near-zero) calibration factor.
 
         Args:
             time: Time array for the extraction window
@@ -147,8 +153,9 @@ class PhaseContrastWorkflow(BaseWorkflow):
         Returns:
             Calibration factor (voltage-seconds per liter)
         """
-        volume_integral = trapezoid(data, time)
-        return abs(volume_integral) if volume_integral != 0 else 1.0
+        cumulative_volume = cumulative_trapezoid(data, time, initial=0)
+        peak = float(np.max(cumulative_volume))
+        return peak if peak > 0 else 1.0
 
     def process(
         self,
