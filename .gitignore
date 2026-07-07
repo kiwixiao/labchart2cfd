@@ -27,3 +27,13 @@ ENV/
 # OS
 .DS_Store
 Thumbs.db
+
+# Patient data & LabChart exports — never commit (PHI risk on a public repo).
+# Negations allow intentionally-committed test fixtures under tests/.
+*.mat
+!tests/data/*.mat
+!tests/reference/*.mat
+
+# Generated CFD boundary-condition profiles
+*FlowProfile.csv
+*PressureProfile.csv
