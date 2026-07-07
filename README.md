@@ -48,9 +48,13 @@ labchart2cfd visualize input.mat --row 2 --column 3
 
 ### Launch GUI
 
+Running the bare command opens the GUI:
+
 ```bash
-labchart2cfd gui
+labchart2cfd
 ```
+
+(`labchart2cfd gui` also works.)
 
 ## Workflow Types
 

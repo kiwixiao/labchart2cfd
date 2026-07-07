@@ -19,9 +19,15 @@ from labchart2cfd.processing.step_detection import (
 app = typer.Typer(
     name="labchart2cfd",
     help="Convert LabChart .mat flow profile data to CSV for CFD simulation boundary conditions",
-    no_args_is_help=True,
 )
 console = Console()
+
+
+@app.callback(invoke_without_command=True)
+def _default(ctx: typer.Context) -> None:
+    """Launch the GUI when invoked without a subcommand."""
+    if ctx.invoked_subcommand is None:
+        gui()
 
 
 class WorkflowType(str, Enum):
