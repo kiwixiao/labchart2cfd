@@ -37,6 +37,25 @@ from labchart2cfd.io.labchart import LabChartData, load_labchart_mat
 from labchart2cfd.processing.profile_assembly import ProfilePart, assemble_parts
 
 
+def _safe_remove(artist) -> None:
+    """Detach a matplotlib artist, tolerating one that is already detached.
+
+    ``fig.clear()`` invalidates artists while our lists still hold references
+    to them. An unguarded ``artist.remove()`` then raises and aborts the rest
+    of the loop, leaving some markers on screen and the list un-emptied.
+    """
+    try:
+        artist.remove()
+    except (ValueError, AttributeError):
+        pass
+
+
+def _remove_all(artists) -> None:
+    """Detach every artist in an iterable, skipping any already detached."""
+    for artist in artists:
+        _safe_remove(artist)
+
+
 class AssemblyPreviewDialog(QDialog):
     """Popup showing the assembled synthetic flow profile."""
 
@@ -108,6 +127,7 @@ class FlowProfileApp(QMainWindow):
 
         # Full-manual synthetic-profile state (window + ordered parts)
         self._synth_mode: bool = False
+        self._syncing_grid: bool = False         # guards the dt <-> images linkage
         self._parts: List[ProfilePart] = []      # ordered parts = assembly order
         self._part_artists: list = []            # span + number artists per part
         self._grid_artists: list = []            # fencepost grid lines + numbers
@@ -442,16 +462,77 @@ class FlowProfileApp(QMainWindow):
         self.synth_enable_chk.toggled.connect(self._on_synth_mode_toggled)
         srow1.addWidget(self.synth_enable_chk)
         show_grid_btn = QPushButton("Show Image Grid")
-        show_grid_btn.clicked.connect(self._draw_synth_grid)
+        # Explicit lambda: clicked() would otherwise pass its checked flag as
+        # the `quiet` argument.
+        show_grid_btn.clicked.connect(lambda: self._draw_synth_grid(quiet=False))
         srow1.addWidget(show_grid_btn)
         self.synth_grid_label = QLabel("images: —")
         srow1.addWidget(self.synth_grid_label)
         srow1.addStretch(1)
         synth_layout.addLayout(srow1)
 
+        # Grid definition: dt and image count are two views of one grid, so
+        # editing either recomputes the other. Offsets slide the window and
+        # the grid independently.
+        srow_grid = QHBoxLayout()
+        srow_grid.addWidget(QLabel("Temporal Res (ms):"))
+        # Double, because a dt derived from an image count is rarely a whole ms.
+        self.synth_dt_spin = QDoubleSpinBox()
+        self.synth_dt_spin.setRange(0.01, 10000.0)
+        self.synth_dt_spin.setDecimals(2)
+        self.synth_dt_spin.setValue(float(self.ct_temporal_res_spin.value()))
+        self.synth_dt_spin.setFixedWidth(80)
+        self.synth_dt_spin.setToolTip(
+            "Seconds per image (one image owns exactly this much signal). "
+            "Editing this recomputes the image count."
+        )
+        srow_grid.addWidget(self.synth_dt_spin)
+
+        srow_grid.addWidget(QLabel("  Images:"))
+        self.synth_images_spin = QSpinBox()
+        self.synth_images_spin.setRange(1, 5000)
+        self.synth_images_spin.setValue(1)
+        self.synth_images_spin.setFixedWidth(70)
+        self.synth_images_spin.setToolTip(
+            "Number of images in the window (ground truth from your "
+            "reconstructed series). Editing this recomputes Temporal Res."
+        )
+        srow_grid.addWidget(self.synth_images_spin)
+
+        srow_grid.addWidget(QLabel("  Window offset (ms):"))
+        self.synth_window_offset_spin = QSpinBox()
+        self.synth_window_offset_spin.setRange(-600000, 600000)
+        self.synth_window_offset_spin.setValue(0)
+        self.synth_window_offset_spin.setFixedWidth(80)
+        self.synth_window_offset_spin.setToolTip(
+            "Slides Start and End together, moving the whole processed range."
+        )
+        srow_grid.addWidget(self.synth_window_offset_spin)
+        apply_win_offset_btn = QPushButton("Apply")
+        apply_win_offset_btn.setToolTip("Shift Start/End by the window offset.")
+        apply_win_offset_btn.clicked.connect(self._apply_window_offset)
+        srow_grid.addWidget(apply_win_offset_btn)
+
+        srow_grid.addWidget(QLabel("  Grid offset (ms):"))
+        self.synth_grid_offset_spin = QSpinBox()
+        self.synth_grid_offset_spin.setRange(0, 600000)
+        self.synth_grid_offset_spin.setValue(0)
+        self.synth_grid_offset_spin.setFixedWidth(80)
+        self.synth_grid_offset_spin.setToolTip(
+            "Moves grid line 1 inside the window, without changing Start/End."
+        )
+        srow_grid.addWidget(self.synth_grid_offset_spin)
+        srow_grid.addStretch(1)
+        synth_layout.addLayout(srow_grid)
+
+        self.synth_dt_warn_label = QLabel("")
+        self.synth_dt_warn_label.setStyleSheet("color: #b00;")
+        synth_layout.addWidget(self.synth_dt_warn_label)
+
         help_lbl = QLabel(
-            "① Enable + Show Image Grid   ② set From/To (or 'Pick on Plot')   "
-            "③ Add Part   ④ repeat → Assemble && Export"
+            "① Enable full-manual mode   ② set From/To (or 'Pick on Plot')   "
+            "③ Add Part   ④ repeat → Assemble && Export       "
+            "An image is the slice between two grid lines; From=To selects one image."
         )
         help_lbl.setWordWrap(True)
         help_lbl.setStyleSheet("color: #555;")
@@ -491,13 +572,24 @@ class FlowProfileApp(QMainWindow):
         for _text, _slot in [
             ("Move Up", self._move_part_up), ("Move Down", self._move_part_down),
             ("Edit Label", self._edit_part_label), ("Delete", self._delete_part),
-            ("Clear All", self._clear_parts),
+            ("Clear Parts", self._clear_parts), ("Clear All", self._clear_synth_all),
         ]:
             _b = QPushButton(_text)
             _b.clicked.connect(_slot)
             srow_actions.addWidget(_b)
         srow_actions.addStretch(1)
         synth_layout.addLayout(srow_actions)
+
+        # Grid inputs redraw the grid live, so the drawn numbers can never
+        # disagree with where clicks actually land.
+        self.synth_dt_spin.valueChanged.connect(self._on_synth_dt_changed)
+        self.synth_images_spin.valueChanged.connect(self._on_synth_images_changed)
+        self.synth_grid_offset_spin.valueChanged.connect(
+            lambda _v: self._refresh_synth_grid_if_active()
+        )
+        self.ct_temporal_res_spin.valueChanged.connect(self._on_ct_dt_changed)
+        self.start_spin.valueChanged.connect(lambda _v: self._refresh_synth_grid_if_active())
+        self.end_spin.valueChanged.connect(lambda _v: self._refresh_synth_grid_if_active())
 
         srow3 = QHBoxLayout()
         assemble_btn = QPushButton("Assemble && Export")
@@ -936,6 +1028,14 @@ class FlowProfileApp(QMainWindow):
                 self._add_cycle_label(event.xdata)
             elif self._ct_landmark_mode is not None:
                 self._add_ct_landmark(event.xdata)
+            elif self._synth_mode:
+                # Full-manual mode: ignore unarmed clicks. Time markers would
+                # overwrite Start/End, and the image grid is computed live from
+                # those, so a stray click would silently redefine the grid and
+                # invalidate parts already added.
+                self.status_bar.showMessage(
+                    "Full-manual mode: click 'Pick on Plot' first to select frames."
+                )
             else:
                 self._add_time_marker(event.xdata)
         elif event.button == 3:  # Right click
@@ -991,8 +1091,7 @@ class FlowProfileApp(QMainWindow):
     def _clear_time_markers(self) -> None:
         """Remove all time markers from both plots."""
         for artists in self._time_markers:
-            for artist in artists:
-                artist.remove()
+            _remove_all(artists)
         self._time_markers.clear()
         self.canvas.draw_idle()
         self.status_bar.showMessage("Time markers cleared")
@@ -1007,8 +1106,7 @@ class FlowProfileApp(QMainWindow):
             return
 
         # Clear previous trigger range markers
-        for artist in self._trigger_markers:
-            artist.remove()
+        _remove_all(self._trigger_markers)
         self._trigger_markers.clear()
 
         start_idx = self.start_trigger_spin.value()  # 1-indexed
@@ -1060,8 +1158,7 @@ class FlowProfileApp(QMainWindow):
     def _clear_all_markers(self) -> None:
         """Clear both time markers and trigger range markers."""
         self._clear_time_markers()
-        for artist in self._trigger_markers:
-            artist.remove()
+        _remove_all(self._trigger_markers)
         self._trigger_markers.clear()
         self._clear_ct_step_markers()
         self._clear_ct_interval_markers()
@@ -1105,8 +1202,7 @@ class FlowProfileApp(QMainWindow):
 
     def _clear_ct_step_markers(self) -> None:
         """Remove step trigger visualization markers."""
-        for artist in self._ct_step_markers:
-            artist.remove()
+        _remove_all(self._ct_step_markers)
         self._ct_step_markers.clear()
 
     def _select_ct_step(self) -> None:
@@ -1318,14 +1414,12 @@ class FlowProfileApp(QMainWindow):
 
     def _clear_ct_interval_markers(self) -> None:
         """Remove CT interval visualization markers."""
-        for artist in self._ct_interval_markers:
-            artist.remove()
+        _remove_all(self._ct_interval_markers)
         self._ct_interval_markers.clear()
 
     def _clear_ct_landmarks(self) -> None:
         """Clear CT landmark markers and reset landmark mode."""
-        for artist in self._ct_landmark_artists:
-            artist.remove()
+        _remove_all(self._ct_landmark_artists)
         self._ct_landmark_artists.clear()
         self._ct_landmark_mode = None
         self._ct_inhale_start = None
@@ -1387,9 +1481,9 @@ class FlowProfileApp(QMainWindow):
         remaining = []
         for artist in self._ct_landmark_artists:
             if hasattr(artist, "get_text") and artist.get_text() == label:
-                artist.remove()  # Annotation
+                _safe_remove(artist)  # Annotation
             elif hasattr(artist, "get_label") and artist.get_label() == label:
-                artist.remove()  # Line2D with label= kwarg
+                _safe_remove(artist)  # Line2D with label= kwarg
             else:
                 remaining.append(artist)
         self._ct_landmark_artists = remaining
@@ -1535,14 +1629,113 @@ class FlowProfileApp(QMainWindow):
             self.status_bar.showMessage("Full-manual mode off.")
 
     def _synth_grid(self):
-        """Return (start_t, dt, total_images) for the manual window, or None."""
+        """Return (origin, dt, n_images) for the manual window, or None.
+
+        ``origin`` is where grid line 1 sits (window start plus the grid
+        offset). Lines bound the images: line j is at origin+(j-1)*dt and
+        image i is the slice [line_i, line_i+1), so N images need N+1 lines.
+        """
         start_t = self.start_spin.value()
         end_t = self.end_spin.value()
-        dt = self.ct_temporal_res_spin.value() / 1000.0
-        if dt <= 0 or end_t <= start_t:
+        dt = self.synth_dt_spin.value() / 1000.0
+        origin = start_t + self.synth_grid_offset_spin.value() / 1000.0
+        if dt <= 0 or end_t <= origin:
             return None
-        total = int(round((end_t - start_t) / dt)) + 1
-        return start_t, dt, total
+        # Epsilon so a dt derived as span/N recovers exactly N slices.
+        n_images = int((end_t - origin) / dt + 1e-6)
+        if n_images < 1:
+            return None
+        return origin, dt, n_images
+
+    # Nominal CT temporal resolution; only used to flag an implausible dt.
+    _NOMINAL_DT_MS = 200.0
+
+    def _sync_images_from_grid(self, n_images: int) -> None:
+        """Show the computed image count without re-triggering the linkage."""
+        if self._syncing_grid:
+            return
+        self._syncing_grid = True
+        try:
+            self.synth_images_spin.setValue(n_images)
+        finally:
+            self._syncing_grid = False
+
+    def _on_synth_dt_changed(self, dt_ms: float) -> None:
+        """dt edited: mirror it to tab 3 and let the image count follow."""
+        if self._syncing_grid:
+            return
+        self._syncing_grid = True
+        try:
+            self.ct_temporal_res_spin.setValue(int(round(dt_ms)))
+        finally:
+            self._syncing_grid = False
+        self._check_dt_plausibility()
+        self._refresh_synth_grid_if_active()
+
+    def _on_ct_dt_changed(self, dt_ms: int) -> None:
+        """Tab 3's Temporal Res edited: mirror it into the synth grid."""
+        if self._syncing_grid:
+            return
+        self._syncing_grid = True
+        try:
+            self.synth_dt_spin.setValue(float(dt_ms))
+        finally:
+            self._syncing_grid = False
+        self._check_dt_plausibility()
+        self._refresh_synth_grid_if_active()
+
+    def _on_synth_images_changed(self, n_images: int) -> None:
+        """Image count edited: it is ground truth, so derive dt from it."""
+        if self._syncing_grid or n_images < 1:
+            return
+        origin = self.start_spin.value() + self.synth_grid_offset_spin.value() / 1000.0
+        span = self.end_spin.value() - origin
+        if span <= 0:
+            return
+        dt_ms = span / n_images * 1000.0
+        if dt_ms < self.synth_dt_spin.minimum():
+            return
+        self._syncing_grid = True
+        try:
+            self.synth_dt_spin.setValue(dt_ms)
+            self.ct_temporal_res_spin.setValue(int(round(dt_ms)))
+        finally:
+            self._syncing_grid = False
+        self._check_dt_plausibility()
+        self._refresh_synth_grid_if_active()
+
+    def _check_dt_plausibility(self) -> None:
+        """Warn when dt strays far from nominal (wrong window or image count)."""
+        dt_ms = self.synth_dt_spin.value()
+        if abs(dt_ms - self._NOMINAL_DT_MS) > 0.25 * self._NOMINAL_DT_MS:
+            self.synth_dt_warn_label.setText(
+                f"Temporal Res is {dt_ms:.2f} ms, far from the usual "
+                f"{self._NOMINAL_DT_MS:.0f} ms. Check Start/End and the image count."
+            )
+        else:
+            self.synth_dt_warn_label.setText("")
+
+    def _refresh_synth_grid_if_active(self) -> None:
+        """Redraw the grid if full-manual mode is on and a plot is showing."""
+        if (getattr(self, "_synth_mode", False)
+                and self.ax_top is not None
+                and self._plot_mode == "selected"):
+            self._draw_synth_grid(quiet=True)
+
+    def _apply_window_offset(self) -> None:
+        """Slide Start and End together by the window offset."""
+        off = self.synth_window_offset_spin.value() / 1000.0
+        if off == 0:
+            return
+        new_start = self.start_spin.value() + off
+        if new_start < 0:
+            QMessageBox.warning(self, "Bad Offset", "That offset puts Start before 0 s.")
+            return
+        self.start_spin.setValue(new_start)
+        self.end_spin.setValue(self.end_spin.value() + off)
+        self.synth_window_offset_spin.setValue(0)
+        self._refresh_synth_grid_if_active()
+        self.status_bar.showMessage(f"Window shifted by {off * 1000:.0f} ms.")
 
     def _clear_synth_grid(self) -> None:
         for artist in self._grid_artists:
@@ -1552,48 +1745,71 @@ class FlowProfileApp(QMainWindow):
                 pass
         self._grid_artists = []
 
-    def _draw_synth_grid(self) -> None:
-        """Draw the numbered image fencepost grid for the manual window."""
+    def _draw_synth_grid(self, quiet: bool = False) -> None:
+        """Draw the image grid for the manual window.
+
+        Args:
+            quiet: When True, return silently instead of raising a dialog if
+                the window is not usable yet. The live redraw uses this,
+                because Start/End are transiently invalid while being typed
+                and a modal dialog there would freeze the app.
+        """
         if self.ax_top is None or self._plot_mode != "selected":
-            QMessageBox.warning(self, "No Plot", "Select a block to view first.")
+            if not quiet:
+                QMessageBox.warning(self, "No Plot", "Select a block to view first.")
             return
         meta = self._synth_grid()
         if meta is None:
-            QMessageBox.warning(self, "Bad Window", "Set Start < End and a positive Temporal Res.")
+            if not quiet:
+                QMessageBox.warning(
+                    self, "Bad Window", "Set Start < End and a positive Temporal Res."
+                )
+            else:
+                # Drop a stale grid rather than leaving it contradicting the boxes.
+                self._clear_synth_grid()
+                self.synth_grid_label.setText("images: —")
+                self.canvas.draw_idle()
             return
-        start_t, dt, total = meta
-        # Keep Total Images consistent with the window (fixes desync).
-        self.ct_total_images_spin.setValue(total)
-        self.synth_grid_label.setText(f"images: 1..{total}  (dt={dt*1000:.0f} ms)")
+        origin, dt, n_images = meta
+        self._sync_images_from_grid(n_images)
+        self.synth_grid_label.setText(
+            f"images: 1..{n_images}  (dt={dt*1000:.0f} ms)"
+        )
         # Bound the From/To image entry boxes to the grid.
-        self.part_from_spin.setRange(1, total)
-        self.part_to_spin.setRange(1, total)
-        if self.part_to_spin.value() < 2 and total >= 2:
-            self.part_to_spin.setValue(2)
+        self.part_from_spin.setRange(1, n_images)
+        self.part_to_spin.setRange(1, n_images)
 
         self._clear_synth_grid()
-        label_every = max(1, total // 40)  # avoid clutter for long windows
-        for i in range(1, total + 1):
-            t = start_t + (i - 1) * dt
+        label_every = max(1, n_images // 40)  # avoid clutter for long windows
+        # N+1 boundary lines boundaries...
+        for j in range(1, n_images + 2):
+            t = origin + (j - 1) * dt
             line = self.ax_top.axvline(x=t, color="0.6", linestyle=":", linewidth=0.5, alpha=0.7)
             self._grid_artists.append(line)
-            if (i - 1) % label_every == 0 or i == total:
-                ann = self.ax_top.annotate(
-                    str(i), xy=(t, 1.0), xycoords=("data", "axes fraction"),
-                    fontsize=6, color="0.4", ha="center", va="bottom",
-                )
-                self._grid_artists.append(ann)
+        # ...and the image number centred inside the slice it names, so
+        # "image i" reads as the span between two lines, not as a line.
+        for i in range(1, n_images + 1):
+            if (i - 1) % label_every and i != n_images:
+                continue
+            t_mid = origin + (i - 0.5) * dt
+            ann = self.ax_top.annotate(
+                str(i), xy=(t_mid, 1.0), xycoords=("data", "axes fraction"),
+                fontsize=6, color="0.4", ha="center", va="bottom",
+            )
+            self._grid_artists.append(ann)
         self._draw_parts_overlay()
         self.canvas.draw_idle()
 
     def _snap_synth(self, x_time: float):
-        """Snap a click time to the nearest image number (1..N), or None."""
+        """Return the image (slice) the click landed inside, 1..N, or None."""
         meta = self._synth_grid()
         if meta is None:
             return None
-        start_t, dt, total = meta
-        img = int(round((x_time - start_t) / dt)) + 1
-        return max(1, min(img, total))
+        origin, dt, n_images = meta
+        # Epsilon: (0.6 - 0.0)/0.2 is 2.9999... in binary floating point, which
+        # would put a click exactly on a boundary in the previous slice.
+        img = int((x_time - origin) / dt + 1e-9) + 1
+        return max(1, min(img, n_images))
 
     def _add_part_from_spins(self) -> None:
         """Add a part using the From/To image number boxes (the explicit path)."""
@@ -1605,8 +1821,12 @@ class FlowProfileApp(QMainWindow):
             return
         a = self.part_from_spin.value()
         b = self.part_to_spin.value()
-        if a >= b:
-            QMessageBox.warning(self, "Bad Range", "'From image' must be less than 'To image'.")
+        if a > b:
+            QMessageBox.warning(
+                self, "Bad Range",
+                "'From image' must not be greater than 'To image'. "
+                "Set them equal to select a single image.",
+            )
             return
         self._parts.append(ProfilePart(start_image=a, end_image=b, label=""))
         self._refresh_parts_list()
@@ -1643,10 +1863,11 @@ class FlowProfileApp(QMainWindow):
         meta = self._synth_grid()
         if meta is None or self.ax_top is None:
             return
-        start_t, dt, _ = meta
-        t = start_t + (img - 1) * dt
-        self._capture_marker = self.ax_top.axvline(
-            x=t, color="red", linestyle="-", linewidth=1.5, alpha=0.9
+        origin, dt, _ = meta
+        # Shade the whole image slice, since an image is a span not a line.
+        self._capture_marker = self.ax_top.axvspan(
+            origin + (img - 1) * dt, origin + img * dt,
+            color="red", alpha=0.25,
         )
         self.canvas.draw_idle()
 
@@ -1697,11 +1918,12 @@ class FlowProfileApp(QMainWindow):
         meta = self._synth_grid()
         if meta is None:
             return
-        start_t, dt, _ = meta
+        origin, dt, _ = meta
         for idx, part in enumerate(self._parts):
             color = self._PART_COLORS[idx % len(self._PART_COLORS)]
-            t_a = start_t + (part.start_image - 1) * dt
-            t_b = start_t + (part.end_image - 1) * dt
+            # Images a..b span from line a to line b+1.
+            t_a = origin + (part.start_image - 1) * dt
+            t_b = origin + part.end_image * dt
             span = self.ax_top.axvspan(t_a, t_b, color=color, alpha=0.18)
             self._part_artists.append(span)
             ann = self.ax_top.annotate(
@@ -1717,7 +1939,7 @@ class FlowProfileApp(QMainWindow):
         meta = self._synth_grid()
         dt = meta[1] if meta else 0.2
         for idx, part in enumerate(self._parts):
-            dur = (part.end_image - part.start_image) * dt
+            dur = (part.end_image - part.start_image + 1) * dt
             lbl = f" [{part.label}]" if part.label else ""
             QListWidgetItem(
                 f"{idx + 1}.{lbl} images {part.start_image}-{part.end_image}  ({dur:.2f}s)",
@@ -1765,10 +1987,24 @@ class FlowProfileApp(QMainWindow):
             self.canvas.draw_idle()
 
     def _clear_parts(self) -> None:
+        """Clear only the parts list (the plot keeps its grid and markers)."""
         self._parts = []
         self._refresh_parts_list()
         self._draw_parts_overlay()
         self.canvas.draw_idle()
+
+    def _clear_synth_all(self) -> None:
+        """Clear everything this tab draws: parts, grid, markers, capture pin."""
+        self._cancel_part_capture()  # also clears the red capture marker
+        self._parts = []
+        self._refresh_parts_list()
+        _remove_all(self._part_artists)
+        self._part_artists = []
+        self._clear_synth_grid()
+        self._clear_time_markers()
+        self.synth_grid_label.setText("images: —")
+        self.canvas.draw_idle()
+        self.status_bar.showMessage("Cleared parts, image grid, and plot markers.")
 
     def _assemble_and_export(self) -> None:
         """Process the window, assemble parts, preview, and export 3 CSVs."""
@@ -1786,7 +2022,7 @@ class FlowProfileApp(QMainWindow):
         if meta is None:
             QMessageBox.warning(self, "Bad Window", "Set Start < End and a positive Temporal Res.")
             return
-        start_t, dt, _total = meta
+        start_t, dt, n_images = meta
         flow_row = self.flow_row_spin.value()
         col = self.col_spin.value()
         pressure_row = self.pressure_row_spin.value()
@@ -1808,11 +2044,14 @@ class FlowProfileApp(QMainWindow):
                 inhale_start_time=None, exhale_end_time=None,
                 temporal_resolution=dt, include_pressure=include_pressure,
             )
-            total_images = result.metadata["total_images"]
+            # Validate against the grid's own slice count, not the workflow's
+            # fencepost count: a part must name an image that has a slice.
+            total_images = n_images
             asm = assemble_parts(
                 result.mass_flow, self._parts, dt=dt,
                 sample_rate=result.sample_rate, total_images=total_images,
                 pressure=result.pressure,
+                grid_offset_s=self.synth_grid_offset_spin.value() / 1000.0,
             )
         except Exception as exc:  # surface engine/workflow errors clearly
             QMessageBox.critical(self, "Assembly Failed", str(exc))
