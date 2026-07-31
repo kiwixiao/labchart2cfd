@@ -25,6 +25,7 @@ from labchart2cfd.processing.rearrangement import (
     rearrange_at_landmark,
     compute_image_count,
     time_to_image_index,
+    image_index_to_time,
     rearrange_image_indices,
 )
 from labchart2cfd.processing.resampling import resample_multiple
@@ -111,9 +112,26 @@ class CTWorkflow(BaseWorkflow):
             and exhale_end_time is not None
             and exhale_end_time < inhale_start_time
         )
+
+        # Snap the cut to the start of the nearest image BEFORE splicing, so
+        # the exported waveform and the exported image order describe the same
+        # instant. Cutting at the raw click while reporting a rounded image
+        # index would leave them misaligned by up to half an image.
+        step_duration = end_time - start_time
+        total_images = compute_image_count(step_duration, temporal_resolution)
+        cut_image_idx = 0
+        cut_time = inhale_start_time
+        if needs_rearrange:
+            cut_image_idx = time_to_image_index(
+                inhale_start_time, start_time, temporal_resolution, total_images
+            )
+            cut_time = image_index_to_time(
+                cut_image_idx, start_time, temporal_resolution
+            )
+
         if needs_rearrange:
             time_windowed, flow_windowed = rearrange_at_landmark(
-                time_windowed, flow_windowed, inhale_start_time
+                time_windowed, flow_windowed, cut_time
             )
 
         # Step 3: Drift correction on rearranged signal
@@ -140,7 +158,7 @@ class CTWorkflow(BaseWorkflow):
                 _, pressure_pa = rearrange_at_landmark(
                     self._extract_time_window(full_time, full_time, start_time, end_time)[0],
                     pressure_pa,
-                    inhale_start_time,
+                    cut_time,
                 )
 
             # Resample both
@@ -161,16 +179,8 @@ class CTWorkflow(BaseWorkflow):
         # Normalize time to start at 0
         time_normalized = self._normalize_time(time_resampled)
 
-        # Step 8: Compute image mapping
-        step_duration = end_time - start_time
-        total_images = compute_image_count(step_duration, temporal_resolution)
-
-        cut_image_idx = 0
-        if needs_rearrange:
-            cut_image_idx = time_to_image_index(
-                inhale_start_time, start_time, temporal_resolution
-            )
-
+        # Step 8: Image mapping (count and cut index computed above, since the
+        # splice needs the snapped cut time).
         rearranged_indices = rearrange_image_indices(total_images, cut_image_idx)
 
         metadata = {
@@ -181,6 +191,8 @@ class CTWorkflow(BaseWorkflow):
             "step_end_time": end_time,
             "step_duration": step_duration,
             "inhale_start_time": inhale_start_time,
+            # The instant actually cut at, after snapping to an image start.
+            "inhale_snapped_time": cut_time,
             "exhale_end_time": exhale_end_time,
             "temporal_resolution_s": temporal_resolution,
             "total_images": total_images,

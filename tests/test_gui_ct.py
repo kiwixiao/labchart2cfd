@@ -149,6 +149,44 @@ def test_window_offset_slides_start_and_end(win):
     assert win.synth_window_offset_spin.value() == 0  # consumed
 
 
+def _select_fake_step(win, start=0.0, end=2.0, dt_ms=200):
+    win._ct_selected_step = {
+        "index": 1, "start_time": start, "end_time": end, "duration": end - start,
+    }
+    win._ct_detected_start, win._ct_detected_end = start, end
+    win.ct_temporal_res_spin.setValue(dt_ms)
+
+
+def test_step_selection_computes_image_count_from_the_step(win):
+    """Regression: the count spinbox's leftover value must not be taken as the
+    image count, which silently pinned a freshly selected step to 1 image."""
+    _select_fake_step(win, 0.0, 2.0, 200)
+    assert win.ct_total_images_spin.value() == 1  # stale default
+
+    win._draw_ct_intervals(update_total_images_field=True)
+
+    assert win.ct_total_images_spin.value() == 10  # 2.0 s / 200 ms slices
+
+
+def test_manual_frame_override_still_applies_during_a_shift_preview(win):
+    _select_fake_step(win, 0.0, 2.0, 200)
+    win.ct_total_images_spin.setValue(7)
+
+    win._draw_ct_intervals(update_total_images_field=False)
+
+    assert win.ct_total_images_spin.value() == 7  # untouched by the preview
+
+
+def test_landmark_reports_where_the_cut_snaps(win):
+    _select_fake_step(win, 0.0, 2.0, 200)
+
+    text = win._landmark_snap_text(1.27)
+
+    assert "image 7" in text     # 1-based; index 6 in the workflow metadata
+    assert "1.200s" in text
+    assert "70 ms" in text
+
+
 def test_clear_synth_all_clears_parts_markers_and_grid(win):
     win._synth_mode = False
     win._on_click(_Event(win.ax_top, 3.0))

@@ -35,6 +35,11 @@ from PyQt5.QtWidgets import (
 
 from labchart2cfd.io.labchart import LabChartData, load_labchart_mat
 from labchart2cfd.processing.profile_assembly import ProfilePart, assemble_parts
+from labchart2cfd.processing.rearrangement import (
+    compute_image_count,
+    image_index_to_time,
+    time_to_image_index,
+)
 
 
 def _safe_remove(artist) -> None:
@@ -1305,40 +1310,48 @@ class FlowProfileApp(QMainWindow):
         except (ValueError, TypeError):
             manual_frames = None
 
-        if (manual_frames is not None and manual_frames > 0
-                and self._ct_detected_start is not None and shift_ms != 0):
+        # The manual override applies only to a shift/correction preview
+        # (update_total_images_field=False). Selecting a step must recompute
+        # from the step itself, otherwise the spinbox's leftover value (1 by
+        # default) is taken as the image count and the auto path never runs.
+        manual_override = manual_frames is not None and manual_frames > 0 and not update_total_images_field
+
+        if (manual_override and self._ct_detected_start is not None and shift_ms != 0):
             # Manual correction mode: use shifted start + user-specified frame count
             start_t = self._ct_detected_start + shift_ms / 1000.0
-            num_lines = manual_frames
-        elif manual_frames is not None and manual_frames > 0 and self._ct_detected_start is not None:
+            n_images = manual_frames
+        elif manual_override and self._ct_detected_start is not None:
             # Frame count override only (no shift)
             start_t = self._ct_detected_start
-            num_lines = manual_frames
+            n_images = manual_frames
         else:
             # Auto mode: compute from step boundaries
             step = self._ct_selected_step
             start_t = step["start_time"]
             end_t = step["end_time"]
-            num_lines = int(np.round((end_t - start_t) / temporal_res_s)) + 1
+            n_images = compute_image_count(end_t - start_t, temporal_res_s)
 
-        # Draw fencepost lines: each line = 1 image
-        for i in range(num_lines):
+        # N images are bounded by N+1 lines.
+        for i in range(n_images + 1):
             t = start_t + i * temporal_res_s
             for ax in (self.ax_top, self.ax_bottom):
                 line = ax.axvline(x=t, color="blue", linestyle=":", linewidth=0.7, alpha=0.6)
                 self._ct_interval_markers.append(line)
 
-            # Label AT each fencepost line (not between)
-            img_idx = i + 1
-            if img_idx <= 50:  # limit labels for readability
-                ann = self.ax_top.annotate(
-                    str(img_idx),
-                    xy=(t, 0.02), xycoords=("data", "axes fraction"),
-                    fontsize=5, color="blue", ha="center", va="bottom",
-                )
-                self._ct_interval_markers.append(ann)
+        # Label each image centred in its slice, so the number names the span
+        # between two lines rather than a line itself.
+        for i in range(1, n_images + 1):
+            if i > 50:  # limit labels for readability
+                break
+            t_mid = start_t + (i - 0.5) * temporal_res_s
+            ann = self.ax_top.annotate(
+                str(i),
+                xy=(t_mid, 0.02), xycoords=("data", "axes fraction"),
+                fontsize=5, color="blue", ha="center", va="bottom",
+            )
+            self._ct_interval_markers.append(ann)
 
-        total_images = num_lines
+        total_images = n_images
         if update_total_images_field:
             self.ct_total_images_spin.setValue(total_images)
 
@@ -1388,9 +1401,10 @@ class FlowProfileApp(QMainWindow):
         temporal_res_ms = self.ct_temporal_res_spin.value()
         temporal_res_s = temporal_res_ms / 1000.0
 
-        # Compute corrected boundaries
+        # Compute corrected boundaries. N images span N*dt (they are slices),
+        # so the window ends at the closing line of the last image.
         corrected_start = self._ct_detected_start + shift_ms / 1000.0
-        corrected_end = corrected_start + (manual_frames - 1) * temporal_res_s
+        corrected_end = corrected_start + manual_frames * temporal_res_s
 
         # Update the processing fields
         self.start_spin.setValue(corrected_start)
@@ -1428,6 +1442,28 @@ class FlowProfileApp(QMainWindow):
         self.ct_exhale_label.setText("--")
         self.canvas.draw_idle()
 
+    def _landmark_snap_text(self, x_time: float) -> str:
+        """Describe where the cut will actually land, or '' if not knowable.
+
+        The splice snaps to the start of the nearest image so the exported
+        waveform and image order describe the same instant; showing both times
+        keeps that adjustment visible rather than silent.
+        """
+        step = self._ct_selected_step
+        dt_s = self.ct_temporal_res_spin.value() / 1000.0
+        if step is None or dt_s <= 0:
+            return ""
+        start_t = step["start_time"]
+        n_images = compute_image_count(step["end_time"] - start_t, dt_s)
+        if n_images < 1:
+            return ""
+        idx = time_to_image_index(x_time, start_t, dt_s, n_images)
+        snapped = image_index_to_time(idx, start_t, dt_s)
+        return (
+            f" | cut snaps to image {idx + 1} at {snapped:.3f}s "
+            f"({abs(snapped - x_time) * 1000:.0f} ms away)"
+        )
+
     def _add_ct_landmark(self, x_time: float) -> None:
         """Place a CT landmark (inhale start or exhale end) at the clicked time."""
         if self.ax_bottom is None or self.ax_top is None:
@@ -1453,7 +1489,9 @@ class FlowProfileApp(QMainWindow):
 
             self._ct_landmark_mode = None  # Single-click mode done
             self.canvas.draw_idle()
-            self.status_bar.showMessage(f"Inhale start marked at {x_time:.3f}s")
+            self.status_bar.showMessage(
+                f"Inhale start marked at {x_time:.3f}s" + self._landmark_snap_text(x_time)
+            )
 
         elif self._ct_landmark_mode == "exhale_end":
             color = "darkviolet"
@@ -2141,7 +2179,6 @@ class FlowProfileApp(QMainWindow):
         def _run() -> None:
             try:
                 from labchart2cfd.io.csv_export import export_flow_csv, export_pressure_csv
-                from labchart2cfd.processing.rearrangement import time_to_image_index
                 from labchart2cfd.workflows.factory import build_workflow
 
                 # Select workflow
@@ -2170,9 +2207,11 @@ class FlowProfileApp(QMainWindow):
                     dt_s = ct_temporal_res_ms / 1000.0
 
                     if ct_cycle_frames:
-                        # Split into ascending sub-sequences; each non-last
-                        # contributes m*dt, the last contributes (m-1)*dt, so
-                        # total = (N-1)*dt. Wrap boundaries add no gap.
+                        # Split into ascending sub-sequences. Images a..b are
+                        # the slices from line a to line b+1, so every
+                        # sub-sequence contributes m*dt and the total is N*dt.
+                        # Slices are disjoint, so no seam is double-counted and
+                        # the last sub-sequence needs no special case.
                         subseqs = []
                         current = [ct_cycle_frames[0]]
                         for i in range(1, len(ct_cycle_frames)):
@@ -2185,11 +2224,10 @@ class FlowProfileApp(QMainWindow):
 
                         chunks_flow = []
                         chunks_pressure = []
-                        last_subseq_idx = len(subseqs) - 1
-                        for idx, subseq in enumerate(subseqs):
+                        for subseq in subseqs:
                             a, b = subseq[0], subseq[-1]
                             t_lo = (a - 1) * dt_s
-                            t_hi = ((b - 1) * dt_s) if idx == last_subseq_idx else (b * dt_s)
+                            t_hi = b * dt_s
                             mask = (result.time >= t_lo) & (result.time < t_hi)
                             chunks_flow.append(result.mass_flow[mask])
                             if result.pressure is not None:
@@ -2223,11 +2261,13 @@ class FlowProfileApp(QMainWindow):
                         )
                         total_imgs = ct_total_images_manual
                     elif ct_inhale_start is not None and ct_exhale_end is not None:
+                        # Clamp to the images that exist, so a landmark near
+                        # the window edge cannot name a non-existent image.
                         inhale_img = time_to_image_index(
-                            ct_inhale_start, start_time, dt_s
+                            ct_inhale_start, start_time, dt_s, total_imgs
                         ) + 1  # 1-based
                         exhale_img = time_to_image_index(
-                            ct_exhale_end, start_time, dt_s
+                            ct_exhale_end, start_time, dt_s, total_imgs
                         ) + 1  # 1-based
 
                         if inhale_img <= exhale_img:

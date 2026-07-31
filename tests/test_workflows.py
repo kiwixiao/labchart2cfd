@@ -41,10 +41,37 @@ def test_ct_window_no_rearrange_image_map():
     assert len(result.time) == len(result.mass_flow)
     assert len(result.mass_flow) > 0
 
-    # No rearrangement requested -> cut index 0; fencepost image count = 2.0/0.2 + 1
-    assert result.metadata["total_images"] == 11
+    # No rearrangement requested -> cut index 0. Image count is the number of
+    # slices acquired, 2.0/0.2 = 10 (bounded by 11 grid lines).
+    assert result.metadata["total_images"] == 10
     assert result.metadata["cut_image_index"] == 0
     assert result.pressure is None
+
+
+def test_ct_cut_snaps_to_image_start_so_flow_and_images_align():
+    """The splice must happen at the instant the reported image index names.
+
+    Cutting at the raw click while reporting a rounded image index would leave
+    the exported waveform and the exported image order describing moments up
+    to half an image apart.
+    """
+    data = _single_channel_data(duration_s=2.0)
+    wf = CTWorkflow(target_sample_rate=100.0, density=1.2)
+
+    # exhale left of inhale -> the wrapping case, which triggers rearrangement.
+    result = wf.process(
+        data, row=1, column=1, start_time=0.0, end_time=2.0,
+        inhale_start_time=1.27, exhale_end_time=0.5,
+        temporal_resolution=0.2, include_pressure=False,
+    )
+
+    # 1.27 s is nearest the line at 1.2 s, which starts image index 6.
+    assert result.metadata["cut_image_index"] == 6
+    assert result.metadata["inhale_snapped_time"] == pytest.approx(1.2)
+    assert result.metadata["inhale_start_time"] == 1.27  # request preserved
+    # The rearranged order starts at the cut image and wraps.
+    assert result.metadata["rearranged_image_indices"][0] == 6
+    assert len(result.metadata["rearranged_image_indices"]) == 10
 
 
 def test_phase_contrast_calibration_uses_peak_cumulative():

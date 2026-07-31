@@ -7,6 +7,8 @@ it begins at inhale onset: [inhale_start → step_end] + [step_start → inhale_
 Image indices are similarly rearranged to match the reordered flow profile.
 """
 
+from typing import Optional
+
 import numpy as np
 from numpy.typing import NDArray
 
@@ -45,46 +47,78 @@ def compute_image_count(
     step_duration_s: float,
     temporal_resolution_s: float,
 ) -> int:
-    """Compute number of CT images in a step window (fencepost count).
+    """Compute the number of CT images acquired in a step window.
 
-    Uses fencepost semantics: N intervals produce N+1 boundary lines,
-    and each boundary is one image. Both the start and end of the step
-    count as images.
+    An image is the slice between two consecutive grid lines, so a window of
+    duration D holds D/dt images bounded by D/dt + 1 lines. A scanner running
+    4 s at 200 ms produces 20 images, not 21.
 
     Args:
         step_duration_s: Duration of the step trigger window in seconds
-        temporal_resolution_s: Time per image frame in seconds
+        temporal_resolution_s: Time per image in seconds
 
     Returns:
-        Number of images (N+1 fenceposts for N intervals)
+        Number of images (slices) in the window
     """
     if temporal_resolution_s <= 0:
         raise ValueError("temporal_resolution_s must be positive")
-    return int(np.round(step_duration_s / temporal_resolution_s)) + 1
+    return int(np.round(step_duration_s / temporal_resolution_s))
 
 
 def time_to_image_index(
     landmark_time: float,
     step_start_time: float,
     temporal_resolution_s: float,
+    total_images: Optional[int] = None,
 ) -> int:
-    """Convert a landmark time to the nearest fencepost image index.
+    """Index of the image whose start is nearest ``landmark_time``.
 
-    Uses round() to snap to the nearest fencepost boundary, avoiding
-    off-by-one errors when the click is slightly before a boundary.
+    A landmark is a point in time, so it snaps to the nearest image
+    *boundary*: this answers "which image starts here", not "which image
+    contains this". Rounding keeps a click that sits a hair before a boundary
+    from falling back into the previous image.
 
     Args:
         landmark_time: Absolute time of the landmark
         step_start_time: Absolute time of step start
-        temporal_resolution_s: Time per image frame in seconds
+        temporal_resolution_s: Time per image in seconds
+        total_images: When given, clamp the result to ``0..total_images-1``
+            so the index always names an image that exists.
 
     Returns:
-        0-based image index corresponding to the nearest fencepost
+        0-based index of the image starting nearest the landmark
     """
     if temporal_resolution_s <= 0:
         raise ValueError("temporal_resolution_s must be positive")
     offset = landmark_time - step_start_time
-    return int(np.round(offset / temporal_resolution_s))
+    idx = int(np.round(offset / temporal_resolution_s))
+    if total_images is not None:
+        idx = max(0, min(idx, total_images - 1))
+    return idx
+
+
+def image_index_to_time(
+    image_index: int,
+    step_start_time: float,
+    temporal_resolution_s: float,
+) -> float:
+    """Absolute start time of a 0-based image index.
+
+    Inverse of :func:`time_to_image_index`. Used to snap the flow splice to
+    the same instant the image index names, so the exported waveform and the
+    exported image order describe the same moment.
+
+    Args:
+        image_index: 0-based image index
+        step_start_time: Absolute time of step start
+        temporal_resolution_s: Time per image in seconds
+
+    Returns:
+        Absolute time at which that image begins
+    """
+    if temporal_resolution_s <= 0:
+        raise ValueError("temporal_resolution_s must be positive")
+    return step_start_time + image_index * temporal_resolution_s
 
 
 def rearrange_image_indices(

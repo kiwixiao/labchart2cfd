@@ -15,6 +15,7 @@ from labchart2cfd.processing.rearrangement import (
     rearrange_at_landmark,
     compute_image_count,
     time_to_image_index,
+    image_index_to_time,
     rearrange_image_indices,
 )
 from labchart2cfd.processing.profile_assembly import (
@@ -34,6 +35,7 @@ __all__ = [
     "rearrange_at_landmark",
     "compute_image_count",
     "time_to_image_index",
+    "image_index_to_time",
     "rearrange_image_indices",
     "ProfilePart",
     "AssemblyResult",
