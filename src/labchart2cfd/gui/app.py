@@ -528,11 +528,14 @@ class FlowProfileApp(QMainWindow):
 
         srow_grid.addWidget(QLabel("  Grid offset (ms):"))
         self.synth_grid_offset_spin = QSpinBox()
-        self.synth_grid_offset_spin.setRange(0, 600000)
+        # Negative allowed: the detected step edge can sit after the true first
+        # image, so the grid has to be shiftable in both directions.
+        self.synth_grid_offset_spin.setRange(-600000, 600000)
         self.synth_grid_offset_spin.setValue(0)
         self.synth_grid_offset_spin.setFixedWidth(80)
         self.synth_grid_offset_spin.setToolTip(
-            "Moves grid line 1 inside the window, without changing Start/End."
+            "Slides the whole grid earlier (negative) or later (positive) "
+            "without changing Start/End. This moves the exported range."
         )
         srow_grid.addWidget(self.synth_grid_offset_spin)
         srow_grid.addStretch(1)

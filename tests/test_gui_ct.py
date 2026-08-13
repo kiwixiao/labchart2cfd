@@ -151,6 +151,20 @@ def test_grid_offset_moves_the_anchor_without_changing_the_count(win):
     assert origin + n_images * dt == pytest.approx(3.5)
 
 
+def test_grid_offset_can_slide_the_grid_earlier(win):
+    """The detected step edge can sit after the true first image, so the grid
+    has to shift left as well as right."""
+    _set_window(win, 5.0, 9.0)
+    win.synth_images_spin.setValue(15)
+
+    win.synth_grid_offset_spin.setValue(-300)   # 0.3 s earlier
+
+    origin, dt, n_images = win._synth_grid()
+    assert origin == pytest.approx(4.7)
+    assert n_images == 15                        # count unaffected
+    assert origin + n_images * dt == pytest.approx(7.7)
+
+
 def test_dt_is_quantized_to_whole_flow_samples(win):
     """Slicing happens in whole samples, so the grid must use the same dt.
 
