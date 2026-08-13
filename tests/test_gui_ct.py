@@ -85,50 +85,84 @@ def test_clear_time_markers_survives_stale_artist(win):
     assert win._time_markers == []
 
 
-def _set_window(win, start, end, dt_ms=200):
+def _set_window(win, start, end, dt_ms=200, n_images=20):
     win.start_spin.setValue(start)
     win.end_spin.setValue(end)
     win.synth_dt_spin.setValue(float(dt_ms))
+    win.synth_images_spin.setValue(n_images)   # independent input now
     win.synth_grid_offset_spin.setValue(0)
 
 
-def test_grid_counts_slices_not_lines(win):
-    """A 4 s window at 200 ms holds 20 images, not 21 (the old fencepost count)."""
+def test_grid_is_exactly_dt_times_image_count(win):
+    """dt and the image count are independent inputs; the grid is their product."""
     _set_window(win, 0.0, 4.0)
+    win.synth_images_spin.setValue(15)
 
     origin, dt, n_images = win._synth_grid()
 
     assert origin == 0.0
     assert dt == pytest.approx(0.2)
-    assert n_images == 20
+    assert n_images == 15
+    assert n_images * dt == pytest.approx(3.0)   # not the 4 s window
 
 
-def test_grid_offset_moves_origin_and_shrinks_count(win):
+def test_changing_image_count_leaves_dt_alone(win):
     _set_window(win, 0.0, 4.0)
-    win.synth_grid_offset_spin.setValue(500)  # 0.5 s
+    win.synth_dt_spin.setValue(200.0)
 
-    origin, _dt, n_images = win._synth_grid()
+    win.synth_images_spin.setValue(15)
+    assert win.synth_dt_spin.value() == pytest.approx(200.0)
 
-    assert origin == pytest.approx(0.5)
-    assert n_images == 17  # 3.5 s / 0.2
+    win.synth_images_spin.setValue(14)
+    assert win.synth_dt_spin.value() == pytest.approx(200.0)
 
 
-def test_editing_image_count_derives_dt(win):
-    """Image count is ground truth, so dt follows from it."""
+def test_changing_dt_leaves_image_count_alone(win):
     _set_window(win, 0.0, 4.0)
-
-    win.synth_images_spin.setValue(16)
-
-    assert win.synth_dt_spin.value() == pytest.approx(250.0)
-    assert win._synth_grid()[2] == 16  # round-trips back to the count you set
-
-
-def test_editing_dt_derives_image_count(win):
-    _set_window(win, 0.0, 4.0)
+    win.synth_images_spin.setValue(15)
 
     win.synth_dt_spin.setValue(400.0)
 
-    assert win._synth_grid()[2] == 10
+    assert win.synth_images_spin.value() == 15
+    assert win._synth_grid()[1] == pytest.approx(0.4)
+
+
+def test_grid_may_extend_past_the_step_end(win):
+    """End is reference only; the grid is allowed to run past it."""
+    _set_window(win, 0.0, 1.0)          # 1 s step
+    win.synth_dt_spin.setValue(200.0)
+    win.synth_images_spin.setValue(15)  # 3 s of grid
+
+    origin, dt, n_images = win._synth_grid()
+
+    assert n_images == 15
+    assert origin + n_images * dt == pytest.approx(3.0)
+
+
+def test_grid_offset_moves_the_anchor_without_changing_the_count(win):
+    _set_window(win, 0.0, 4.0)
+    win.synth_images_spin.setValue(15)
+    win.synth_grid_offset_spin.setValue(500)  # 0.5 s
+
+    origin, dt, n_images = win._synth_grid()
+
+    assert origin == pytest.approx(0.5)
+    assert n_images == 15                      # unchanged by the offset
+    assert origin + n_images * dt == pytest.approx(3.5)
+
+
+def test_dt_is_quantized_to_whole_flow_samples(win):
+    """Slicing happens in whole samples, so the grid must use the same dt.
+
+    Regression for 'Part 9..15 needs samples up to 300 but the window has 297',
+    which came from drawing at a fractional dt and slicing at a rounded one.
+    """
+    _set_window(win, 0.0, 4.0)
+    win.synth_dt_spin.setValue(198.6)   # not a whole number of 100 Hz samples
+
+    _origin, dt, _n = win._synth_grid()
+
+    assert dt == pytest.approx(0.20)    # snapped to 20 samples
 
 
 def test_click_snaps_to_the_slice_it_landed_in(win):

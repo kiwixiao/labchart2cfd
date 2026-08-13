@@ -1758,6 +1758,10 @@ class FlowProfileApp(QMainWindow):
             if self._ct_cycle_mode and hasattr(self, "cycle_mode_btn"):
                 self.cycle_mode_btn.setChecked(False)
             self._ct_landmark_mode = None
+            # Seed the image count from the step the first time only, as a
+            # starting point. After that it is yours and nothing rewrites it.
+            if self.synth_images_spin.value() <= 1 and self.ct_total_images_spin.value() > 1:
+                self.synth_images_spin.setValue(self.ct_total_images_spin.value())
             self._draw_synth_grid()
             self.status_bar.showMessage(
                 "FULL MANUAL: set Start/End + Temporal Res, then 'Add Part' and "
@@ -1768,39 +1772,46 @@ class FlowProfileApp(QMainWindow):
             self.status_bar.showMessage("Full-manual mode off.")
 
     def _synth_grid(self):
-        """Return (origin, dt, n_images) for the manual window, or None.
+        """Return (origin, dt, n_images) for the manual grid, or None.
 
-        ``origin`` is where grid line 1 sits (window start plus the grid
-        offset). Lines bound the images: line j is at origin+(j-1)*dt and
-        image i is the slice [line_i, line_i+1), so N images need N+1 lines.
+        Temporal Res and the image count are **independent inputs**: the grid
+        is exactly ``n_images`` slices of ``dt`` starting at the anchor, and
+        neither box rewrites the other. Start/End and the step position the
+        anchor and give visual reference only, so the grid is free to extend
+        past the step end.
+
+        ``dt`` is quantised to whole flow samples, because the export slices in
+        samples. Drawing at a fractional dt while slicing at a rounded one is
+        what produced "needs samples up to 300 but the window only has 297".
         """
-        start_t = self.start_spin.value()
-        end_t = self.end_spin.value()
-        dt = self.synth_dt_spin.value() / 1000.0
-        origin = start_t + self.synth_grid_offset_spin.value() / 1000.0
-        if dt <= 0 or end_t <= origin:
+        dt_typed = self.synth_dt_spin.value() / 1000.0
+        n_images = self.synth_images_spin.value()
+        if dt_typed <= 0 or n_images < 1:
             return None
-        # Epsilon so a dt derived as span/N recovers exactly N slices.
-        n_images = int((end_t - origin) / dt + 1e-6)
-        if n_images < 1:
+        spi = int(round(dt_typed * self._SYNTH_SAMPLE_RATE))
+        if spi < 1:
             return None
+        dt = spi / self._SYNTH_SAMPLE_RATE
+        origin = self.start_spin.value() + self.synth_grid_offset_spin.value() / 1000.0
         return origin, dt, n_images
 
-    # Nominal CT temporal resolution; only used to flag an implausible dt.
-    _NOMINAL_DT_MS = 200.0
+    def _synth_export_window(self):
+        """Return (origin, grid_end) the export must process, or None.
 
-    def _sync_images_from_grid(self, n_images: int) -> None:
-        """Show the computed image count without re-triggering the linkage."""
-        if self._syncing_grid:
-            return
-        self._syncing_grid = True
-        try:
-            self.synth_images_spin.setValue(n_images)
-        finally:
-            self._syncing_grid = False
+        The exported range is defined by the grid, not by Start/End, so the
+        sample count always matches what the parts ask for.
+        """
+        meta = self._synth_grid()
+        if meta is None:
+            return None
+        origin, dt, n_images = meta
+        return origin, origin + n_images * dt
+
+    # Flow sample rate the export resamples to; the grid quantises dt to it.
+    _SYNTH_SAMPLE_RATE = 100.0
 
     def _on_synth_dt_changed(self, dt_ms: float) -> None:
-        """dt edited: mirror it to tab 3 and let the image count follow."""
+        """Temporal Res edited: mirror to tab 3, redraw. Image count untouched."""
         if self._syncing_grid:
             return
         self._syncing_grid = True
@@ -1808,8 +1819,8 @@ class FlowProfileApp(QMainWindow):
             self.ct_temporal_res_spin.setValue(int(round(dt_ms)))
         finally:
             self._syncing_grid = False
-        self._check_dt_plausibility()
         self._refresh_synth_grid_if_active()
+        self._update_grid_readout()
 
     def _on_ct_dt_changed(self, dt_ms: int) -> None:
         """Tab 3's Temporal Res edited: mirror it into the synth grid."""
@@ -1820,39 +1831,36 @@ class FlowProfileApp(QMainWindow):
             self.synth_dt_spin.setValue(float(dt_ms))
         finally:
             self._syncing_grid = False
-        self._check_dt_plausibility()
         self._refresh_synth_grid_if_active()
+        self._update_grid_readout()
 
     def _on_synth_images_changed(self, n_images: int) -> None:
-        """Image count edited: it is ground truth, so derive dt from it."""
+        """Image count edited: redraw. Temporal Res is left exactly as typed."""
         if self._syncing_grid or n_images < 1:
             return
-        origin = self.start_spin.value() + self.synth_grid_offset_spin.value() / 1000.0
-        span = self.end_spin.value() - origin
-        if span <= 0:
-            return
-        dt_ms = span / n_images * 1000.0
-        if dt_ms < self.synth_dt_spin.minimum():
-            return
-        self._syncing_grid = True
-        try:
-            self.synth_dt_spin.setValue(dt_ms)
-            self.ct_temporal_res_spin.setValue(int(round(dt_ms)))
-        finally:
-            self._syncing_grid = False
-        self._check_dt_plausibility()
         self._refresh_synth_grid_if_active()
+        self._update_grid_readout()
 
-    def _check_dt_plausibility(self) -> None:
-        """Warn when dt strays far from nominal (wrong window or image count)."""
-        dt_ms = self.synth_dt_spin.value()
-        if abs(dt_ms - self._NOMINAL_DT_MS) > 0.25 * self._NOMINAL_DT_MS:
-            self.synth_dt_warn_label.setText(
-                f"Temporal Res is {dt_ms:.2f} ms, far from the usual "
-                f"{self._NOMINAL_DT_MS:.0f} ms. Check Start/End and the image count."
-            )
-        else:
+    def _update_grid_readout(self) -> None:
+        """Show the span the grid covers, which is the range that gets exported."""
+        meta = self._synth_grid()
+        if meta is None:
             self.synth_dt_warn_label.setText("")
+            return
+        origin, dt, n_images = meta
+        end = origin + n_images * dt
+        note = (
+            f"grid spans {n_images * dt:.3f} s  ({origin:.3f} s to {end:.3f} s) "
+            f"= the exported range"
+        )
+        typed = self.synth_dt_spin.value() / 1000.0
+        if abs(typed - dt) > 1e-9:
+            note += (
+                f"   |  dt snapped {typed * 1000:.2f} -> {dt * 1000:.2f} ms "
+                f"({int(round(dt * self._SYNTH_SAMPLE_RATE))} samples "
+                f"at {self._SYNTH_SAMPLE_RATE:.0f} Hz)"
+            )
+        self.synth_dt_warn_label.setText(note)
 
     def _refresh_synth_grid_if_active(self) -> None:
         """Redraw the grid if full-manual mode is on and a plot is showing."""
@@ -1910,10 +1918,10 @@ class FlowProfileApp(QMainWindow):
                 self.canvas.draw_idle()
             return
         origin, dt, n_images = meta
-        self._sync_images_from_grid(n_images)
         self.synth_grid_label.setText(
             f"images: 1..{n_images}  (dt={dt*1000:.0f} ms)"
         )
+        self._update_grid_readout()
         # Bound the From/To image entry boxes to the grid.
         self.part_from_spin.setRange(1, n_images)
         self.part_to_spin.setRange(1, n_images)
@@ -2159,11 +2167,34 @@ class FlowProfileApp(QMainWindow):
             return
         meta = self._synth_grid()
         if meta is None:
-            QMessageBox.warning(self, "Bad Window", "Set Start < End and a positive Temporal Res.")
+            QMessageBox.warning(
+                self, "Bad Grid", "Set a positive Temporal Res and at least one image."
+            )
             return
         start_t, dt, n_images = meta
+        grid_end = start_t + n_images * dt
         flow_row = self.flow_row_spin.value()
         col = self.col_spin.value()
+
+        # The grid defines the exported range, so it must sit inside the
+        # recording. Refuse rather than invent or silently truncate data.
+        t_axis = self.data.get_time(flow_row, col)
+        if start_t < float(t_axis[0]) or grid_end > float(t_axis[-1]):
+            short_s = max(0.0, grid_end - float(t_axis[-1]))
+            QMessageBox.critical(
+                self, "Grid Outside Recording",
+                f"The grid needs {n_images} x {dt * 1000:.0f} ms = "
+                f"{n_images * dt:.3f} s starting at {start_t:.3f} s, "
+                f"so it runs to {grid_end:.3f} s.\n\n"
+                f"The recording covers {float(t_axis[0]):.3f} s to "
+                f"{float(t_axis[-1]):.3f} s"
+                + (f", short by {short_s:.3f} s "
+                   f"({int(np.ceil(short_s / dt))} image(s))." if short_s > 0
+                   else ".")
+                + "\n\nReduce the image count, shorten Temporal Res, "
+                  "or move the anchor with Start / Grid offset.",
+            )
+            return
         pressure_row = self.pressure_row_spin.value()
         include_pressure = pressure_row > 0
         output_dir = Path(self.outdir_edit.text())
@@ -2178,8 +2209,10 @@ class FlowProfileApp(QMainWindow):
                 "ct", density=1.2, target_sample_rate=100.0,
                 pressure_row=pressure_row if include_pressure else 1,
             )
+            # Process exactly the grid's range, so the sample count always
+            # matches what the parts need. Start/End are reference only.
             result = wf.process(
-                self.data, flow_row, col, self.start_spin.value(), self.end_spin.value(),
+                self.data, flow_row, col, start_t, grid_end,
                 inhale_start_time=None, exhale_end_time=None,
                 temporal_resolution=dt, include_pressure=include_pressure,
             )
@@ -2190,7 +2223,7 @@ class FlowProfileApp(QMainWindow):
                 result.mass_flow, self._parts, dt=dt,
                 sample_rate=result.sample_rate, total_images=total_images,
                 pressure=result.pressure,
-                grid_offset_s=self.synth_grid_offset_spin.value() / 1000.0,
+                grid_offset_s=0.0,  # the processed array already starts at the anchor
             )
         except Exception as exc:  # surface engine/workflow errors clearly
             QMessageBox.critical(self, "Assembly Failed", str(exc))
