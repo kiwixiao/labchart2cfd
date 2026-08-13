@@ -319,6 +319,14 @@ class FlowProfileApp(QMainWindow):
         self.subject_edit.textChanged.connect(self._update_outdir)
         proc_grid.addWidget(self.subject_edit, 0, 5)
 
+        zoom_btn = QPushButton("Zoom to Window")
+        zoom_btn.setToolTip(
+            "Fit the plot to Start/End with a small margin. Happens "
+            "automatically on step select and when you commit Start/End."
+        )
+        zoom_btn.clicked.connect(lambda: self._zoom_to_window())
+        proc_grid.addWidget(zoom_btn, 0, 6)
+
         # Row 1: workflow + output dir + execute
         proc_grid.addWidget(QLabel("Workflow:"), 1, 0)
         self.workflow_combo = QComboBox()
@@ -595,6 +603,10 @@ class FlowProfileApp(QMainWindow):
         self.ct_temporal_res_spin.valueChanged.connect(self._on_ct_dt_changed)
         self.start_spin.valueChanged.connect(lambda _v: self._refresh_synth_grid_if_active())
         self.end_spin.valueChanged.connect(lambda _v: self._refresh_synth_grid_if_active())
+        # Re-zoom once the value is committed (Enter or focus out) rather than
+        # on every keystroke, which would lurch the view while typing.
+        self.start_spin.editingFinished.connect(self._zoom_to_window)
+        self.end_spin.editingFinished.connect(self._zoom_to_window)
 
         srow3 = QHBoxLayout()
         assemble_btn = QPushButton("Assemble && Export")
@@ -1093,6 +1105,78 @@ class FlowProfileApp(QMainWindow):
             f"Start={self._get_start_var()}s, End={self._get_end_var()}s"
         )
 
+    # Fraction of the window added at each x end, and of the data range at
+    # each y end, so the signal never touches the frame.
+    _ZOOM_X_MARGIN = 0.05
+    _ZOOM_Y_MARGIN = 0.10
+
+    def _channel_y_limits(self, row: int, col: int, x_lo: float, x_hi: float):
+        """(lo, hi) y limits for one channel's data inside [x_lo, x_hi].
+
+        Read from the source arrays rather than the drawn artists, because the
+        axes also carry marker lines whose y data is in axes coordinates and
+        would otherwise dominate the range.
+        """
+        if self.data is None or row < 1 or row > self.data.num_channels:
+            return None
+        if self.data.is_block_empty(row, col):
+            return None
+        t = self.data.get_time(row, col)
+        y = self.data.get_data(row, col)
+        mask = (t >= x_lo) & (t <= x_hi)
+        if not np.any(mask):
+            return None
+        lo = float(np.min(y[mask]))
+        hi = float(np.max(y[mask]))
+        pad = (hi - lo) * self._ZOOM_Y_MARGIN
+        if pad == 0:  # flat signal: keep the view from collapsing to a line
+            pad = abs(hi) * self._ZOOM_Y_MARGIN or 1.0
+        return lo - pad, hi + pad
+
+    def _zoom_to_window(self, start_t: Optional[float] = None,
+                        end_t: Optional[float] = None) -> None:
+        """Zoom x and y to the processing window, with margin at every edge.
+
+        Each y axis is scaled to the data actually inside the window, so a
+        short step buried in a long recording fills the view instead of being
+        flattened by the full-recording range.
+        """
+        if self.data is None or self.ax_top is None or self._plot_mode != "selected":
+            return
+        if start_t is None:
+            start_t = self.start_spin.value()
+        if end_t is None:
+            end_t = self.end_spin.value()
+        if end_t <= start_t:
+            return
+
+        pad = (end_t - start_t) * self._ZOOM_X_MARGIN
+        self.ax_top.set_xlim(start_t - pad, end_t + pad)  # shared x: ax_bottom follows
+
+        col = self.col_spin.value()
+
+        # y comes from the window itself, not the padded span. Signal just
+        # outside the window is often much larger, and letting it set the
+        # range would flatten the very detail the zoom is meant to reveal.
+        flow_lim = self._channel_y_limits(self.flow_row_spin.value(), col, start_t, end_t)
+        if flow_lim is not None:
+            self.ax_top.set_ylim(*flow_lim)
+            if self.ax_bottom is not None:
+                self.ax_bottom.set_ylim(*flow_lim)
+
+        if self.ax_top_trig is not None:
+            trig_lim = self._channel_y_limits(
+                self.trigger_row_spin.value(), col, start_t, end_t
+            )
+            if trig_lim is not None:
+                self.ax_top_trig.set_ylim(*trig_lim)
+
+        self.canvas.draw_idle()
+        self.status_bar.showMessage(
+            f"Zoomed to {start_t:.3f}s - {end_t:.3f}s "
+            f"(+/-{pad * 1000:.0f} ms margin)"
+        )
+
     def _clear_time_markers(self) -> None:
         """Remove all time markers from both plots."""
         for artists in self._time_markers:
@@ -1257,6 +1341,10 @@ class FlowProfileApp(QMainWindow):
 
         # Draw temporal resolution interval lines within the step
         self._draw_ct_intervals()
+
+        # Bring the step into view so a short scan inside a long recording is
+        # actually readable.
+        self._zoom_to_window(step["start_time"], step["end_time"])
 
         # Reset landmarks AND cycle frames for the new step (stale cycle frames
         # from a prior step must not leak into this step's export).

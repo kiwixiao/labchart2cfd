@@ -12,10 +12,12 @@ import os
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+import numpy as np
 import pytest
 from PyQt5.QtWidgets import QApplication
 
 from labchart2cfd.gui.app import FlowProfileApp
+from labchart2cfd.io.labchart import LabChartData
 from labchart2cfd.processing.profile_assembly import ProfilePart
 
 
@@ -147,6 +149,79 @@ def test_window_offset_slides_start_and_end(win):
     assert win.start_spin.value() == pytest.approx(1.25)
     assert win.end_spin.value() == pytest.approx(5.25)
     assert win.synth_window_offset_spin.value() == 0  # consumed
+
+
+def _load_fake_signal(win):
+    """10 s recording whose flow is quiet only inside 4..6 s.
+
+    Full-signal amplitude is 1.0 but only 0.25 inside the window, so a y-zoom
+    that ignores the window is easy to tell apart from one that respects it.
+    """
+    t = np.linspace(0.0, 10.0, 10001)
+    inside = (t >= 4.0) & (t <= 6.0)
+    # Full amplitude everywhere outside, including right up against the window
+    # edges, so a y-range taken over the padded span would be visibly wrong.
+    flow = np.where(inside, 0.25 * np.sin(2 * np.pi * 0.5 * t), 1.0)
+    trigger = np.zeros_like(t)
+    trigger[inside] = 5.0
+
+    win.data = LabChartData(
+        data_cell=[[flow], [trigger]],
+        time_cell=[[t], [t]],
+        num_channels=2,
+        num_blocks=1,
+    )
+    win.flow_row_spin.setValue(1)
+    win.trigger_row_spin.setValue(2)
+    win.col_spin.setValue(1)
+    win.ax_top_trig = win.ax_top.twinx()
+
+
+def test_zoom_to_window_pads_x_on_both_ends(win):
+    _load_fake_signal(win)
+
+    win._zoom_to_window(4.0, 6.0)
+
+    lo, hi = win.ax_top.get_xlim()
+    assert lo == pytest.approx(3.9)   # 5% of the 2 s span, left
+    assert hi == pytest.approx(6.1)   # and right
+
+
+def test_zoom_to_window_scales_y_to_data_inside_the_window(win):
+    _load_fake_signal(win)
+
+    win._zoom_to_window(4.0, 6.0)
+
+    ylo, yhi = win.ax_top.get_ylim()
+    # Inside the window |flow| <= 0.25, so the view must be far tighter than
+    # the full-signal range of +/-1.0, and must still clear the peak.
+    assert 0.25 < yhi < 0.6
+    assert -0.6 < ylo < -0.25
+    # The bottom flow axis follows the same limits.
+    assert win.ax_bottom.get_ylim() == pytest.approx((ylo, yhi))
+
+
+def test_zoom_to_window_scales_the_trigger_twin_axis_separately(win):
+    _load_fake_signal(win)
+
+    win._zoom_to_window(4.0, 6.0)
+
+    tlo, thi = win.ax_top_trig.get_ylim()
+    # The trigger is held high for the whole step, so its in-window range is
+    # flat at 5.0; the flat-signal fallback keeps the axis from collapsing.
+    assert tlo < 5.0 < thi
+    assert thi < 7.0          # not left at some huge default
+    # Scaled independently of the flow axis, which sits near zero.
+    assert win.ax_top.get_ylim()[1] < 1.0
+
+
+def test_zoom_to_window_ignores_an_empty_or_inverted_window(win):
+    _load_fake_signal(win)
+    win.ax_top.set_xlim(0.0, 10.0)
+
+    win._zoom_to_window(6.0, 4.0)   # end before start
+
+    assert win.ax_top.get_xlim() == pytest.approx((0.0, 10.0))
 
 
 def _select_fake_step(win, start=0.0, end=2.0, dt_ms=200):
