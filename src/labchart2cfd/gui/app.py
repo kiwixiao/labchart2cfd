@@ -593,6 +593,19 @@ class FlowProfileApp(QMainWindow):
         srow_actions.addStretch(1)
         synth_layout.addLayout(srow_actions)
 
+        # Commit on Enter or focus-out rather than on every keystroke. With
+        # Qt's default keyboard tracking, typing "15" emits valueChanged for
+        # "1" first, so the grid would recompute for a one-image window and
+        # flicker before settling. Stepping with the arrows still reacts at
+        # once, because that path is not keyboard editing.
+        for _spin in (
+            self.start_spin, self.end_spin,
+            self.ct_temporal_res_spin, self.ct_total_images_spin,
+            self.synth_dt_spin, self.synth_images_spin,
+            self.synth_window_offset_spin, self.synth_grid_offset_spin,
+        ):
+            _spin.setKeyboardTracking(False)
+
         # Grid inputs redraw the grid live, so the drawn numbers can never
         # disagree with where clicks actually land.
         self.synth_dt_spin.valueChanged.connect(self._on_synth_dt_changed)

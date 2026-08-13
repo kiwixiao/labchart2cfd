@@ -151,6 +151,46 @@ def test_window_offset_slides_start_and_end(win):
     assert win.synth_window_offset_spin.value() == 0  # consumed
 
 
+def test_typing_a_number_recomputes_only_once_on_enter(win):
+    """Typing "15" must not first recompute for 1 image.
+
+    Qt's default keyboard tracking emits valueChanged per keystroke, which made
+    the grid churn through intermediate values while the user was still typing.
+    """
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtTest import QTest
+
+    win.show()
+    # The synth controls live on a tab that is disabled until CT is chosen,
+    # and keystrokes only reach a realized, enabled widget.
+    win.workflow_combo.setCurrentText("CT")
+    QApplication.processEvents()
+
+    spin = win.synth_images_spin
+    seen = []
+    spin.valueChanged.connect(seen.append)
+
+    spin.setFocus()
+    spin.lineEdit().selectAll()
+    QTest.keyClicks(spin, "15")
+    assert seen == []            # nothing committed while typing
+
+    QTest.keyClick(spin, Qt.Key_Return)
+    assert seen == [15]          # exactly one recompute, with the final value
+
+
+def test_arrow_stepping_still_reacts_immediately(win):
+    """Keyboard tracking off must not make the up/down arrows feel dead."""
+    spin = win.synth_images_spin
+    spin.setValue(5)
+    seen = []
+    spin.valueChanged.connect(seen.append)
+
+    spin.stepBy(1)
+
+    assert seen == [6]
+
+
 def _load_fake_signal(win):
     """10 s recording whose flow is quiet only inside 4..6 s.
 
