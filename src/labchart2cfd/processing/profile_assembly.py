@@ -62,7 +62,10 @@ class AssemblyResult:
         flow: Assembled mass-flow (deliverable A).
         pressure: Assembled pressure, or None if no pressure was supplied.
         reorder_map: One row per image, (new_frame, original_image,
-            original_time_s) — deliverable B.
+            original_time_s) — deliverable B. ``original_time_s`` is where the
+            image sits in the ORIGINAL recording, while ``time`` above is the
+            synthetic profile's own axis starting at 0; the two clocks are
+            deliberately different.
     """
 
     time: NDArray[np.float64]
@@ -79,6 +82,7 @@ def assemble_parts(
     total_images: int,
     pressure: Optional[NDArray[np.float64]] = None,
     grid_offset_s: float = 0.0,
+    window_start_s: float = 0.0,
 ) -> AssemblyResult:
     """Assemble an ordered list of parts into a synthetic profile + reorder map.
 
@@ -91,6 +95,10 @@ def assemble_parts(
         total_images: Number of images in the window (1..N).
         pressure: Optional processed pressure aligned with ``flow``.
         grid_offset_s: Seconds from the start of ``flow`` to grid line 1.
+        window_start_s: Absolute time of the first sample of ``flow`` in the
+            original recording. Added to the reorder map's time column so it
+            can be found on the recording's own axis; leave at 0 to keep that
+            column relative to the window.
 
     Returns:
         AssemblyResult with assembled flow/pressure, synthetic time, and the
@@ -147,7 +155,9 @@ def assemble_parts(
             pressure_chunks.append(pressure[lo:stop])
         for img in range(p.start_image, p.end_image + 1):
             new_frame += 1
-            reorder_map.append((new_frame, img, grid_offset_s + (img - 1) * dt))
+            reorder_map.append(
+                (new_frame, img, window_start_s + grid_offset_s + (img - 1) * dt)
+            )
 
     assembled_flow = np.concatenate(flow_chunks)
     if assembled_flow.size == 0:

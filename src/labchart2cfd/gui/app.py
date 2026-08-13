@@ -2227,6 +2227,7 @@ class FlowProfileApp(QMainWindow):
                 sample_rate=result.sample_rate, total_images=total_images,
                 pressure=result.pressure,
                 grid_offset_s=0.0,  # the processed array already starts at the anchor
+                window_start_s=start_t,  # so the map reads in recording time
             )
         except Exception as exc:  # surface engine/workflow errors clearly
             QMessageBox.critical(self, "Assembly Failed", str(exc))

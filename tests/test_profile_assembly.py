@@ -82,6 +82,32 @@ def test_grid_offset_shifts_every_slice():
     assert r.flow[0] == 10.0
 
 
+def test_map_time_is_absolute_while_flow_time_starts_at_zero():
+    """The two files speak different clocks, on purpose.
+
+    The flow CSV is the synthetic breath, so its axis starts at 0. The reorder
+    map points back at the scan, so its time must be findable on the original
+    recording's axis.
+    """
+    anchor = 1548.930
+    r = _assemble([ProfilePart(9, 15)], flow=_flow(301),
+                  total_images=15, window_start_s=anchor)
+
+    # Output clock: the assembled profile always begins at 0.
+    assert r.time[0] == 0.0
+
+    # Input clock: image 9 begins 8 slices after the anchor.
+    assert r.reorder_map[0] == (1, 9, pytest.approx(anchor + 8 * 0.2))
+    assert r.reorder_map[1][2] == pytest.approx(anchor + 9 * 0.2)
+
+
+def test_map_time_defaults_to_window_relative():
+    """Without an anchor the map stays relative, so existing callers are safe."""
+    r = _assemble([ProfilePart(4, 9)])
+
+    assert r.reorder_map[0] == (1, 4, pytest.approx(0.6))
+
+
 def test_pressure_assembled_parallel():
     r = _assemble([ProfilePart(2, 4)], pressure=_flow(201) * 10)
 
