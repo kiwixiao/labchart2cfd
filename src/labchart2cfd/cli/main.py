@@ -30,6 +30,36 @@ def _default(ctx: typer.Context) -> None:
         gui()
 
 
+def _resolve_trigger_row(trigger_row, flow_row, column, data) -> int:
+    """Return the trigger channel to read, exiting with a clear error if unusable.
+
+    An explicit --trigger-row is used verbatim. Channel layouts are not
+    standard across recordings, so the row is never inferred silently; when it
+    is omitted the old row-above convention is applied but stated out loud, so
+    a wrong guess is visible rather than trusted.
+    """
+    if trigger_row is None:
+        trigger_row = flow_row - 1
+        console.print(
+            f"[yellow]No --trigger-row given;[/yellow] assuming row "
+            f"{trigger_row} (the row above flow row {flow_row}). "
+            "Pass --trigger-row to be explicit."
+        )
+    if trigger_row < 1 or trigger_row > data.num_channels:
+        console.print(
+            f"[red]Error:[/red] Trigger row {trigger_row} is outside the "
+            f"1..{data.num_channels} channels in this file."
+        )
+        raise typer.Exit(1)
+    if data.is_block_empty(trigger_row, column):
+        console.print(
+            f"[red]Error:[/red] No trigger data at row {trigger_row}, "
+            f"column {column} (block is empty)."
+        )
+        raise typer.Exit(1)
+    return trigger_row
+
+
 class WorkflowType(str, Enum):
     """Available workflow types."""
     STANDARD = "standard"
@@ -112,6 +142,10 @@ def process(
         float,
         typer.Option("--min-duration", help="CT: minimum step duration in seconds"),
     ] = DEFAULT_STEP_MIN_DURATION_S,
+    trigger_row: Annotated[
+        Optional[int],
+        typer.Option("--trigger-row", help="CT: trigger channel row (1-indexed), used as given"),
+    ] = None,
 ) -> None:
     """Process a LabChart .mat file and export Star-CCM+ compatible CSV.
 
@@ -165,10 +199,7 @@ def process(
         # If step_number is provided, auto-detect step boundaries
         if step_number is not None:
             from labchart2cfd.processing.step_detection import detect_steps
-            trigger_row = row - 1
-            if trigger_row < 1 or data.is_block_empty(trigger_row, column):
-                console.print("[red]Error:[/red] No trigger channel found (expected row above flow channel)")
-                raise typer.Exit(1)
+            trigger_row = _resolve_trigger_row(trigger_row, row, column, data)
             trigger_data = data.get_data(trigger_row, column)
             trigger_time = data.get_time(trigger_row, column)
             # Use the same detection parameters as the `detect-steps` command
@@ -394,6 +425,10 @@ def detect_steps_cmd(
         float,
         typer.Option("--min-duration", help="Minimum step duration in seconds"),
     ] = DEFAULT_STEP_MIN_DURATION_S,
+    trigger_row: Annotated[
+        Optional[int],
+        typer.Option("--trigger-row", help="Trigger channel row (1-indexed), used as given"),
+    ] = None,
 ) -> None:
     """Detect step triggers in a LabChart .mat file (for CT workflow).
 
@@ -409,13 +444,10 @@ def detect_steps_cmd(
     console.print(f"Loading [cyan]{input_file}[/cyan]...")
     data = load_labchart_mat(input_file)
 
-    trigger_row = row - 1
-    if trigger_row < 1 or data.is_block_empty(trigger_row, column):
-        console.print(f"[red]Error:[/red] No trigger data at row {trigger_row}, column {column}")
-        raise typer.Exit(1)
-
+    trigger_row = _resolve_trigger_row(trigger_row, row, column, data)
     trigger_data = data.get_data(trigger_row, column)
     trigger_time = data.get_time(trigger_row, column)
+    console.print(f"  Reading trigger from row {trigger_row}, column {column}")
 
     steps = detect_steps(trigger_data, trigger_time, threshold, min_duration)
 

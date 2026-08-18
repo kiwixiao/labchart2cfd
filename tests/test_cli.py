@@ -4,6 +4,7 @@ Pins the GUI-first invocation contract: bare `labchart2cfd` launches the GUI,
 while subcommands and --help continue to work unchanged. The gui command itself
 must survive because the macOS relaunch re-invokes `-m labchart2cfd gui`.
 """
+import numpy as np
 from typer.testing import CliRunner
 
 from labchart2cfd.cli import main as cli_main
@@ -41,6 +42,64 @@ def test_help_still_shows_help_not_gui(monkeypatch):
     assert result.exit_code == 0
     assert "process" in result.output  # subcommands listed
     assert calls == []
+
+
+def _mat_with_separated_channels(tmp_path):
+    """Write a .mat whose trigger sits on ch1 and flow on ch3, NOT adjacent.
+
+    Channel 2 holds a flat signal, so a reader that guesses "the row above the
+    flow" lands on it and finds no steps. Only an exact row 1 works.
+    """
+    from scipy.io import savemat
+
+    fs = 1000.0
+    t = np.arange(0.0, 10.0, 1 / fs)
+    trigger = np.zeros_like(t)
+    trigger[(t >= 2.0) & (t < 5.0)] = 5.0        # one 3 s step on channel 1
+    decoy = np.zeros_like(t)                      # channel 2: nothing to find
+    flow = np.sin(2 * np.pi * 0.5 * t)            # channel 3
+
+    path = tmp_path / "sep.mat"
+    payload = {"titles": np.array(["trig", "decoy", "flow"], dtype=object)}
+    for i, sig in enumerate([trigger, decoy, flow], start=1):
+        payload[f"data_block{i - 1}"] = sig
+    # LabChart-style flat layout the reader understands.
+    payload = {
+        "data": np.concatenate([trigger, decoy, flow]),
+        "datastart": np.array([[1], [len(t) + 1], [2 * len(t) + 1]], dtype=float),
+        "dataend": np.array([[len(t)], [2 * len(t)], [3 * len(t)]], dtype=float),
+        "samplerate": np.array([[fs], [fs], [fs]]),
+        "titles": np.array(["trig ", "decoy", "flow "]),
+    }
+    savemat(str(path), payload)
+    return path
+
+
+def test_detect_steps_reads_the_exact_trigger_row_given(tmp_path):
+    """--trigger-row must be used verbatim, not guessed from the flow row."""
+    mat = _mat_with_separated_channels(tmp_path)
+
+    result = runner.invoke(
+        cli_main.app,
+        ["detect-steps", str(mat), "--row", "3", "--column", "1", "--trigger-row", "1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "1 step trigger" in result.output
+
+
+def test_detect_steps_reports_an_empty_trigger_row_instead_of_guessing(tmp_path):
+    """Pointing at the flat decoy channel must say so, not silently fall back."""
+    mat = _mat_with_separated_channels(tmp_path)
+
+    result = runner.invoke(
+        cli_main.app,
+        ["detect-steps", str(mat), "--row", "3", "--column", "1", "--trigger-row", "2"],
+    )
+
+    # Channel 2 is flat: no steps, and the message must name row 2.
+    assert "2" in result.output
+    assert "1 step trigger" not in result.output
 
 
 def test_gui_subcommand_still_exists():
