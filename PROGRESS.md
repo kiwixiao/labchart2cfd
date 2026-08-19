@@ -1,12 +1,12 @@
 # PROGRESS
 
 ## NEXT STEP
-Compare one exported `{Subject}FlowProfile.csv` against a known-good MATLAB-era result for the same subject; this is the only outstanding correctness check and it needs a subject with an old result on hand.
+User reviews and merges branch `fix/review-findings` (9 commits: the full bug-fix batch from the 2026-08-19 deep review). After merge: the MATLAB parity comparison remains the one outstanding correctness check. NOTE: the drift-correction fix deliberately breaks parity with the MATLAB original (which carries the same abs() bug), so old outputs for positive-drift recordings will differ, correctly.
 
 ## LAST SESSION
-2026-08-18. Found and fixed a CLI bug: `process` and `detect-steps` derived the trigger channel as `flow_row - 1` instead of accepting one, so with non-adjacent channel layouts they silently read the wrong channel. Both now take `--trigger-row` and use it verbatim; when omitted the fallback guess is printed rather than applied silently. On branch `fix/cli-explicit-trigger-row`, awaiting your merge.
+2026-08-19. Deep review of the whole codebase (3 parallel reviewers, findings independently verified), then fixed everything except the xenon calibration (deferred by user). On branch `fix/review-findings`, stacked on the unmerged trigger-row branch. 123 tests (was 97). Highlights: drift correction doubled the drift for one polarity (abs() inherited from MATLAB, now signed); CSV %.5f quantized mass flow to a ~61-step staircase (now %.9e); CT rearrangement silently skipped in the CLI's documented invocation; resampler delivered 99.75 Hz while reporting 100 and lost samples to int() truncation; step detection swallowed the whole recording on DC-offset triggers; the GUI Execute worker's completion callbacks never fired (QTimer from a plain thread, now pyqtSignal); the .mat reader trusted the file's index tables (truncation clamped silently, bad sentinels returned another channel's data); pressure was masked with the flow channel's time array and crashed on mixed-rate recordings. An adversarial verification workflow over the branch ran before handoff.
 
-Before that (2026-08-13, merged to main): the CT synthetic-profile work. Temporal Res and image count decoupled, the grid defines the exported range, reorder map records absolute recording time, grid offset made bidirectional. User tested the GUI end to end on real data and confirmed it works.
+Before that (2026-08-18): CLI --trigger-row fix on `fix/cli-explicit-trigger-row` (now part of the same line). Before that (2026-08-13, merged): CT synthetic-profile work, user-validated on real data.
 
 ## STATUS
 
@@ -18,8 +18,10 @@ Before that (2026-08-13, merged to main): the CT synthetic-profile work. Tempora
 | Temporal Res / image count decoupled; grid owns the export | done, on main |
 | Reorder map in absolute recording time | done, on main |
 | Auto-zoom to working window; numeric boxes commit on Enter | done, on main |
-| CLI explicit `--trigger-row` | done, branch `fix/cli-explicit-trigger-row`, needs merge |
-| MATLAB parity check on real data | not started, blocked on a known-good reference |
+| CLI explicit `--trigger-row` | done, in the `fix/review-findings` line, needs merge |
+| 2026-08-19 review fixes (drift sign, CSV precision, resampler, step threshold, CT rearrange, reader validation, GUI worker signals + state hygiene, CLI --pressure-row) | done, branch `fix/review-findings`, needs merge |
+| Xenon / phase-contrast calibration questions | deferred by user ("leave xenon, no worries for now") |
+| MATLAB parity check on real data | not started, blocked on a known-good reference; drift fix intentionally diverges |
 | `tests/data/` + `tests/reference/` fixtures | empty; CLAUDE.md describes them as parity fixtures |
 | `gui/app.py` decomposition (~2400 lines) | deferred by choice; needs manual click-through testing |
 | Windows packaging / CI | not started; see notes on PyInstaller freeze |
