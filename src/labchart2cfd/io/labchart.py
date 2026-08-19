@@ -124,6 +124,41 @@ class LabChartData:
         return self.data_cell[ch][bl] is None
 
 
+def _extract_titles(mat, num_channels):
+    # type: (dict, int) -> List[str]
+    """Parse channel titles from any of the layouts LabChart/MATLAB produce.
+
+    LabChart's exporter writes a char matrix (rows of fixed-width chars).
+    Re-saving from MATLAB turns it into a cell array, which loadmat delivers
+    as an object array; the old chr() fallback crashed on that.
+    """
+    if "titles" not in mat:
+        return []
+
+    titles_raw = mat["titles"]
+    # Cell array: object dtype, possibly nested one level by loadmat.
+    if getattr(titles_raw, "dtype", None) is not None and titles_raw.dtype == object:
+        flat = titles_raw.ravel()
+        items = []
+        for item in flat:
+            arr = np.asarray(item).ravel()
+            items.extend(str(x).strip() for x in arr)
+        return items[:num_channels]
+
+    titles = []
+    for i in range(num_channels):
+        if i < len(titles_raw):
+            title_item = titles_raw[i]
+            if isinstance(title_item, str):
+                titles.append(title_item.strip())
+            else:
+                # Char matrix row: join character codes.
+                titles.append(
+                    "".join(chr(c) for c in title_item if c != 0).strip()
+                )
+    return titles
+
+
 def load_labchart_mat(filepath):
     # type: (Union[str, Path]) -> LabChartData
     """Load a LabChart-exported .mat file.
@@ -155,54 +190,74 @@ def load_labchart_mat(filepath):
             "Export Matlab 3.0 or later (LabChart for Windows 7.2 or later)"
         )
 
-    # Extract core arrays
-    data = mat["data"].flatten()
+    # Required companion fields, with errors that name what is missing
+    # (a bare KeyError told the user nothing).
+    for field in ("datastart", "dataend", "samplerate"):
+        if field not in mat:
+            raise ValueError(
+                f"No '{field}' variable found in {filepath.name}; "
+                "not a complete LabChart export."
+            )
+
+    # Extract core arrays (ravel avoids flatten's unconditional copy)
+    data = mat["data"].ravel()
     datastart = mat["datastart"]
     dataend = mat["dataend"]
     samplerate = mat["samplerate"]
 
-    # Optional scaling (16-bit data)
+    # Optional scaling (16-bit data): scaleunits requires scaleoffset.
     has_scaling = "scaleunits" in mat
     if has_scaling:
+        if "scaleoffset" not in mat:
+            raise ValueError(
+                f"'{filepath.name}' has scaleunits but no scaleoffset; "
+                "not a complete LabChart export."
+            )
         scaleunits = mat["scaleunits"]
         scaleoffset = mat["scaleoffset"]
 
     # Get dimensions
     num_channels, num_blocks = datastart.shape
 
-    # Parse titles if available
-    titles = []
-    if "titles" in mat:
-        titles_raw = mat["titles"]
-        for i in range(num_channels):
-            if i < len(titles_raw):
-                title_item = titles_raw[i]
-                # Handle both string and character array formats
-                if isinstance(title_item, str):
-                    title = title_item.strip()
-                else:
-                    # Character array: join characters
-                    title = "".join(chr(c) for c in title_item if c != 0).strip()
-                titles.append(title)
+    titles = _extract_titles(mat, num_channels)
 
     # Initialize cell arrays
     data_cell = [[None for _ in range(num_blocks)] for _ in range(num_channels)]
     time_cell = [[None for _ in range(num_blocks)] for _ in range(num_channels)]
 
-    # Extract data for each channel and block
+    # Extract data for each channel and block. The index tables come from the
+    # file itself, so they are validated: Python slicing would silently clamp
+    # a truncated file, and a non-positive start other than the -1 sentinel
+    # would wrap into a negative index and return ANOTHER channel's samples.
     for ch in range(num_channels):
         for bl in range(num_blocks):
             # datastart == -1 indicates empty block
             start_idx = int(datastart[ch, bl])
             if start_idx == -1:
                 continue
+            if start_idx < 1:
+                raise ValueError(
+                    f"Corrupt datastart {start_idx} for channel {ch + 1}, "
+                    f"block {bl + 1} in {filepath.name}: only -1 (empty) or "
+                    "a 1-based index is valid."
+                )
 
             end_idx = int(dataend[ch, bl])
+            if end_idx < start_idx:
+                raise ValueError(
+                    f"Corrupt indices for channel {ch + 1}, block {bl + 1} in "
+                    f"{filepath.name}: dataend {end_idx} is before "
+                    f"datastart {start_idx}."
+                )
+            if end_idx > data.size:
+                raise ValueError(
+                    f"Channel {ch + 1}, block {bl + 1} in {filepath.name} "
+                    f"claims samples up to {end_idx} but the file holds only "
+                    f"{data.size}; the file is truncated (beyond data). "
+                    "Re-export or re-copy it."
+                )
 
-            # Extract raw data (MATLAB uses 1-indexed, Python uses 0-indexed)
-            # datastart/dataend are 1-indexed in MATLAB, but loadmat converts
-            # them as-is, so we need to subtract 1 for start and keep end as-is
-            # for Python's exclusive end slicing
+            # Extract raw data (MATLAB 1-indexed inclusive -> Python slice)
             pdata = data[start_idx - 1 : end_idx].astype(np.float64)
 
             # Apply scaling if available (16-bit data)
@@ -211,6 +266,11 @@ def load_labchart_mat(filepath):
 
             # Generate time array
             sr = float(samplerate[ch, bl])
+            if sr <= 0:
+                raise ValueError(
+                    f"Non-positive sample rate {sr} for channel {ch + 1}, "
+                    f"block {bl + 1} in {filepath.name}."
+                )
             ptime = np.arange(len(pdata)) / sr
 
             data_cell[ch][bl] = pdata
@@ -248,11 +308,21 @@ def describe_mat_structure(filepath):
     samplerate = mat.get("samplerate")
 
     if datastart is None:
-        return {"error": "Not a valid LabChart .mat file"}
+        return {"error": "Not a valid LabChart .mat file (no datastart)"}
+    if data is None:
+        # Without the data variable there is nothing to process; reporting a
+        # healthy structure here made `validate` pass on files `process`
+        # would then reject.
+        return {"error": "Not a valid LabChart .mat file (no data variable)"}
+    if dataend is None or samplerate is None:
+        return {"error": "Not a valid LabChart .mat file (missing dataend/samplerate)"}
 
     num_channels, num_blocks = datastart.shape
+    total_available = data.size
 
-    # Build block info
+    # Build block info; declared indices are checked against the actual data
+    # so a truncated or corrupt file is visibly flagged rather than described
+    # as healthy.
     blocks = []
     for ch in range(num_channels):
         for bl in range(num_blocks):
@@ -263,38 +333,38 @@ def describe_mat_structure(filepath):
                     "block": bl + 1,
                     "empty": True,
                 })
-            else:
-                end = int(dataend[ch, bl])
-                sr = float(samplerate[ch, bl])
-                n_samples = end - start + 1
-                duration = n_samples / sr
+                continue
+
+            end = int(dataend[ch, bl])
+            sr = float(samplerate[ch, bl])
+            if start < 1 or end < start or end > total_available or sr <= 0:
                 blocks.append({
                     "channel": ch + 1,
                     "block": bl + 1,
                     "empty": False,
-                    "samples": n_samples,
-                    "sample_rate": sr,
-                    "duration_s": duration,
+                    "corrupt": True,
+                    "declared_start": start,
+                    "declared_end": end,
                 })
+                continue
 
-    # Parse titles
-    titles = []
-    if "titles" in mat:
-        titles_raw = mat["titles"]
-        for i in range(num_channels):
-            if i < len(titles_raw):
-                title_item = titles_raw[i]
-                if isinstance(title_item, str):
-                    title = title_item.strip()
-                else:
-                    title = "".join(chr(c) for c in title_item if c != 0).strip()
-                titles.append(title)
+            n_samples = end - start + 1
+            blocks.append({
+                "channel": ch + 1,
+                "block": bl + 1,
+                "empty": False,
+                "samples": n_samples,
+                "sample_rate": sr,
+                "duration_s": n_samples / sr,
+            })
+
+    titles = _extract_titles(mat, num_channels)
 
     return {
         "filepath": str(filepath),
         "num_channels": num_channels,
         "num_blocks": num_blocks,
         "titles": titles,
-        "total_samples": len(data.flatten()) if data is not None else 0,
+        "total_samples": int(total_available),
         "blocks": blocks,
     }
