@@ -312,6 +312,94 @@ def test_zoom_to_window_ignores_an_empty_or_inverted_window(win):
     assert win.ax_top.get_xlim() == pytest.approx((0.0, 10.0))
 
 
+def test_execute_worker_reenables_the_button(qapp, win, tmp_path):
+    """The worker's completion used QTimer.singleShot from a plain thread,
+    which never fires (no Qt event loop there): the button stayed dead for
+    the session and error dialogs never appeared. Completion now crosses
+    threads via pyqtSignal."""
+    import time as _time
+    from labchart2cfd.io.labchart import LabChartData
+
+    t = np.linspace(0.0, 10.0, 10001)
+    flow = np.sin(2 * np.pi * 0.5 * t)
+    win.data = LabChartData(
+        data_cell=[[flow]], time_cell=[[t]], num_channels=1, num_blocks=1,
+    )
+    win.flow_row_spin.setValue(1)
+    win.pressure_row_spin.setValue(0)
+    win.col_spin.setValue(1)
+    win.workflow_combo.setCurrentText("MRI")
+    win.subject_edit.setText("TESTSUBJ")
+    win.outdir_edit.setText(str(tmp_path))
+    win.start_spin.setValue(2.0)
+    win.end_spin.setValue(6.0)
+
+    win._execute_processing()
+    assert not win.execute_btn.isEnabled()  # disabled while running
+
+    deadline = _time.time() + 15.0
+    while not win.execute_btn.isEnabled() and _time.time() < deadline:
+        qapp.processEvents()
+        _time.sleep(0.01)
+
+    assert win.execute_btn.isEnabled(), "worker completion never re-enabled Execute"
+    assert (tmp_path / "TESTSUBJ" / "TESTSUBJFlowProfile.csv").exists() or any(
+        tmp_path.rglob("TESTSUBJFlowProfile.csv")
+    )
+
+
+def test_failed_load_clears_previous_data(win, tmp_path, monkeypatch):
+    """A failed load left the previous file's data alive under the new file's
+    name; the plot then titled old data with the new name and Execute exported
+    it beside the new file."""
+    from pathlib import Path
+
+    win.data = object()  # stand-in for a previously loaded recording
+    bad = tmp_path / "broken.mat"
+    bad.write_bytes(b"not a mat file")
+    win.mat_filepath = Path(bad)
+    monkeypatch.setattr(
+        "labchart2cfd.gui.app.QMessageBox.critical",
+        staticmethod(lambda *a, **k: None),
+    )
+
+    win._load_and_overview()
+
+    assert win.data is None
+    assert win._plot_mode == "empty"
+
+
+def test_third_time_marker_restarts_the_pair(win):
+    """The third click used to draw a line that changed nothing, so the
+    visible markers stopped matching Start/End."""
+    win._synth_mode = False
+    for x in (5.0, 9.0):
+        win._on_click(_Event(win.ax_top, x))
+    assert win.start_spin.value() == pytest.approx(5.0)
+    assert win.end_spin.value() == pytest.approx(9.0)
+
+    win._on_click(_Event(win.ax_top, 12.0))
+
+    assert len(win._time_markers) == 1          # old pair cleared
+    assert win.start_spin.value() == pytest.approx(12.0)
+
+
+def test_pick_on_plot_accepts_a_single_image(win):
+    """Clicking the same frame twice selects one image, matching typed
+    From = To; it used to pop 'Pick two different frames'."""
+    _set_window(win, 0.0, 4.0)
+    win.synth_enable_chk.setChecked(True)
+    win._capturing_part = True
+    win._part_click_buffer = []
+
+    win._capture_part_click(0.45)   # image 3
+    win._capture_part_click(0.45)   # same image
+
+    assert win.part_from_spin.value() == 3
+    assert win.part_to_spin.value() == 3
+    assert not win._capturing_part
+
+
 def _select_fake_step(win, start=0.0, end=2.0, dt_ms=200):
     win._ct_selected_step = {
         "index": 1, "start_time": start, "end_time": end, "duration": end - start,

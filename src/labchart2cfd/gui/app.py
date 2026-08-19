@@ -23,7 +23,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from scipy.signal import find_peaks
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGroupBox, QLabel, QPushButton, QLineEdit, QComboBox,
@@ -87,6 +87,13 @@ class AssemblyPreviewDialog(QDialog):
 
 class FlowProfileApp(QMainWindow):
     """Main GUI application for flow profile processing."""
+
+    # Cross-thread completion signals for the Execute worker. QTimer.singleShot
+    # from a plain threading.Thread never fires (no Qt event loop in that
+    # thread), which left the button dead and error dialogs unshown; signal
+    # emission from a foreign thread is queued to the GUI thread correctly.
+    _processing_done = pyqtSignal(str)
+    _processing_failed = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -373,7 +380,9 @@ class FlowProfileApp(QMainWindow):
 
         ct_grid.addWidget(QLabel("Temporal Res (ms):"), 0, 4)
         self.ct_temporal_res_spin = QSpinBox()
-        self.ct_temporal_res_spin.setRange(10, 2000)
+        # Range matches the tab-4 dt box; a narrower range here made Qt clamp
+        # the mirrored value silently, so the two grids used different dt.
+        self.ct_temporal_res_spin.setRange(1, 10000)
         self.ct_temporal_res_spin.setSingleStep(10)
         self.ct_temporal_res_spin.setValue(200)
         self.ct_temporal_res_spin.setFixedWidth(70)
@@ -662,6 +671,21 @@ class FlowProfileApp(QMainWindow):
         self.status_bar.showMessage("Ready")
         self.setStatusBar(self.status_bar)
 
+        # Worker-completion signals land on the GUI thread here.
+        self._processing_done.connect(self._on_processing_done)
+        self._processing_failed.connect(self._on_processing_failed)
+
+    def _on_processing_done(self, msg: str) -> None:
+        """GUI-thread completion handler for the Execute worker."""
+        self.status_bar.showMessage(msg)
+        self.execute_btn.setEnabled(True)
+
+    def _on_processing_failed(self, error_msg: str) -> None:
+        """GUI-thread error handler for the Execute worker."""
+        QMessageBox.critical(self, "Processing Error", error_msg)
+        self.status_bar.showMessage(f"Error: {error_msg}")
+        self.execute_btn.setEnabled(True)
+
     # ------------------------------------------------------------------
     # Helpers for Tk-StringVar-like access (thin wrappers)
     # ------------------------------------------------------------------
@@ -768,18 +792,42 @@ class FlowProfileApp(QMainWindow):
         if self.mat_filepath is None:
             QMessageBox.warning(self, "No File", "Please select a .mat file first.")
             return
-
-        self._reset_plot_state()
-
-        self.status_bar.showMessage(f"Loading {self.mat_filepath.name}...")
-        QApplication.processEvents()
+        if getattr(self, "_loading", False):
+            return  # processEvents below can re-dispatch a queued click here
+        self._loading = True
 
         try:
-            self.data = load_labchart_mat(self.mat_filepath)
-        except Exception as e:
-            QMessageBox.critical(self, "Load Error", str(e))
-            self.status_bar.showMessage("Error loading file")
-            return
+            self._reset_plot_state()
+
+            self.status_bar.showMessage(f"Loading {self.mat_filepath.name}...")
+            QApplication.processEvents()
+
+            try:
+                self.data = load_labchart_mat(self.mat_filepath)
+            except Exception as e:
+                # A failed load must not leave the PREVIOUS file's data alive
+                # under the new file's name: the plot would title old data with
+                # the new name and Execute would export it beside the new file.
+                self.data = None
+                self._plot_mode = "empty"
+                self.fig.clear()
+                self.canvas.draw_idle()
+                QMessageBox.critical(self, "Load Error", str(e))
+                self.status_bar.showMessage("Error loading file")
+                return
+
+            # A different recording invalidates any parts labelled against the
+            # previous file's grid.
+            if getattr(self, "_loaded_filepath", None) != self.mat_filepath:
+                self._parts = []
+                self._refresh_parts_list()
+            self._loaded_filepath = self.mat_filepath
+        finally:
+            self._loading = False
+        self._show_overview()
+
+    def _show_overview(self) -> None:
+        """Draw the channels-x-blocks overview grid for the loaded file."""
 
         nch = self.data.num_channels
         nbl = self.data.num_blocks
@@ -1084,6 +1132,11 @@ class FlowProfileApp(QMainWindow):
         if self.ax_bottom is None or self.ax_top is None:
             return
 
+        # A third click restarts the pair. It used to draw a line that changed
+        # nothing, so the visible markers stopped matching Start/End.
+        if len(self._time_markers) >= 2:
+            self._clear_time_markers()
+
         # Draw on top subplot
         line_top = self.ax_top.axvline(x=x_time, color="green", linestyle="--", linewidth=1, alpha=0.8)
         ann_top = self.ax_top.annotate(
@@ -1374,13 +1427,26 @@ class FlowProfileApp(QMainWindow):
             f"Use buttons to mark Inhale Start and Exhale End"
         )
 
+    def _claim_click_mode(self) -> None:
+        """Make the interaction modes exclusive.
+
+        Cycle labelling and part capture sit above landmarks in the click
+        dispatch, so arming a landmark while one of them was active silently
+        stole the click and left the landmark armed indefinitely.
+        """
+        if self._ct_cycle_mode and hasattr(self, "cycle_mode_btn"):
+            self.cycle_mode_btn.setChecked(False)
+        self._cancel_part_capture()
+
     def _mark_inhale_start(self) -> None:
         """Activate click mode to place inhale start landmark."""
+        self._claim_click_mode()
         self._ct_landmark_mode = "inhale_start"
         self.status_bar.showMessage("Click on plot to mark INHALE START")
 
     def _mark_exhale_end(self) -> None:
         """Activate click mode to place exhale end landmark."""
+        self._claim_click_mode()
         self._ct_landmark_mode = "exhale_end"
         self.status_bar.showMessage("Click on plot to mark EXHALE END")
 
@@ -1990,6 +2056,8 @@ class FlowProfileApp(QMainWindow):
         if not self.synth_enable_chk.isChecked():
             QMessageBox.information(self, "Enable Mode", "Tick 'Enable full-manual mode' first.")
             return
+        # Exclusive click mode: a pending landmark must not survive underneath.
+        self._ct_landmark_mode = None
         if self._synth_grid() is None:
             QMessageBox.warning(
                 self, "Bad Window",
@@ -2046,10 +2114,7 @@ class FlowProfileApp(QMainWindow):
         self._capturing_part = False
         self._part_click_buffer = []
         self._clear_capture_marker()
-        if a == b:
-            self.capture_hint.setText("")
-            QMessageBox.warning(self, "Same Frame", "Pick two different frames.")
-            return
+        # a == b is a legal single-image part, same as typing From = To.
         self.part_from_spin.setValue(a)
         self.part_to_spin.setValue(b)
         self.capture_hint.setText(f"range {a}..{b} ready — click 'Add Part'")
@@ -2289,6 +2354,44 @@ class FlowProfileApp(QMainWindow):
         workflow_name = self.workflow_combo.currentText()
         output_dir = Path(self.outdir_edit.text())
         include_pressure = pressure_row > 0
+
+        # Validate against the data BEFORE spawning the worker, so a bad
+        # window or block fails with a dialog instead of dying in the thread.
+        if self.data.is_block_empty(flow_row, col):
+            QMessageBox.critical(
+                self, "Empty Block",
+                f"Flow block [{flow_row}, {col}] is empty.",
+            )
+            return
+        t_axis = self.data.get_time(flow_row, col)
+        if start_time > float(t_axis[-1]) or end_time < float(t_axis[0]):
+            QMessageBox.critical(
+                self, "Window Outside Recording",
+                f"The window {start_time:.3f}s to {end_time:.3f}s does not "
+                f"intersect the recording, which covers "
+                f"{float(t_axis[0]):.3f}s to {float(t_axis[-1]):.3f}s.",
+            )
+            return
+
+        # Cycle labels were snapped against the drawn fencepost grid, which is
+        # anchored at detected_start + shift. The export windows at Start Time.
+        # If those disagree (shift previewed but Apply Correction not clicked,
+        # or Start typed by hand), every chunk would be taken from the wrong
+        # place, so refuse rather than export silently shifted data.
+        if self._ct_cycle_frames and self._ct_detected_start is not None:
+            grid_anchor = (
+                self._ct_detected_start + self.ct_shift_spin.value() / 1000.0
+            )
+            dt_s = self.ct_temporal_res_spin.value() / 1000.0
+            if abs(start_time - grid_anchor) > dt_s / 2:
+                QMessageBox.critical(
+                    self, "Grid Out of Sync",
+                    f"The cycle labels were placed on a grid anchored at "
+                    f"{grid_anchor:.3f}s, but Start Time is {start_time:.3f}s. "
+                    "Click 'Apply Correction' (or reset the Start Shift) so "
+                    "the export uses the same grid you labelled.",
+                )
+                return
         # Standard/CPAP/CT read pressure from self.pressure_row on the workflow;
         # pick a safe default when user set "none" so the attribute exists.
         effective_pressure_row = pressure_row if include_pressure else 1
@@ -2309,6 +2412,10 @@ class FlowProfileApp(QMainWindow):
         # the workflow's auto-computed fencepost count for the raw step window).
         ct_total_images_manual = int(self.ct_total_images_spin.value())
 
+        # Snapshot the data reference: a Load Overview during processing must
+        # not swap the recording out from under the worker mid-run.
+        data = self.data
+
         # Disable button during processing
         self.execute_btn.setEnabled(False)
         self.status_bar.showMessage("Processing...")
@@ -2326,7 +2433,7 @@ class FlowProfileApp(QMainWindow):
                     # positions (i-1)*dt map to original image index i.
                     if ct_cycle_frames:
                         result = wf.process(
-                            self.data, flow_row, col, start_time, end_time,
+                            data, flow_row, col, start_time, end_time,
                             inhale_start_time=None,
                             exhale_end_time=None,
                             temporal_resolution=ct_temporal_res_ms / 1000.0,
@@ -2334,7 +2441,7 @@ class FlowProfileApp(QMainWindow):
                         )
                     else:
                         result = wf.process(
-                            self.data, flow_row, col, start_time, end_time,
+                            data, flow_row, col, start_time, end_time,
                             inhale_start_time=ct_inhale_start,
                             exhale_end_time=ct_exhale_end,
                             temporal_resolution=ct_temporal_res_ms / 1000.0,
@@ -2426,17 +2533,17 @@ class FlowProfileApp(QMainWindow):
                     result.metadata["selected_image_indices"] = selected_indices
                 elif workflow_name == "phase-contrast":
                     wf = build_workflow("phase-contrast", density=5.761)
-                    result = wf.process(self.data, flow_row, col, start_time, end_time)
+                    result = wf.process(data, flow_row, col, start_time, end_time)
                 elif workflow_name == "cpap":
                     wf = build_workflow("cpap", density=1.2, pressure_row=effective_pressure_row)
                     result = wf.process(
-                        self.data, flow_row, col, start_time, end_time,
+                        data, flow_row, col, start_time, end_time,
                         include_pressure=include_pressure,
                     )
                 else:
                     wf = build_workflow("standard", density=1.2, pressure_row=effective_pressure_row)
                     result = wf.process(
-                        self.data, flow_row, col, start_time, end_time,
+                        data, flow_row, col, start_time, end_time,
                         include_pressure=include_pressure,
                     )
 
@@ -2543,28 +2650,12 @@ class FlowProfileApp(QMainWindow):
                     f" | Time zeroed for STAR-CCM+"
                 )
 
-                def _done():
-                    self.status_bar.showMessage(msg)
-                    self.execute_btn.setEnabled(True)
-
-                QTimer.singleShot(0, _done)
+                self._processing_done.emit(msg)
 
             except Exception as e:
                 import traceback
                 traceback.print_exc()  # so the real error shows in the terminal
-                error_msg = f"{type(e).__name__}: {e}"
-
-                def _error():
-                    QMessageBox.critical(self, "Processing Error", error_msg)
-                    self.status_bar.showMessage(f"Error: {error_msg}")
-                    self.execute_btn.setEnabled(True)
-
-                QTimer.singleShot(0, _error)
-            finally:
-                # Safety net: guarantee the button re-enables even if both
-                # scheduled callbacks somehow fail to fire. Re-enabling an
-                # already-enabled button is a harmless no-op.
-                QTimer.singleShot(0, lambda: self.execute_btn.setEnabled(True))
+                self._processing_failed.emit(f"{type(e).__name__}: {e}")
 
         Thread(target=_run, daemon=True).start()
 
