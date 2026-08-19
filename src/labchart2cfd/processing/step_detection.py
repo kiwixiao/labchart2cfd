@@ -54,15 +54,18 @@ def detect_steps(
     # Threshold sits inside the signal's RANGE, not at a fraction of max(|x|).
     # A trigger idling at 4 V stepping to 5 V is entirely above 0.5*max(|x|),
     # which used to make the "step" span the whole recording.
-    threshold = lo + threshold_fraction * (hi - lo)
+    span = hi - lo
 
-    # Binary signal: above threshold = high
-    high = trigger_data >= threshold
-
-    # Polarity: steps are the minority excursion. If the baseline (median)
-    # sits above the threshold, the steps go downward, so invert.
-    if float(np.median(trigger_data)) >= threshold:
-        high = ~high
+    # Polarity is anchored to the RESTING level, taken as whichever extreme the
+    # recording starts at (acquisition begins before the scanner fires). A step
+    # is then any excursion away from that level, which works for a positive or
+    # a negative going trigger and, unlike a median/duty-cycle heuristic, does
+    # not invert when a step happens to occupy more than half the recording.
+    starts_low = abs(float(trigger_data[0]) - lo) <= abs(float(trigger_data[0]) - hi)
+    if starts_low:
+        high = trigger_data >= lo + threshold_fraction * span
+    else:
+        high = trigger_data <= hi - threshold_fraction * span
 
     # Detect edges by diff: +1 = rising, -1 = falling
     edges = np.diff(high.astype(np.int8))

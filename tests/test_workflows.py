@@ -129,6 +129,51 @@ def test_pressure_at_a_different_sample_rate_is_windowed_on_its_own_time():
     assert 300.0 < float(np.mean(result.pressure)) < 700.0
 
 
+def _short_pressure_data(flow_s=60.0, pressure_s=5.0):
+    """Flow spans the whole recording; the pressure channel stops early."""
+    tf = np.arange(0.0, flow_s, 0.001)
+    tp = np.arange(0.0, pressure_s, 0.001)
+    return LabChartData(
+        data_cell=[[tf * 0.0], [np.sin(2 * np.pi * 0.3 * tf)], [None],
+                   [5.0 + np.cos(2 * np.pi * 0.3 * tp)]],
+        time_cell=[[tf], [tf], [None], [tp]],
+        num_channels=4, num_blocks=1,
+    )
+
+
+def test_pressure_never_truncates_the_flow():
+    """Regression I introduced: trimming both to a common length silently
+    shortened the exported flow from the requested 5 s to 2 s when the
+    pressure channel only partly covered the window."""
+    from labchart2cfd.workflows import StandardOSAMRIWorkflow
+
+    data = _short_pressure_data()
+    wf = StandardOSAMRIWorkflow(target_sample_rate=100.0)
+
+    result = wf.process(data, row=2, column=1, start_time=3.0, end_time=8.0,
+                        include_pressure=True)
+
+    assert result.time[-1] == pytest.approx(5.0)   # full requested span
+    assert len(result.mass_flow) == 501
+    assert result.pressure is None                  # dropped, not fudged
+    assert "does not cover" in result.metadata["pressure_note"]
+
+
+def test_missing_pressure_coverage_does_not_kill_the_flow_export():
+    """A pressure channel that does not reach the window must not abort the
+    whole run: flow is the deliverable, pressure is optional."""
+    from labchart2cfd.workflows import StandardOSAMRIWorkflow
+
+    data = _short_pressure_data()
+    wf = StandardOSAMRIWorkflow(target_sample_rate=100.0)
+
+    result = wf.process(data, row=2, column=1, start_time=20.0, end_time=30.0,
+                        include_pressure=True)
+
+    assert len(result.mass_flow) == 1001
+    assert result.pressure is None
+
+
 def test_window_outside_data_raises_a_named_error():
     """An out-of-range window used to die deep in resampling with a bare
     IndexError; now the window extraction itself explains the problem."""

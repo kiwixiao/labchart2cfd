@@ -7,6 +7,7 @@ from typing import Optional
 
 import numpy as np
 from numpy.typing import NDArray
+from scipy.interpolate import CubicSpline
 
 from labchart2cfd.io.labchart import LabChartData
 
@@ -123,26 +124,43 @@ class BaseWorkflow(ABC):
             )
         return time[mask], data[mask]
 
-    def _windowed_pressure(
+    def _pressure_on_time_base(
         self,
         data: LabChartData,
         pressure_row: int,
         column: int,
-        start_time: float,
-        end_time: float,
-    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
-        """Window the pressure channel on its OWN time base.
+        target_time: NDArray[np.float64],
+    ) -> Optional[NDArray[np.float64]]:
+        """Interpolate the pressure channel onto the flow's resampled time base.
 
-        LabChart routinely records channels at different sample rates, and
-        masking pressure with the flow channel's time array crashed with a
-        boolean-index length mismatch whenever the rates differed.
+        Pressure is read on its OWN time axis, because LabChart routinely
+        records channels at different sample rates and masking pressure with
+        the flow channel's time array crashed on any rate mismatch.
+
+        Pressure is optional and must never change the flow: rather than
+        trimming both to a common length (which silently shortened the
+        exported flow when the pressure channel did not span the window), this
+        returns None when pressure cannot cover ``target_time``, leaving the
+        flow export intact and the omission visible in metadata.
+
+        Args:
+            data: Loaded LabChart data
+            pressure_row: Pressure channel row (1-indexed)
+            column: Block column (1-indexed)
+            target_time: The flow's resampled time axis, in original units.
 
         Returns:
-            Tuple of (windowed_pressure_time, windowed_pressure_data).
+            Pressure in cmH2O sampled at ``target_time``, or None if the
+            channel does not cover that span.
         """
         p_time = data.get_time(pressure_row, column)
         p_data = data.get_data(pressure_row, column)
-        return self._extract_time_window(p_time, p_data, start_time, end_time)
+        if len(p_time) < 2:
+            return None
+        # Require full coverage so the spline never extrapolates.
+        if p_time[0] > target_time[0] or p_time[-1] < target_time[-1]:
+            return None
+        return CubicSpline(p_time, p_data)(target_time)
 
     def _normalize_time(
         self,

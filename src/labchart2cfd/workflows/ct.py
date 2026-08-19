@@ -28,7 +28,7 @@ from labchart2cfd.processing.rearrangement import (
     image_index_to_time,
     rearrange_image_indices,
 )
-from labchart2cfd.processing.resampling import resample_multiple, resample_to_rate
+from labchart2cfd.processing.resampling import resample_to_rate
 from labchart2cfd.processing.smoothing import smooth_moving_average
 from labchart2cfd.processing.unit_conversion import (
     liters_per_second_to_kg_per_second,
@@ -132,6 +132,12 @@ class CTWorkflow(BaseWorkflow):
                 cut_image_idx, start_time, temporal_resolution
             )
 
+        # Keep the window's original bounds: the splice below rewrites
+        # time_windowed to start at 0, but pressure must be sampled against
+        # the recording's own clock before being spliced the same way.
+        time_windowed_original_start = float(time_windowed[0])
+        time_windowed_original_end = float(time_windowed[-1])
+
         if needs_rearrange:
             time_windowed, flow_windowed = rearrange_at_landmark(
                 time_windowed, flow_windowed, cut_time
@@ -147,42 +153,48 @@ class CTWorkflow(BaseWorkflow):
             corrected_flow, self.density, invert_sign=True
         )
 
-        # Step 5-6: Handle pressure if requested
+        # Step 5: Resample the flow. The flow alone sets the output length;
+        # pressure is optional and must never reshape it.
+        time_resampled, mass_flow_resampled = resample_to_rate(
+            time_windowed, mass_flow, self.target_sample_rate
+        )
+        mass_flow_smooth = smooth_moving_average(mass_flow_resampled, self.smoothing_window)
+
+        # Step 6: Pressure. Sampled on its own time base over the SAME window,
+        # then spliced at the same instant as the flow so the two stay aligned.
         pressure_resampled: Optional[np.ndarray] = None
+        pressure_note: Optional[str] = None
         if include_pressure and not data.is_block_empty(self.pressure_row, column):
-            # Pressure is windowed, rearranged and resampled on its OWN time
-            # base: the channels may be recorded at different rates.
-            p_time_w, pressure_windowed = self._windowed_pressure(
-                data, self.pressure_row, column, start_time, end_time
+            # Pre-rearrangement window time base, matching the flow's window.
+            pre_time = np.linspace(
+                time_windowed_original_start,
+                time_windowed_original_end,
+                len(time_resampled),
             )
-            pressure_pa = cmh2o_to_pascal(pressure_windowed)
-
-            # Rearrange pressure the same way (splice at the same instant)
-            if needs_rearrange:
-                p_time_w, pressure_pa = rearrange_at_landmark(
-                    p_time_w, pressure_pa, cut_time
+            p_raw = self._pressure_on_time_base(
+                data, self.pressure_row, column, pre_time
+            )
+            if p_raw is None:
+                pressure_note = (
+                    f"pressure row {self.pressure_row} does not cover the "
+                    "requested window; flow exported without pressure"
                 )
-
-            # Resample flow and pressure onto the same target rate
-            time_resampled, mass_flow_resampled = resample_to_rate(
-                time_windowed, mass_flow, self.target_sample_rate
-            )
-            _, pressure_resampled = resample_to_rate(
-                p_time_w, pressure_pa, self.target_sample_rate
-            )
-            n = min(len(mass_flow_resampled), len(pressure_resampled))
-            time_resampled = time_resampled[:n]
-            mass_flow_resampled = mass_flow_resampled[:n]
-            pressure_resampled = pressure_resampled[:n]
-            mass_flow_smooth = smooth_moving_average(mass_flow_resampled, self.smoothing_window)
-            pressure_resampled = smooth_moving_average(pressure_resampled, self.smoothing_window)
-        else:
-            # Resample flow only
-            time_resampled, mass_flow_resampled = resample_multiple(
-                time_windowed, mass_flow,
-                target_rate_hz=self.target_sample_rate,
-            )
-            mass_flow_smooth = smooth_moving_average(mass_flow_resampled, self.smoothing_window)
+            else:
+                pressure_pa = cmh2o_to_pascal(p_raw)
+                if needs_rearrange:
+                    # Splice at the same image boundary as the flow: the cut
+                    # index into this uniformly sampled window.
+                    cut_frac = (cut_time - time_windowed_original_start) / (
+                        time_windowed_original_end - time_windowed_original_start
+                    )
+                    cut_i = int(round(cut_frac * (len(pressure_pa) - 1)))
+                    cut_i = max(0, min(cut_i, len(pressure_pa) - 1))
+                    pressure_pa = np.concatenate(
+                        [pressure_pa[cut_i:], pressure_pa[:cut_i]]
+                    )
+                pressure_resampled = smooth_moving_average(
+                    pressure_pa, self.smoothing_window
+                )
 
         # Normalize time to start at 0
         time_normalized = self._normalize_time(time_resampled)
@@ -205,6 +217,7 @@ class CTWorkflow(BaseWorkflow):
             "temporal_resolution_s": temporal_resolution,
             "total_images": total_images,
             "cut_image_index": cut_image_idx,
+            "pressure_note": pressure_note,
             "rearranged_image_indices": rearranged_indices.tolist(),
         }
 

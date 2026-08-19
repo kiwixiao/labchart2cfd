@@ -82,6 +82,36 @@ def test_negative_going_trigger_is_detected():
     assert steps[0]["duration"] == pytest.approx(4.0, abs=2 / fs)
 
 
+def test_step_longer_than_half_the_recording_is_not_inverted():
+    """Regression: a duty cycle above 50% must not flip the polarity.
+
+    A median-based heuristic reported the two LOW gaps as the steps, because
+    the signal spent most of its time high.
+    """
+    fs = 1000.0
+    t = np.arange(0, 20, 1 / fs)
+    trig = np.zeros_like(t)
+    trig[(t >= 2.0) & (t < 14.0)] = 5.0   # 60% duty, legitimately one step
+
+    steps = detect_steps(trig, t)
+
+    assert len(steps) == 1
+    assert steps[0]["start_time"] == pytest.approx(2.0, abs=2 / fs)
+    assert steps[0]["duration"] == pytest.approx(12.0, abs=2 / fs)
+
+
+def test_two_steps_separated_by_one_sample_stay_separate():
+    fs = 1000.0
+    t = np.arange(0, 20, 1 / fs)
+    trig = np.zeros_like(t)
+    trig[(t >= 2.0) & (t < 5.0)] = 5.0
+    trig[(t >= 5.001) & (t < 8.0)] = 5.0
+
+    steps = detect_steps(trig, t)
+
+    assert len(steps) == 2
+
+
 def test_flat_signal_returns_no_steps():
     t = np.arange(0, 5, 0.001)
     assert detect_steps(np.full_like(t, 3.3), t) == []

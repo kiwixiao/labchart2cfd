@@ -17,7 +17,7 @@ import numpy as np
 
 from labchart2cfd.io.labchart import LabChartData
 from labchart2cfd.processing.drift_correction import correct_flow_drift
-from labchart2cfd.processing.resampling import resample_multiple, resample_to_rate
+from labchart2cfd.processing.resampling import resample_to_rate
 from labchart2cfd.processing.smoothing import smooth_moving_average
 from labchart2cfd.processing.unit_conversion import (
     liters_per_second_to_kg_per_second,
@@ -109,48 +109,31 @@ class StandardOSAMRIWorkflow(BaseWorkflow):
             flow_windowed, self.density, invert_sign=True
         )
 
-        # Step 4: Handle pressure if requested
+        # Step 5: Resample the flow. The flow alone sets the output length;
+        # pressure is optional and must never reshape it.
+        time_resampled, mass_flow_resampled = resample_to_rate(
+            time_windowed, mass_flow, self.target_sample_rate
+        )
+        mass_flow_smooth = smooth_moving_average(
+            mass_flow_resampled, self.smoothing_window
+        )
+
+        # Step 4/6: Pressure, interpolated onto the flow's own time base
         pressure_resampled: Optional[np.ndarray] = None
+        pressure_note: Optional[str] = None
         if include_pressure and not data.is_block_empty(self.pressure_row, column):
-            # Pressure is windowed and resampled on its OWN time base: the
-            # channels may be recorded at different rates.
-            p_time_w, pressure_windowed = self._windowed_pressure(
-                data, self.pressure_row, column, start_time, end_time
+            p_raw = self._pressure_on_time_base(
+                data, self.pressure_row, column, time_resampled
             )
-            pressure_pa = cmh2o_to_pascal(pressure_windowed)
-
-            # Step 5: Resample flow and pressure onto the same target rate
-            time_resampled, mass_flow_resampled = resample_to_rate(
-                time_windowed, mass_flow, self.target_sample_rate
-            )
-            _, pressure_resampled = resample_to_rate(
-                p_time_w, pressure_pa, self.target_sample_rate
-            )
-            n = min(len(mass_flow_resampled), len(pressure_resampled))
-            time_resampled = time_resampled[:n]
-            mass_flow_resampled = mass_flow_resampled[:n]
-            pressure_resampled = pressure_resampled[:n]
-
-            # Step 6: Smooth both
-            mass_flow_smooth = smooth_moving_average(
-                mass_flow_resampled, self.smoothing_window
-            )
-            pressure_smooth = smooth_moving_average(
-                pressure_resampled, self.smoothing_window
-            )
-            pressure_resampled = pressure_smooth
-        else:
-            # Step 5: Resample flow only
-            time_resampled, mass_flow_resampled = resample_multiple(
-                time_windowed,
-                mass_flow,
-                target_rate_hz=self.target_sample_rate,
-            )
-
-            # Step 6: Smooth
-            mass_flow_smooth = smooth_moving_average(
-                mass_flow_resampled, self.smoothing_window
-            )
+            if p_raw is None:
+                pressure_note = (
+                    f"pressure row {self.pressure_row} does not cover the "
+                    "requested window; flow exported without pressure"
+                )
+            else:
+                pressure_resampled = smooth_moving_average(
+                    cmh2o_to_pascal(p_raw), self.smoothing_window
+                )
 
         # Step 7: Normalize time to start at 0
         time_normalized = self._normalize_time(time_resampled)
@@ -167,5 +150,6 @@ class StandardOSAMRIWorkflow(BaseWorkflow):
                 "workflow": self.name,
                 "density_kg_m3": self.density,
                 "smoothing_window": self.smoothing_window,
+                "pressure_note": pressure_note,
             },
         )
