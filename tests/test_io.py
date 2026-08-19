@@ -47,22 +47,43 @@ class TestCSVExport:
 
             assert header == '"time (s)","Massflowrate (kg/s)"'
 
-    def test_export_flow_csv_precision(self):
-        """Flow CSV should use specified precision."""
+    def test_export_flow_csv_keeps_small_magnitudes(self):
+        """Mass flow is ~1e-4 kg/s; the format must not quantize it away.
+
+        The old fixed %.5f collapsed a pediatric waveform to ~61 distinct
+        values (1.6% error at peak). Scientific notation keeps the shape at
+        any magnitude.
+        """
         with tempfile.TemporaryDirectory() as tmpdir:
             filepath = Path(tmpdir) / "test_flow.csv"
-            time = np.array([0.0, 0.1])
-            flow = np.array([0.123456789, -0.987654321])
+            time = np.array([0.0, 0.01])
+            flow = np.array([3.00123456e-4, -2.98765432e-4])
 
-            export_flow_csv(filepath, time, flow, precision=5)
+            export_flow_csv(filepath, time, flow)
 
             with open(filepath) as f:
-                lines = f.readlines()
+                lines = f.read().splitlines()
 
-            # Check data lines have 5 decimal places
-            data_line = lines[1].strip()
-            parts = data_line.split(",")
-            assert parts[1] == "0.12346"  # rounded to 5 decimals
+            assert lines[1] == "0.000000,3.001234560e-04"
+            assert lines[2] == "0.010000,-2.987654320e-04"
+
+    def test_export_rejects_length_mismatch(self):
+        """zip() used to truncate silently: 10 times + 7 values wrote 7 rows."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(ValueError, match="length"):
+                export_flow_csv(
+                    Path(tmpdir) / "x.csv", np.arange(10.0), np.arange(7.0)
+                )
+
+    def test_export_rejects_non_finite_values(self):
+        """NaN/inf must not reach a CFD boundary-condition file."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(ValueError, match="finite"):
+                export_flow_csv(
+                    Path(tmpdir) / "x.csv",
+                    np.array([0.0, 0.01]),
+                    np.array([1.0, np.nan]),
+                )
 
     def test_export_pressure_csv_header(self):
         """Pressure CSV should have correct header."""
@@ -108,8 +129,8 @@ class TestCSVExport:
                 content = f.read()
             lines = content.decode().split("\r\n")
             assert lines[0] == "new_frame,original_image,original_time_s"
-            assert lines[1] == "1,4,0.60000"
-            assert lines[3] == "3,1,0.00000"
+            assert lines[1] == "1,4,0.600000"
+            assert lines[3] == "3,1,0.000000"
             assert b"\r\r\n" not in content
 
     def test_export_generic_csv_custom_header(self):
@@ -141,13 +162,13 @@ class TestCSVExport:
 
             assert fp.read_bytes() == (
                 b'"time (s)","Massflowrate (kg/s)"\r\n'
-                b"0.00000,1.50000\r\n"
-                b"0.10000,-2.25000\r\n"
+                b"0.000000,1.500000000e+00\r\n"
+                b"0.100000,-2.250000000e+00\r\n"
             )
             assert pp.read_bytes() == (
                 b'"time (s)","Pressure (Pa)"\r\n'
-                b"0.00000,100.00000\r\n"
-                b"0.10000,200.00000\r\n"
+                b"0.000000,1.000000000e+02\r\n"
+                b"0.100000,2.000000000e+02\r\n"
             )
 
 
