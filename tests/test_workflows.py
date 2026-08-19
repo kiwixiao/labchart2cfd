@@ -74,6 +74,75 @@ def test_ct_cut_snaps_to_image_start_so_flow_and_images_align():
     assert len(result.metadata["rearranged_image_indices"]) == 10
 
 
+def test_ct_rearranges_with_only_inhale_given():
+    """The CLI's documented invocation passes --inhale-start without
+    --exhale-end. The old condition additionally required exhale < inhale, so
+    that call silently skipped rearrangement and the profile started
+    mid-cycle while metadata reported the inhale time as honoured."""
+    data = _single_channel_data(duration_s=2.0)
+    wf = CTWorkflow(target_sample_rate=100.0, density=1.2)
+
+    result = wf.process(
+        data, row=1, column=1, start_time=0.0, end_time=2.0,
+        inhale_start_time=1.27, exhale_end_time=None,
+        temporal_resolution=0.2, include_pressure=False,
+    )
+
+    assert result.metadata["cut_image_index"] == 6
+    assert result.metadata["inhale_snapped_time"] == pytest.approx(1.2)
+    assert result.metadata["rearranged_image_indices"][0] == 6
+
+
+def _two_rate_data(flow_hz=1000.0, pressure_hz=200.0, duration_s=10.0):
+    """Four channels so the default pressure_row=4 resolves: flow on ch2 at
+    flow_hz, pressure on ch4 at a DIFFERENT rate."""
+    tf = np.arange(0.0, duration_s, 1.0 / flow_hz)
+    tp = np.arange(0.0, duration_s, 1.0 / pressure_hz)
+    flow = np.sin(2 * np.pi * 0.5 * tf)
+    pressure = 5.0 + np.cos(2 * np.pi * 0.5 * tp)  # cmH2O
+    empty = None
+    return LabChartData(
+        data_cell=[[flow * 0.0], [flow], [empty], [pressure]],
+        time_cell=[[tf], [tf], [empty], [tp]],
+        num_channels=4,
+        num_blocks=1,
+    )
+
+
+def test_pressure_at_a_different_sample_rate_is_windowed_on_its_own_time():
+    """All workflows masked pressure with the FLOW channel's time array, which
+    crashed with a boolean-index length mismatch whenever the two channels
+    were recorded at different rates (routine in LabChart)."""
+    from labchart2cfd.workflows import StandardOSAMRIWorkflow
+
+    data = _two_rate_data()
+    wf = StandardOSAMRIWorkflow(target_sample_rate=100.0, density=1.2)
+
+    result = wf.process(
+        data, row=2, column=1, start_time=2.0, end_time=6.0,
+        include_pressure=True,
+    )
+
+    assert result.pressure is not None
+    assert len(result.pressure) == len(result.mass_flow)
+    # cmH2O converted to Pa: 5 cmH2O ~ 490 Pa, so values sit near there.
+    assert 300.0 < float(np.mean(result.pressure)) < 700.0
+
+
+def test_window_outside_data_raises_a_named_error():
+    """An out-of-range window used to die deep in resampling with a bare
+    IndexError; now the window extraction itself explains the problem."""
+    data = _single_channel_data(duration_s=2.0)
+    wf = CTWorkflow(target_sample_rate=100.0, density=1.2)
+
+    with pytest.raises(ValueError, match="window"):
+        wf.process(
+            data, row=1, column=1, start_time=500.0, end_time=520.0,
+            inhale_start_time=None, exhale_end_time=None,
+            temporal_resolution=0.2, include_pressure=False,
+        )
+
+
 def test_phase_contrast_calibration_uses_peak_cumulative():
     """Voltage calibration must be the PEAK of the cumulative integral.
 

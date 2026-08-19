@@ -22,7 +22,7 @@ import numpy as np
 
 from labchart2cfd.io.labchart import LabChartData
 from labchart2cfd.processing.drift_correction import correct_flow_drift
-from labchart2cfd.processing.resampling import resample_multiple
+from labchart2cfd.processing.resampling import resample_multiple, resample_to_rate
 from labchart2cfd.processing.smoothing import smooth_moving_average
 from labchart2cfd.processing.unit_conversion import (
     liters_per_second_to_kg_per_second,
@@ -125,20 +125,24 @@ class CPAPWorkflow(BaseWorkflow):
         # Step 4: Handle pressure if requested
         pressure_resampled: Optional[np.ndarray] = None
         if include_pressure and not data.is_block_empty(self.pressure_row, column):
-            full_pressure = data.get_data(self.pressure_row, column)
-            _, pressure_windowed = self._extract_time_window(
-                full_time, full_pressure, start_time, end_time
+            # Pressure is windowed and resampled on its OWN time base: the
+            # channels may be recorded at different rates.
+            p_time_w, pressure_windowed = self._windowed_pressure(
+                data, self.pressure_row, column, start_time, end_time
             )
-            # Convert cmH2O to Pa
             pressure_pa = cmh2o_to_pascal(pressure_windowed)
 
-            # Step 5: Resample both
-            time_resampled, mass_flow_resampled, pressure_resampled = resample_multiple(
-                time_windowed,
-                mass_flow,
-                pressure_pa,
-                target_rate_hz=self.target_sample_rate,
+            # Step 5: Resample flow and pressure onto the same target rate
+            time_resampled, mass_flow_resampled = resample_to_rate(
+                time_windowed, mass_flow, self.target_sample_rate
             )
+            _, pressure_resampled = resample_to_rate(
+                p_time_w, pressure_pa, self.target_sample_rate
+            )
+            n = min(len(mass_flow_resampled), len(pressure_resampled))
+            time_resampled = time_resampled[:n]
+            mass_flow_resampled = mass_flow_resampled[:n]
+            pressure_resampled = pressure_resampled[:n]
 
             # Step 6: Smooth both
             mass_flow_smooth = smooth_moving_average(

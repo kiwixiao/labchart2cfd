@@ -28,7 +28,7 @@ from labchart2cfd.processing.rearrangement import (
     image_index_to_time,
     rearrange_image_indices,
 )
-from labchart2cfd.processing.resampling import resample_multiple
+from labchart2cfd.processing.resampling import resample_multiple, resample_to_rate
 from labchart2cfd.processing.smoothing import smooth_moving_average
 from labchart2cfd.processing.unit_conversion import (
     liters_per_second_to_kg_per_second,
@@ -105,12 +105,15 @@ class CTWorkflow(BaseWorkflow):
             full_time, full_flow, start_time, end_time
         )
 
-        # Step 2: Rearrange only when wrapping (exhale LEFT of inhale)
-        # Normal case (inhale LEFT of exhale): no rearrangement needed
-        needs_rearrange = (
-            inhale_start_time is not None
-            and exhale_end_time is not None
-            and exhale_end_time < inhale_start_time
+        # Step 2: Rearrange so the profile starts at inhale onset.
+        # With both landmarks in normal order (inhale left of exhale) the
+        # window already runs inhale->exhale and no splice is needed; the
+        # wrapping case (exhale left of inhale) splices. With ONLY the inhale
+        # given, rearrange at it: the old condition also required exhale to be
+        # supplied, so the CLI's documented `--inhale-start` invocation
+        # silently did nothing while metadata reported the time as honoured.
+        needs_rearrange = inhale_start_time is not None and (
+            exhale_end_time is None or exhale_end_time < inhale_start_time
         )
 
         # Snap the cut to the start of the nearest image BEFORE splicing, so
@@ -147,25 +150,30 @@ class CTWorkflow(BaseWorkflow):
         # Step 5-6: Handle pressure if requested
         pressure_resampled: Optional[np.ndarray] = None
         if include_pressure and not data.is_block_empty(self.pressure_row, column):
-            full_pressure = data.get_data(self.pressure_row, column)
-            _, pressure_windowed = self._extract_time_window(
-                full_time, full_pressure, start_time, end_time
+            # Pressure is windowed, rearranged and resampled on its OWN time
+            # base: the channels may be recorded at different rates.
+            p_time_w, pressure_windowed = self._windowed_pressure(
+                data, self.pressure_row, column, start_time, end_time
             )
             pressure_pa = cmh2o_to_pascal(pressure_windowed)
 
-            # Rearrange pressure the same way (only for wrapping case)
+            # Rearrange pressure the same way (splice at the same instant)
             if needs_rearrange:
-                _, pressure_pa = rearrange_at_landmark(
-                    self._extract_time_window(full_time, full_time, start_time, end_time)[0],
-                    pressure_pa,
-                    cut_time,
+                p_time_w, pressure_pa = rearrange_at_landmark(
+                    p_time_w, pressure_pa, cut_time
                 )
 
-            # Resample both
-            time_resampled, mass_flow_resampled, pressure_resampled = resample_multiple(
-                time_windowed, mass_flow, pressure_pa,
-                target_rate_hz=self.target_sample_rate,
+            # Resample flow and pressure onto the same target rate
+            time_resampled, mass_flow_resampled = resample_to_rate(
+                time_windowed, mass_flow, self.target_sample_rate
             )
+            _, pressure_resampled = resample_to_rate(
+                p_time_w, pressure_pa, self.target_sample_rate
+            )
+            n = min(len(mass_flow_resampled), len(pressure_resampled))
+            time_resampled = time_resampled[:n]
+            mass_flow_resampled = mass_flow_resampled[:n]
+            pressure_resampled = pressure_resampled[:n]
             mass_flow_smooth = smooth_moving_average(mass_flow_resampled, self.smoothing_window)
             pressure_resampled = smooth_moving_average(pressure_resampled, self.smoothing_window)
         else:

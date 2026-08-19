@@ -108,9 +108,41 @@ class BaseWorkflow(ABC):
 
         Returns:
             Tuple of (windowed_time, windowed_data)
+
+        Raises:
+            ValueError: If the window does not intersect the data. An empty
+                window used to propagate and die deep in resampling with a
+                bare IndexError.
         """
         mask = (time >= start_time) & (time <= end_time)
+        if not np.any(mask):
+            raise ValueError(
+                f"Requested window [{start_time:.3f}, {end_time:.3f}]s does "
+                f"not intersect the data, which covers "
+                f"[{time[0]:.3f}, {time[-1]:.3f}]s."
+            )
         return time[mask], data[mask]
+
+    def _windowed_pressure(
+        self,
+        data: LabChartData,
+        pressure_row: int,
+        column: int,
+        start_time: float,
+        end_time: float,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+        """Window the pressure channel on its OWN time base.
+
+        LabChart routinely records channels at different sample rates, and
+        masking pressure with the flow channel's time array crashed with a
+        boolean-index length mismatch whenever the rates differed.
+
+        Returns:
+            Tuple of (windowed_pressure_time, windowed_pressure_data).
+        """
+        p_time = data.get_time(pressure_row, column)
+        p_data = data.get_data(pressure_row, column)
+        return self._extract_time_window(p_time, p_data, start_time, end_time)
 
     def _normalize_time(
         self,
