@@ -1,10 +1,14 @@
 # PROGRESS
 
 ## NEXT STEP
-User reviews and merges branch `fix/review-findings` (15 commits: the full bug-fix batch from the 2026-08-19 deep review, plus five rounds of verification fixes). After merge: the MATLAB parity comparison remains the one outstanding correctness check. NOTE: the drift-correction fix deliberately breaks parity with the MATLAB original (which carries the same abs() bug), so old outputs for positive-drift recordings will differ, correctly.
+Nothing in flight. Everything is merged and pushed; `main` is at `5d83081`, 143 tests green, and the user has paused here deliberately ("stay as is, come back if a new bug or new function is needed").
+
+When work resumes, the two unfinished checks, neither blocking:
+1. **Confirm Star-CCM+ accepts the CSV data format.** The data column is now scientific notation (`3.001234560e-04`) because the old `%.5f` quantised mass flow (~1e-4 kg/s) to about 61 distinct values. Nobody has loaded one of the new files into Star-CCM+. If its table reader rejects it, switch to a high-precision fixed format in `io/csv_export.py` rather than reverting to `%.5f`.
+2. **MATLAB parity on a real subject.** Still unmeasured. Note the drift-correction fix deliberately diverges from the MATLAB original, which carries the same `abs()` bug, so old outputs for positive-drift recordings will legitimately differ.
 
 ## LAST SESSION
-2026-08-19. Deep review of the whole codebase (3 parallel reviewers, findings independently verified), then fixed everything except the xenon calibration (deferred by user). On branch `fix/review-findings`, stacked on the unmerged trigger-row branch. **15 commits, 141 tests (was 97).**
+2026-08-19. Deep review of the whole codebase (3 parallel reviewers, findings independently verified), then fixed everything except the xenon calibration (deferred by user). **Merged to main and pushed: `9755710..5d83081`, 16 commits, 143 tests (was 97).**
 
 Engine fixes: drift correction doubled the drift for one polarity (abs() inherited from MATLAB, now signed, deliberately diverging from the original); CSV %.5f quantized mass flow to a ~61-step staircase (now %.9e, plus length/finite validation); resampler delivered 99.75 Hz while reporting 100 and lost samples to int() truncation; step detection swallowed the whole recording on DC-offset triggers and missed negative-going ones; CT rearrangement was silently skipped in the CLI's documented invocation; the .mat reader trusted the file's index tables (truncation clamped silently, a bad sentinel returned another channel's data); pressure was masked with the flow channel's time array and crashed on mixed-rate recordings.
 
@@ -26,10 +30,11 @@ Before that (2026-08-18): CLI --trigger-row fix on `fix/cli-explicit-trigger-row
 | Temporal Res / image count decoupled; grid owns the export | done, on main |
 | Reorder map in absolute recording time | done, on main |
 | Auto-zoom to working window; numeric boxes commit on Enter | done, on main |
-| CLI explicit `--trigger-row` | done, in the `fix/review-findings` line, needs merge |
-| 2026-08-19 review fixes (drift sign, CSV precision, resampler, step threshold, CT rearrange, reader validation, GUI worker signals + state hygiene, CLI --pressure-row) | done, branch `fix/review-findings`, needs merge |
+| CLI explicit `--trigger-row` and `--pressure-row` | done, on main |
+| 2026-08-19 review fixes (drift sign, CSV precision, resampler, step threshold + declared polarity, CT rearrange, reader validation, GUI worker signals + state hygiene, bidirectional Start Shift) | done, on main |
 | Xenon / phase-contrast calibration questions | deferred by user ("leave xenon, no worries for now") |
 | MATLAB parity check on real data | not started, blocked on a known-good reference; drift fix intentionally diverges |
+| Star-CCM+ acceptance of the new scientific-notation CSV | not confirmed; see NEXT STEP |
 | `tests/data/` + `tests/reference/` fixtures | empty; CLAUDE.md describes them as parity fixtures |
 | `gui/app.py` decomposition (~2400 lines) | deferred by choice; needs manual click-through testing |
 | Windows packaging / CI | not started; see notes on PyInstaller freeze |
