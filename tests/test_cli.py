@@ -102,6 +102,30 @@ def test_detect_steps_reports_an_empty_trigger_row_instead_of_guessing(tmp_path)
     assert "1 step trigger" not in result.output
 
 
+def test_validate_verbose_reports_corrupt_blocks_without_crashing(tmp_path):
+    """Regression: the reader began emitting corrupt-block dicts without a
+    'samples' key while validate --verbose still read it, so the command
+    crashed with KeyError on exactly the file the change was written for."""
+    from scipy.io import savemat
+
+    n = 100
+    path = tmp_path / "inv.mat"
+    savemat(str(path), {
+        "data": np.concatenate([np.arange(n, dtype=float),
+                                np.arange(n, dtype=float) * 10]),
+        "datastart": np.array([[80.0], [101.0]]),   # ch1 start beyond its end
+        "dataend": np.array([[40.0], [200.0]]),
+        "samplerate": np.array([[100.0], [100.0]]),
+        "titles": np.array(["flow ", "press"]),
+    })
+
+    result = runner.invoke(cli_main.app, ["validate", str(path), "--verbose"])
+
+    assert result.exit_code == 0, result.output
+    assert "corrupt" in result.output.lower()
+    assert "100" in result.output          # the healthy channel still reported
+
+
 def test_gui_subcommand_still_exists():
     # The macOS focus relaunch re-execs `-m labchart2cfd gui`; the explicit
     # subcommand must never be removed.

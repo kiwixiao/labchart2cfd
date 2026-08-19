@@ -100,6 +100,38 @@ def test_step_longer_than_half_the_recording_is_not_inverted():
     assert steps[0]["duration"] == pytest.approx(12.0, abs=2 / fs)
 
 
+def test_recording_starting_mid_step_is_not_inverted():
+    """A LabChart block can begin while the scanner is already running.
+
+    Regression: anchoring polarity to the first sample alone inverted this and
+    reported the GAP after the step as the step.
+    """
+    fs = 1000.0
+    t = np.arange(0, 20, 1 / fs)
+    trig = np.zeros_like(t)
+    trig[t < 8.0] = 5.0            # already high at t=0
+
+    steps = detect_steps(trig, t)
+
+    assert len(steps) == 1
+    assert steps[0]["start_time"] == pytest.approx(0.0, abs=2 / fs)
+    assert steps[0]["duration"] == pytest.approx(8.0, abs=2 / fs)
+
+
+def test_recording_starting_mid_step_still_finds_later_steps():
+    fs = 1000.0
+    t = np.arange(0, 20, 1 / fs)
+    trig = np.zeros_like(t)
+    trig[t < 4.0] = 5.0
+    trig[(t >= 9.0) & (t < 13.0)] = 5.0
+
+    steps = detect_steps(trig, t)
+
+    assert len(steps) == 2
+    assert steps[0]["start_time"] == pytest.approx(0.0, abs=2 / fs)
+    assert steps[1]["start_time"] == pytest.approx(9.0, abs=2 / fs)
+
+
 def test_two_steps_separated_by_one_sample_stay_separate():
     fs = 1000.0
     t = np.arange(0, 20, 1 / fs)

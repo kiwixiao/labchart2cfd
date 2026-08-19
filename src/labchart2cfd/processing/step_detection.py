@@ -55,17 +55,29 @@ def detect_steps(
     # A trigger idling at 4 V stepping to 5 V is entirely above 0.5*max(|x|),
     # which used to make the "step" span the whole recording.
     span = hi - lo
+    above = trigger_data >= lo + threshold_fraction * span
 
-    # Polarity is anchored to the RESTING level, taken as whichever extreme the
-    # recording starts at (acquisition begins before the scanner fires). A step
-    # is then any excursion away from that level, which works for a positive or
-    # a negative going trigger and, unlike a median/duty-cycle heuristic, does
-    # not invert when a step happens to occupy more than half the recording.
-    starts_low = abs(float(trigger_data[0]) - lo) <= abs(float(trigger_data[0]) - hi)
-    if starts_low:
-        high = trigger_data >= lo + threshold_fraction * span
+    # Determine which level is the RESTING one, so a step is the excursion away
+    # from it. Two rules, in order of reliability:
+    #
+    #  1. If the recording starts and ends at the same level, that is the
+    #     baseline. Acquisition normally brackets the scan, so both edges agree
+    #     and this holds however long the step is (a duty cycle above 50% does
+    #     not fool it, unlike a median or occupancy heuristic).
+    #  2. If the edges disagree, the recording is partial (it began or ended
+    #     mid-step). Fall back to occupancy: the excursion is the level present
+    #     for less of the recording.
+    def _near_low(value: float) -> bool:
+        return abs(value - lo) <= abs(value - hi)
+
+    first_low = _near_low(float(trigger_data[0]))
+    last_low = _near_low(float(trigger_data[-1]))
+    if first_low == last_low:
+        baseline_is_low = first_low
     else:
-        high = trigger_data <= hi - threshold_fraction * span
+        baseline_is_low = np.count_nonzero(above) <= len(above) / 2
+
+    high = above if baseline_is_low else (trigger_data <= hi - threshold_fraction * span)
 
     # Detect edges by diff: +1 = rising, -1 = falling
     edges = np.diff(high.astype(np.int8))

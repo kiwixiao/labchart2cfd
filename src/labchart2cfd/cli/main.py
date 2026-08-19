@@ -258,6 +258,17 @@ def process(
         pressure_file = output_dir / f"{subject}PressureProfile.csv"
         export_pressure_csv(pressure_file, result.time, result.pressure)
         console.print(f"[green]Created:[/green] {pressure_file}")
+    else:
+        # Say why the file is missing; a silently absent pressure profile is
+        # indistinguishable from one that was never requested.
+        note = result.metadata.get("pressure_note")
+        if note:
+            console.print(f"[yellow]Warning:[/yellow] {note}")
+        elif not no_pressure:
+            console.print(
+                "[yellow]Note:[/yellow] no pressure profile was produced "
+                "(pressure channel empty or not applicable to this workflow)."
+            )
 
     # Summary
     console.print("\n[bold]Processing Summary:[/bold]")
@@ -322,7 +333,10 @@ def validate(
             console.print(f"  {i}. {title}")
 
     # Block occupancy grid
-    console.print("\n[bold]Block Occupancy:[/bold] (✓ = data, · = empty)")
+    console.print(
+        "\n[bold]Block Occupancy:[/bold] (✓ = data, · = empty, [red]x[/red] = corrupt)"
+    )
+    corrupt_blocks = []
     for ch in range(info["num_channels"]):
         row_str = f"  Ch{ch+1}: "
         for bl in range(info["num_blocks"]):
@@ -331,11 +345,20 @@ def validate(
                  if b["channel"] == ch + 1 and b["block"] == bl + 1),
                 None
             )
-            if block and not block["empty"]:
+            if block and block.get("corrupt"):
+                row_str += "[red]x[/red] "
+                corrupt_blocks.append(block)
+            elif block and not block["empty"]:
                 row_str += "✓ "
             else:
                 row_str += "· "
         console.print(row_str)
+
+    if corrupt_blocks:
+        console.print(
+            f"\n[red]Warning:[/red] {len(corrupt_blocks)} block(s) declare "
+            "indices that do not fit the file's data; they cannot be processed."
+        )
 
     # Verbose: show block details
     if verbose:
@@ -348,14 +371,26 @@ def validate(
         table.add_column("Duration (s)", justify="right")
 
         for block in info["blocks"]:
-            if not block["empty"]:
+            if block["empty"]:
+                continue
+            if block.get("corrupt"):
+                # Corrupt blocks carry declared indices instead of a usable
+                # sample count; render those rather than raising KeyError.
                 table.add_row(
                     str(block["channel"]),
                     str(block["block"]),
-                    f"{block['samples']:,}",
-                    f"{block['sample_rate']:.1f}",
-                    f"{block['duration_s']:.2f}",
+                    f"[red]corrupt {block['declared_start']}..{block['declared_end']}[/red]",
+                    "-",
+                    "-",
                 )
+                continue
+            table.add_row(
+                str(block["channel"]),
+                str(block["block"]),
+                f"{block['samples']:,}",
+                f"{block['sample_rate']:.1f}",
+                f"{block['duration_s']:.2f}",
+            )
         console.print(table)
 
 

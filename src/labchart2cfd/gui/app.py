@@ -379,13 +379,15 @@ class FlowProfileApp(QMainWindow):
         ct_grid.addWidget(select_step_btn, 0, 3)
 
         ct_grid.addWidget(QLabel("Temporal Res (ms):"), 0, 4)
-        self.ct_temporal_res_spin = QSpinBox()
-        # Range matches the tab-4 dt box; a narrower range here made Qt clamp
-        # the mirrored value silently, so the two grids used different dt.
-        self.ct_temporal_res_spin.setRange(1, 10000)
+        # Same type, range and precision as the tab-4 dt box. As an int
+        # spinbox this silently truncated any fractional dt mirrored from
+        # tab 4, leaving the CT export and the synthetic grid on different dt.
+        self.ct_temporal_res_spin = QDoubleSpinBox()
+        self.ct_temporal_res_spin.setRange(0.01, 10000.0)
+        self.ct_temporal_res_spin.setDecimals(2)
         self.ct_temporal_res_spin.setSingleStep(10)
-        self.ct_temporal_res_spin.setValue(200)
-        self.ct_temporal_res_spin.setFixedWidth(70)
+        self.ct_temporal_res_spin.setValue(200.0)
+        self.ct_temporal_res_spin.setFixedWidth(80)
         ct_grid.addWidget(self.ct_temporal_res_spin, 0, 5)
 
         ct_grid.addWidget(QLabel("Total Images:"), 0, 6)
@@ -1885,7 +1887,10 @@ class FlowProfileApp(QMainWindow):
             return
         self._syncing_grid = True
         try:
-            self.ct_temporal_res_spin.setValue(int(round(dt_ms)))
+            # Both boxes are QDoubleSpinBox with the same range and precision,
+            # so the mirror is exact; rounding to int used to truncate any
+            # fractional dt and split the two grids apart.
+            self.ct_temporal_res_spin.setValue(float(dt_ms))
         finally:
             self._syncing_grid = False
         self._refresh_synth_grid_if_active()
@@ -2649,6 +2654,11 @@ class FlowProfileApp(QMainWindow):
                     f" | Drift: {result.drift_error:.6f}"
                     f" | Time zeroed for STAR-CCM+"
                 )
+                # A silently absent pressure profile looks the same as one that
+                # was never requested; say why it is missing.
+                pressure_note = result.metadata.get("pressure_note")
+                if include_pressure and result.pressure is None and pressure_note:
+                    msg += f" | WARNING: {pressure_note}"
 
                 self._processing_done.emit(msg)
 
