@@ -1706,8 +1706,12 @@ class FlowProfileApp(QMainWindow):
         """Toggle cycle-labeling click mode."""
         self._ct_cycle_mode = checked
         if checked:
-            # Stop landmark placement so clicks don't race.
+            # Stop landmark placement AND part capture so clicks don't race.
+            # An armed 'Pick on Plot' outranks cycle mode in the click
+            # dispatch, so leaving it armed meant the status bar announced
+            # cycle mode while clicks silently rewrote the From/To boxes.
             self._ct_landmark_mode = None
+            self._cancel_part_capture()
             self.status_bar.showMessage(
                 "CYCLE LABEL MODE: left-click fenceposts in order (right-click undoes last)."
             )
@@ -1896,8 +1900,8 @@ class FlowProfileApp(QMainWindow):
         self._refresh_synth_grid_if_active()
         self._update_grid_readout()
 
-    def _on_ct_dt_changed(self, dt_ms: int) -> None:
-        """Tab 3's Temporal Res edited: mirror it into the synth grid."""
+    def _on_ct_dt_changed(self, dt_ms: float) -> None:
+        """Tab 3's Temporal Res edited: mirror it and redraw BOTH grids."""
         if self._syncing_grid:
             return
         self._syncing_grid = True
@@ -1905,8 +1909,22 @@ class FlowProfileApp(QMainWindow):
             self.synth_dt_spin.setValue(float(dt_ms))
         finally:
             self._syncing_grid = False
+        self._redraw_ct_intervals_if_active()
         self._refresh_synth_grid_if_active()
         self._update_grid_readout()
+
+    def _redraw_ct_intervals_if_active(self) -> None:
+        """Redraw tab 3's fencepost grid after dt changes.
+
+        Without this the blue numbered grid kept the OLD dt while cycle
+        snapping and the export used the NEW one, so a click was labelled and
+        exported as a different image than the number drawn over it.
+        """
+        if (self._ct_selected_step is not None
+                and self.ax_top is not None
+                and self._plot_mode == "selected"):
+            self._draw_ct_intervals(update_total_images_field=True)
+            self.canvas.draw_idle()
 
     def _on_synth_images_changed(self, n_images: int) -> None:
         """Image count edited: redraw. Temporal Res is left exactly as typed."""
@@ -2369,12 +2387,19 @@ class FlowProfileApp(QMainWindow):
             )
             return
         t_axis = self.data.get_time(flow_row, col)
-        if start_time > float(t_axis[-1]) or end_time < float(t_axis[0]):
+        rec_lo, rec_hi = float(t_axis[0]), float(t_axis[-1])
+        # The window must lie INSIDE the recording. Merely intersecting is not
+        # enough: an overrun silently exported a truncated profile while the
+        # trigger info still described the full requested window. The
+        # synthetic-profile export already refused the identical overrun.
+        if start_time < rec_lo or end_time > rec_hi:
+            short = max(0.0, end_time - rec_hi) + max(0.0, rec_lo - start_time)
             QMessageBox.critical(
                 self, "Window Outside Recording",
-                f"The window {start_time:.3f}s to {end_time:.3f}s does not "
-                f"intersect the recording, which covers "
-                f"{float(t_axis[0]):.3f}s to {float(t_axis[-1]):.3f}s.",
+                f"The window {start_time:.3f}s to {end_time:.3f}s is not fully "
+                f"inside the recording, which covers {rec_lo:.3f}s to "
+                f"{rec_hi:.3f}s (short by {short:.3f}s).\n\n"
+                "Adjust Start/End so the whole window has data behind it.",
             )
             return
 

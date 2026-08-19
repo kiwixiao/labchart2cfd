@@ -135,28 +135,40 @@ def _extract_titles(mat, num_channels):
     if "titles" not in mat:
         return []
 
-    titles_raw = mat["titles"]
-    # Cell array: object dtype, possibly nested one level by loadmat.
-    if getattr(titles_raw, "dtype", None) is not None and titles_raw.dtype == object:
-        flat = titles_raw.ravel()
-        items = []
-        for item in flat:
-            arr = np.asarray(item).ravel()
-            items.extend(str(x).strip() for x in arr)
-        return items[:num_channels]
+    def _one_title(item) -> str:
+        """Exactly one title per cell, however deeply loadmat nested it.
 
-    titles = []
-    for i in range(num_channels):
-        if i < len(titles_raw):
-            title_item = titles_raw[i]
+        Returning a variable number of strings per cell shifted every later
+        channel up a slot whenever a cell was blank, so `validate` printed the
+        wrong channel numbers and the user selected the wrong --row.
+        """
+        arr = np.asarray(item).ravel()
+        if arr.size == 0:
+            return ""                       # blank cell keeps its position
+        if arr.size == 1:
+            value = arr[0]
+            if isinstance(value, np.ndarray):
+                return _one_title(value)    # cell inside a cell
+            return str(value).strip()
+        return "".join(str(x) for x in arr).strip()
+
+    titles_raw = mat["titles"]
+    # Cell array: object dtype, possibly nested by loadmat.
+    if getattr(titles_raw, "dtype", None) is not None and titles_raw.dtype == object:
+        items = [_one_title(item) for item in titles_raw.ravel()]
+    else:
+        items = []
+        for title_item in titles_raw:
             if isinstance(title_item, str):
-                titles.append(title_item.strip())
+                items.append(title_item.strip())
             else:
                 # Char matrix row: join character codes.
-                titles.append(
-                    "".join(chr(c) for c in title_item if c != 0).strip()
-                )
-    return titles
+                items.append("".join(chr(c) for c in title_item if c != 0).strip())
+
+    # Pad so index i is always channel i+1, never a shifted neighbour.
+    items = items[:num_channels]
+    items.extend([""] * (num_channels - len(items)))
+    return items
 
 
 def load_labchart_mat(filepath):
@@ -205,14 +217,20 @@ def load_labchart_mat(filepath):
     dataend = mat["dataend"]
     samplerate = mat["samplerate"]
 
-    # Optional scaling (16-bit data): scaleunits requires scaleoffset.
-    has_scaling = "scaleunits" in mat
+    # Optional scaling (16-bit data). The pair is all-or-nothing: either both
+    # fields are present or neither is. Accepting one silently applied no
+    # scaling at all while the mirror case was a hard error.
+    has_units = "scaleunits" in mat
+    has_offset = "scaleoffset" in mat
+    if has_units != has_offset:
+        missing = "scaleoffset" if has_units else "scaleunits"
+        raise ValueError(
+            f"'{filepath.name}' has "
+            f"{'scaleunits' if has_units else 'scaleoffset'} but no {missing}; "
+            "not a complete LabChart export."
+        )
+    has_scaling = has_units
     if has_scaling:
-        if "scaleoffset" not in mat:
-            raise ValueError(
-                f"'{filepath.name}' has scaleunits but no scaleoffset; "
-                "not a complete LabChart export."
-            )
         scaleunits = mat["scaleunits"]
         scaleoffset = mat["scaleoffset"]
 
@@ -266,9 +284,9 @@ def load_labchart_mat(filepath):
 
             # Generate time array
             sr = float(samplerate[ch, bl])
-            if sr <= 0:
+            if not np.isfinite(sr) or sr <= 0:
                 raise ValueError(
-                    f"Non-positive sample rate {sr} for channel {ch + 1}, "
+                    f"Invalid sample rate {sr} for channel {ch + 1}, "
                     f"block {bl + 1} in {filepath.name}."
                 )
             ptime = np.arange(len(pdata)) / sr
@@ -316,8 +334,23 @@ def describe_mat_structure(filepath):
         return {"error": "Not a valid LabChart .mat file (no data variable)"}
     if dataend is None or samplerate is None:
         return {"error": "Not a valid LabChart .mat file (missing dataend/samplerate)"}
+    # Same all-or-nothing scaling rule the loader enforces, so validate cannot
+    # bless a file process will refuse.
+    if ("scaleunits" in mat) != ("scaleoffset" in mat):
+        return {
+            "error": "Not a valid LabChart .mat file "
+                     "(scaleunits and scaleoffset must both be present)"
+        }
 
     num_channels, num_blocks = datastart.shape
+    # Index tables may disagree in shape on a malformed file; report that
+    # rather than raising IndexError and breaking the documented contract.
+    if (getattr(dataend, "shape", None) != datastart.shape
+            or getattr(samplerate, "shape", None) != datastart.shape):
+        return {
+            "error": "Not a valid LabChart .mat file "
+                     "(datastart, dataend and samplerate have different shapes)"
+        }
     total_available = data.size
 
     # Build block info; declared indices are checked against the actual data
@@ -337,7 +370,8 @@ def describe_mat_structure(filepath):
 
             end = int(dataend[ch, bl])
             sr = float(samplerate[ch, bl])
-            if start < 1 or end < start or end > total_available or sr <= 0:
+            if (start < 1 or end < start or end > total_available
+                    or not np.isfinite(sr) or sr <= 0):
                 blocks.append({
                     "channel": ch + 1,
                     "block": bl + 1,

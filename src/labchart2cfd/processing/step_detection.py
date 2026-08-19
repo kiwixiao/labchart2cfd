@@ -15,6 +15,7 @@ from numpy.typing import NDArray
 # drifting apart (a past divergence bug came from mismatched min-duration values).
 DEFAULT_STEP_THRESHOLD_FRACTION = 0.5
 DEFAULT_STEP_MIN_DURATION_S = 0.5
+DEFAULT_STEP_POLARITY = "active-high"
 
 
 def detect_steps(
@@ -22,17 +23,23 @@ def detect_steps(
     trigger_time: NDArray[np.float64],
     threshold_fraction: float = DEFAULT_STEP_THRESHOLD_FRACTION,
     min_duration_s: float = DEFAULT_STEP_MIN_DURATION_S,
+    polarity: str = DEFAULT_STEP_POLARITY,
 ) -> List[dict]:
-    """Detect step triggers (sustained high-level regions) in trigger data.
+    """Detect step triggers (sustained level regions) in trigger data.
 
-    Uses threshold-based edge detection: rising edge = step start,
-    falling edge = step end.
+    Threshold-based edge detection: the threshold sits inside the signal's
+    RANGE (min + fraction*(max-min)), so a trigger idling at a non-zero
+    baseline is handled; using a fraction of max(abs(x)) made such a signal
+    sit entirely above threshold and reported the whole recording as one step.
 
     Args:
         trigger_data: Trigger signal amplitude array
         trigger_time: Corresponding time array
-        threshold_fraction: Fraction of max amplitude to use as threshold (0-1)
+        threshold_fraction: Where the threshold sits inside the signal range (0-1)
         min_duration_s: Minimum step duration in seconds to keep
+        polarity: "active-high" (default, the CT convention: the scan is the
+            raised level) or "active-low" for an inverted trigger. Declared
+            rather than inferred; see the note in the body.
 
     Returns:
         List of dicts with keys:
@@ -55,29 +62,24 @@ def detect_steps(
     # A trigger idling at 4 V stepping to 5 V is entirely above 0.5*max(|x|),
     # which used to make the "step" span the whole recording.
     span = hi - lo
-    above = trigger_data >= lo + threshold_fraction * span
 
-    # Determine which level is the RESTING one, so a step is the excursion away
-    # from it. Two rules, in order of reliability:
-    #
-    #  1. If the recording starts and ends at the same level, that is the
-    #     baseline. Acquisition normally brackets the scan, so both edges agree
-    #     and this holds however long the step is (a duty cycle above 50% does
-    #     not fool it, unlike a median or occupancy heuristic).
-    #  2. If the edges disagree, the recording is partial (it began or ended
-    #     mid-step). Fall back to occupancy: the excursion is the level present
-    #     for less of the recording.
-    def _near_low(value: float) -> bool:
-        return abs(value - lo) <= abs(value - hi)
-
-    first_low = _near_low(float(trigger_data[0]))
-    last_low = _near_low(float(trigger_data[-1]))
-    if first_low == last_low:
-        baseline_is_low = first_low
+    # Polarity is DECLARED, not inferred. Three successive auto-detection rules
+    # (median occupancy, first-sample anchor, edge agreement) each passed the
+    # cases they were written for and inverted a different real one: a step
+    # occupying most of the recording, a block beginning mid-scan, a recording
+    # truncated at both ends, a single noisy edge sample. A two-level signal
+    # simply does not say which level is the scan, so guessing trades one
+    # silent failure for another. CT step triggers are active high, which is
+    # the default and matches the pre-existing behaviour; an inverted rig can
+    # say so explicitly.
+    if polarity == "active-high":
+        high = trigger_data >= lo + threshold_fraction * span
+    elif polarity == "active-low":
+        high = trigger_data <= hi - threshold_fraction * span
     else:
-        baseline_is_low = np.count_nonzero(above) <= len(above) / 2
-
-    high = above if baseline_is_low else (trigger_data <= hi - threshold_fraction * span)
+        raise ValueError(
+            f"polarity must be 'active-high' or 'active-low', got {polarity!r}."
+        )
 
     # Detect edges by diff: +1 = rising, -1 = falling
     edges = np.diff(high.astype(np.int8))

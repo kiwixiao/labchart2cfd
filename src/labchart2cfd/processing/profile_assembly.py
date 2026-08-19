@@ -119,13 +119,32 @@ def assemble_parts(
     if grid_offset_s < 0:
         raise ValueError("grid_offset_s must not be negative.")
 
-    spi = int(round(dt * sample_rate))
+    # The flow is sliced on whole samples while the reorder map's time column
+    # is computed from dt directly, so the two only describe the same instants
+    # when dt and the offset land on whole samples. Validate rather than round
+    # silently: a dt of 0.205 s at 100 Hz drifted the map 95 ms from the chunk
+    # it names. The GUI already quantises dt, so this guards direct callers.
+    exact_spi = dt * sample_rate
+    spi = int(round(exact_spi))
+    if abs(exact_spi - spi) > 1e-9:
+        raise ValueError(
+            f"dt*sample_rate is {exact_spi:.9f}, not a whole number of "
+            "samples; the reorder map would name times the flow chunks do not "
+            "start at. Quantise dt to a multiple of 1/sample_rate."
+        )
     if spi < 1:
         raise ValueError(
             f"samples-per-image is {spi}; dt*sample_rate must be >= 1."
         )
 
-    off = int(round(grid_offset_s * sample_rate))
+    exact_off = grid_offset_s * sample_rate
+    off = int(round(exact_off))
+    if abs(exact_off - off) > 1e-9:
+        raise ValueError(
+            f"grid_offset_s*sample_rate is {exact_off:.9f}, not a whole "
+            "number of samples; quantise the offset to a multiple of "
+            "1/sample_rate."
+        )
 
     for p in parts:
         if not (1 <= p.start_image <= p.end_image <= total_images):

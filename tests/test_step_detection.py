@@ -68,18 +68,80 @@ def test_dc_offset_baseline_does_not_swallow_the_recording():
     assert steps[1]["start_time"] == pytest.approx(12.0, abs=2 / fs)
 
 
-def test_negative_going_trigger_is_detected():
-    """A trigger stepping DOWN from baseline is still a step."""
+def test_negative_going_trigger_needs_declared_polarity():
+    """An inverted rig is supported, but must say so.
+
+    Polarity is never inferred: three auto-detection rules each inverted a
+    different legitimate recording. active-high is the CT convention and the
+    default.
+    """
     fs = 1000.0
     t = np.arange(0, 20, 1 / fs)
     trig = np.zeros_like(t)
     trig[(t >= 5.0) & (t < 9.0)] = -5.0
 
-    steps = detect_steps(trig, t)
+    steps = detect_steps(trig, t, polarity="active-low")
 
     assert len(steps) == 1
     assert steps[0]["start_time"] == pytest.approx(5.0, abs=2 / fs)
     assert steps[0]["duration"] == pytest.approx(4.0, abs=2 / fs)
+
+
+def test_unknown_polarity_is_rejected():
+    t = np.arange(0, 2, 0.001)
+    trig = np.zeros_like(t)
+    trig[t > 1] = 5.0
+    with pytest.raises(ValueError, match="polarity"):
+        detect_steps(trig, t, polarity="auto")
+
+
+def test_recording_truncated_at_both_ends():
+    """Three scans with the recording starting AND ending mid-scan.
+
+    This is the case that defeated the edge-agreement rule: both edges sat
+    high, so it called HIGH the baseline and returned the gaps.
+    """
+    fs = 1000.0
+    t = np.arange(0, 20, 1 / fs)
+    trig = np.zeros_like(t)
+    trig[t < 2.0] = 5.0
+    trig[(t >= 9.0) & (t < 13.0)] = 5.0
+    trig[t >= 18.0] = 5.0
+
+    steps = detect_steps(trig, t)
+
+    assert len(steps) == 3
+    assert [round(s["start_time"], 1) for s in steps] == [0.0, 9.0, 18.0]
+
+
+def test_high_duty_ending_mid_step():
+    """Defeated the occupancy fallback: 65% duty with disagreeing edges."""
+    fs = 1000.0
+    t = np.arange(0, 20, 1 / fs)
+    trig = np.zeros_like(t)
+    trig[(t >= 2.0) & (t < 8.0)] = 5.0
+    trig[t >= 13.0] = 5.0
+
+    steps = detect_steps(trig, t)
+
+    assert len(steps) == 2
+    assert [round(s["start_time"], 1) for s in steps] == [2.0, 13.0]
+
+
+def test_one_noisy_edge_sample_does_not_flip_detection():
+    """Defeated the occupancy fallback: a single bad sample at index 0 routed
+    a clean 60%-duty recording into the inverted branch."""
+    fs = 1000.0
+    t = np.arange(0, 20, 1 / fs)
+    trig = np.zeros_like(t)
+    trig[(t >= 2.0) & (t < 8.0)] = 5.0
+    trig[(t >= 12.0) & (t < 18.0)] = 5.0
+    trig[0] = 5.0                      # one spurious sample
+
+    steps = detect_steps(trig, t)
+
+    starts = [round(s["start_time"], 1) for s in steps]
+    assert 2.0 in starts and 12.0 in starts
 
 
 def test_step_longer_than_half_the_recording_is_not_inverted():

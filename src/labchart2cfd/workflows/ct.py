@@ -132,11 +132,10 @@ class CTWorkflow(BaseWorkflow):
                 cut_image_idx, start_time, temporal_resolution
             )
 
-        # Keep the window's original bounds: the splice below rewrites
+        # Keep the window's original time base: the splice below rewrites
         # time_windowed to start at 0, but pressure must be sampled against
         # the recording's own clock before being spliced the same way.
-        time_windowed_original_start = float(time_windowed[0])
-        time_windowed_original_end = float(time_windowed[-1])
+        time_windowed_raw = time_windowed.copy()
 
         if needs_rearrange:
             time_windowed, flow_windowed = rearrange_at_landmark(
@@ -165,14 +164,13 @@ class CTWorkflow(BaseWorkflow):
         pressure_resampled: Optional[np.ndarray] = None
         pressure_note: Optional[str] = None
         if include_pressure and not data.is_block_empty(self.pressure_row, column):
-            # Pre-rearrangement window time base, matching the flow's window.
-            pre_time = np.linspace(
-                time_windowed_original_start,
-                time_windowed_original_end,
-                len(time_resampled),
-            )
+            # Sample pressure on the RAW window grid, then splice it with the
+            # same function and cut instant as the flow, then resample. Doing
+            # the splice after resampling instead rotated a 10 ms output sample
+            # where the flow rotated a 1 ms raw one, leaving the exported
+            # pressure with a sub-sample phase offset against the flow.
             p_raw = self._pressure_on_time_base(
-                data, self.pressure_row, column, pre_time
+                data, self.pressure_row, column, time_windowed_raw
             )
             if p_raw is None:
                 pressure_note = (
@@ -182,18 +180,16 @@ class CTWorkflow(BaseWorkflow):
             else:
                 pressure_pa = cmh2o_to_pascal(p_raw)
                 if needs_rearrange:
-                    # Splice at the same image boundary as the flow: the cut
-                    # index into this uniformly sampled window.
-                    cut_frac = (cut_time - time_windowed_original_start) / (
-                        time_windowed_original_end - time_windowed_original_start
+                    _, pressure_pa = rearrange_at_landmark(
+                        time_windowed_raw, pressure_pa, cut_time
                     )
-                    cut_i = int(round(cut_frac * (len(pressure_pa) - 1)))
-                    cut_i = max(0, min(cut_i, len(pressure_pa) - 1))
-                    pressure_pa = np.concatenate(
-                        [pressure_pa[cut_i:], pressure_pa[:cut_i]]
-                    )
+                # time_windowed is the flow's post-splice base, same length and
+                # span, so both resample to identical counts.
+                _, pressure_resampled = resample_to_rate(
+                    time_windowed, pressure_pa, self.target_sample_rate
+                )
                 pressure_resampled = smooth_moving_average(
-                    pressure_pa, self.smoothing_window
+                    pressure_resampled, self.smoothing_window
                 )
 
         # Normalize time to start at 0

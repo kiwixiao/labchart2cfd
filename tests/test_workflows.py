@@ -174,6 +174,35 @@ def test_missing_pressure_coverage_does_not_kill_the_flow_export():
     assert result.pressure is None
 
 
+def test_ct_pressure_stays_phase_aligned_with_flow_through_rearrangement():
+    """Splicing pressure AFTER resampling rotated a 10 ms output sample where
+    the flow rotated a 1 ms raw one, leaving a sub-sample phase offset."""
+    fs, win, cycles = 1000.0, 4.0, 3
+    t = np.arange(0.0, 30.0, 1 / fs)
+    sig = np.sin(2 * np.pi * (cycles / win) * t)
+    data = LabChartData(
+        data_cell=[[sig * 0], [sig], [None], [sig]],
+        time_cell=[[t], [t], [None], [t]],
+        num_channels=4, num_blocks=1,
+    )
+    wf = CTWorkflow(target_sample_rate=100.0, smoothing_window=1, density=1.2)
+
+    result = wf.process(
+        data, row=2, column=1, start_time=10.0, end_time=10.0 + win,
+        inhale_start_time=13.0, exhale_end_time=None,
+        temporal_resolution=0.2, include_pressure=True,
+    )
+
+    # Undo the flow's CFD sign inversion, then compare fundamental phases.
+    f = -(result.mass_flow - result.mass_flow.mean())
+    p = result.pressure - result.pressure.mean()
+    phase = np.angle(np.fft.rfft(f)[cycles]) - np.angle(np.fft.rfft(p)[cycles])
+    phase = (phase + np.pi) % (2 * np.pi) - np.pi
+    shift_samples = phase / (2 * np.pi) * len(f) / cycles
+
+    assert abs(shift_samples) < 0.01
+
+
 def test_window_outside_data_raises_a_named_error():
     """An out-of-range window used to die deep in resampling with a bare
     IndexError; now the window extraction itself explains the problem."""

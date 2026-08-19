@@ -103,6 +103,71 @@ def test_cell_array_titles_do_not_crash(tmp_path):
     assert d.titles == ["flow", "press"]
 
 
+def test_blank_title_keeps_every_channel_in_its_own_slot(tmp_path):
+    """A blank cell used to be dropped, shifting later channels up a slot so
+    validate named the wrong channel and the user picked the wrong --row."""
+    mat = _write_mat(
+        tmp_path / "blank.mat",
+        tweak={"titles": np.array([["", "press"]], dtype=object)},
+    )
+
+    d = load_labchart_mat(mat)
+
+    assert d.titles == ["", "press"]     # not ["press", ...]
+
+
+def test_nested_cell_titles_are_unwrapped(tmp_path):
+    mat = _write_mat(
+        tmp_path / "nested.mat",
+        tweak={"titles": np.array(
+            [[np.array(["flow"], dtype=object), np.array(["press"], dtype=object)]],
+            dtype=object)},
+    )
+
+    d = load_labchart_mat(mat)
+
+    assert d.titles == ["flow", "press"]
+
+
+def test_scaleoffset_without_scaleunits_is_rejected(tmp_path):
+    """The pair is all-or-nothing; accepting one silently applied no scaling."""
+    mat = _write_mat(tmp_path / "half.mat",
+                     tweak={"scaleoffset": np.array([[1.0], [1.0]])})
+
+    with pytest.raises(ValueError, match="scaleunits"):
+        load_labchart_mat(mat)
+
+
+def test_describe_and_load_agree_on_scaling_fields(tmp_path):
+    """validate must not bless a file process refuses."""
+    mat = _write_mat(tmp_path / "half2.mat",
+                     tweak={"scaleunits": np.array([[1.0], [1.0]])})
+
+    info = describe_mat_structure(mat)
+
+    assert "error" in info
+    with pytest.raises(ValueError):
+        load_labchart_mat(mat)
+
+
+def test_nan_sample_rate_is_rejected(tmp_path):
+    mat = _write_mat(tmp_path / "nan.mat",
+                     tweak={"samplerate": np.array([[np.nan], [100.0]])})
+
+    with pytest.raises(ValueError, match="sample rate"):
+        load_labchart_mat(mat)
+
+
+def test_describe_returns_error_dict_on_mismatched_shapes(tmp_path):
+    """Contract: describe returns {'error': ...}, never raises."""
+    mat = _write_mat(tmp_path / "shape.mat",
+                     tweak={"samplerate": np.array([[100.0]])})   # 1x1 vs 2x1
+
+    info = describe_mat_structure(mat)
+
+    assert "error" in info
+
+
 def test_describe_requires_the_data_variable(tmp_path):
     """describe used to report a full healthy structure for a file with no
     data at all, so validate passed and process failed."""
