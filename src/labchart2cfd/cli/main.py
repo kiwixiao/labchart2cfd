@@ -146,6 +146,10 @@ def process(
         Optional[int],
         typer.Option("--trigger-row", help="CT: trigger channel row (1-indexed), used as given"),
     ] = None,
+    pressure_row: Annotated[
+        Optional[int],
+        typer.Option("--pressure-row", help="Pressure channel row (1-indexed); omit for the default (4)"),
+    ] = None,
 ) -> None:
     """Process a LabChart .mat file and export Star-CCM+ compatible CSV.
 
@@ -195,7 +199,7 @@ def process(
 
     # Select and configure workflow (density defaults resolved in the factory)
     if workflow == WorkflowType.CT:
-        wf = build_workflow("ct", density=density, target_sample_rate=sample_rate)
+        wf = build_workflow("ct", density=density, target_sample_rate=sample_rate, pressure_row=pressure_row)
         # If step_number is provided, auto-detect step boundaries
         if step_number is not None:
             from labchart2cfd.processing.step_detection import detect_steps
@@ -217,9 +221,9 @@ def process(
         target_rate = 1000.0 if sample_rate == 100.0 else sample_rate
         wf = build_workflow("phase-contrast", density=density, target_sample_rate=target_rate)
     elif workflow == WorkflowType.CPAP:
-        wf = build_workflow("cpap", density=density, target_sample_rate=sample_rate)
+        wf = build_workflow("cpap", density=density, target_sample_rate=sample_rate, pressure_row=pressure_row)
     else:  # STANDARD
-        wf = build_workflow("standard", density=density, target_sample_rate=sample_rate)
+        wf = build_workflow("standard", density=density, target_sample_rate=sample_rate, pressure_row=pressure_row)
 
     console.print(f"Using [green]{wf.name}[/green] workflow")
 
@@ -386,7 +390,11 @@ def visualize(
         raise typer.Exit(1)
 
     console.print(f"Loading [cyan]{input_file}[/cyan]...")
-    data = load_labchart_mat(input_file)
+    try:
+        data = load_labchart_mat(input_file)
+    except Exception as e:
+        console.print(f"[red]Error loading file:[/red] {e}")
+        raise typer.Exit(1)
 
     if data.is_block_empty(row, column):
         console.print(f"[red]Error:[/red] Block [{row}, {column}] is empty")
@@ -442,7 +450,11 @@ def detect_steps_cmd(
         raise typer.Exit(1)
 
     console.print(f"Loading [cyan]{input_file}[/cyan]...")
-    data = load_labchart_mat(input_file)
+    try:
+        data = load_labchart_mat(input_file)
+    except Exception as e:
+        console.print(f"[red]Error loading file:[/red] {e}")
+        raise typer.Exit(1)
 
     trigger_row = _resolve_trigger_row(trigger_row, row, column, data)
     trigger_data = data.get_data(trigger_row, column)

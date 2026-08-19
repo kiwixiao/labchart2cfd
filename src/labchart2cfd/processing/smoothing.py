@@ -33,7 +33,9 @@ def smooth_moving_average(data, window_size=5):
 
     n = len(data)
     half_window = window_size // 2
-    result = np.zeros_like(data)
+    # float dtype explicitly: zeros_like preserves an integer input dtype and
+    # the mean assignments would silently truncate.
+    result = np.zeros(n, dtype=np.float64)
 
     for i in range(n):
         # Determine window bounds

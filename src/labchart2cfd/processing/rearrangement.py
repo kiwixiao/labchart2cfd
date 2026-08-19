@@ -62,7 +62,9 @@ def compute_image_count(
     """
     if temporal_resolution_s <= 0:
         raise ValueError("temporal_resolution_s must be positive")
-    return int(np.round(step_duration_s / temporal_resolution_s))
+    # floor(x+0.5): half-up like MATLAB's round. np.round is banker's
+    # rounding (round(20.5) == 20), which disagrees at exact half boundaries.
+    return int(np.floor(step_duration_s / temporal_resolution_s + 0.5))
 
 
 def time_to_image_index(
@@ -91,7 +93,8 @@ def time_to_image_index(
     if temporal_resolution_s <= 0:
         raise ValueError("temporal_resolution_s must be positive")
     offset = landmark_time - step_start_time
-    idx = int(np.round(offset / temporal_resolution_s))
+    # Half-up rounding, consistent with compute_image_count.
+    idx = int(np.floor(offset / temporal_resolution_s + 0.5))
     if total_images is not None:
         idx = max(0, min(idx, total_images - 1))
     return idx
