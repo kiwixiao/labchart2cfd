@@ -111,8 +111,10 @@ class CPAPWorkflow(BaseWorkflow):
         #         flow_vol_picked = cumtrapz(time_picked, flow_picked);
         #         error_picked = abs(flow_vol_picked(end)) / Dt;
         #         correctedFlow = flow_picked - error_picked;  # NOTE: minus sign!
+        # Signed correction: subtracts the net drift whatever its polarity.
+        # (The old -1 sign existed to compensate for an abs() in the error.)
         corrected_flow, drift_error = correct_flow_drift(
-            time_windowed, flow_windowed, sign=-1  # CPAP uses - error
+            time_windowed, flow_windowed
         )
 
         # Step 3: Convert to mass flow

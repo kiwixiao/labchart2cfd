@@ -23,40 +23,53 @@ from labchart2cfd.processing.unit_conversion import (
 
 
 class TestDriftCorrection:
-    """Tests for drift correction functions."""
+    """Tests for drift correction functions.
+
+    The error rate is SIGNED (net volume / elapsed time) and the correction
+    subtracts it, so the integrated volume returns to zero for either drift
+    polarity. The old form used abs() plus a per-workflow sign, which doubled
+    the drift whenever the polarity did not match the assumed one.
+    """
 
     def test_calculate_drift_error_zero_drift(self):
         """Perfect sinusoidal flow should have near-zero drift."""
         time = np.linspace(0, 2 * np.pi, 1000)
-        # Perfect sine wave integrates to zero over full period
         flow = np.sin(time)
         error = calculate_drift_error(time, flow)
         assert_allclose(error, 0.0, atol=1e-3)
 
-    def test_calculate_drift_error_with_offset(self):
-        """Constant offset should be detected as drift."""
-        time = np.linspace(0, 10, 1000)
-        offset = 0.1
-        flow = np.sin(time) + offset
-        error = calculate_drift_error(time, flow)
-        # Error should be approximately the offset
-        assert error > 0.05
+    def test_drift_error_is_signed(self):
+        """The error rate carries the drift's direction."""
+        # Whole periods, so the sine itself integrates to ~0 and only the
+        # offset determines the sign.
+        time = np.linspace(0, 4 * np.pi, 4001)
+        assert calculate_drift_error(time, np.sin(time) + 0.1) > 0.05
+        assert calculate_drift_error(time, np.sin(time) - 0.1) < -0.05
 
-    def test_apply_drift_correction_positive(self):
-        """Standard OSAMRI uses positive correction (flow + error)."""
+    def test_apply_drift_correction_subtracts_signed_error(self):
         flow = np.array([1.0, 2.0, 3.0])
-        error = 0.5
-        corrected = apply_drift_correction(flow, error, sign=1)
-        expected = np.array([1.5, 2.5, 3.5])
-        assert_allclose(corrected, expected)
+        assert_allclose(apply_drift_correction(flow, 0.5), [0.5, 1.5, 2.5])
+        assert_allclose(apply_drift_correction(flow, -0.5), [1.5, 2.5, 3.5])
 
-    def test_apply_drift_correction_negative(self):
-        """CPAP uses negative correction (flow - error)."""
-        flow = np.array([1.0, 2.0, 3.0])
-        error = 0.5
-        corrected = apply_drift_correction(flow, error, sign=-1)
-        expected = np.array([0.5, 1.5, 2.5])
-        assert_allclose(corrected, expected)
+    @pytest.mark.parametrize("offset", [+0.005, -0.005])
+    def test_correction_zeroes_net_volume_for_both_polarities(self, offset):
+        """The invariant that was broken: after correction, the integrated
+        volume must return to ~0 regardless of drift direction. The old code
+        turned a +0.5 L spurious volume into +1.0 L."""
+        from scipy.integrate import cumulative_trapezoid
+
+        time = np.arange(0, 100, 0.001)
+        flow = 0.5 * np.sin(2 * np.pi * 0.25 * time) + offset
+
+        corrected, error = correct_flow_drift(time, flow)
+
+        v_after = cumulative_trapezoid(corrected, time, initial=0)[-1]
+        assert_allclose(v_after, 0.0, atol=1e-6)
+        assert_allclose(error, offset, atol=1e-6)
+
+    def test_single_sample_window_raises_not_nan(self):
+        with pytest.raises(ValueError):
+            calculate_drift_error(np.array([1.0]), np.array([0.5]))
 
 
 class TestResampling:

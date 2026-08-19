@@ -95,9 +95,8 @@ class StandardOSAMRIWorkflow(BaseWorkflow):
         # MATLAB: flow_vol = cumtrapz(time, flow);
         #         error = abs(flow_vol(end)) / time(end);
         #         correctedFlow = flow + error;
-        corrected_flow, drift_error = correct_flow_drift(
-            full_time, full_flow, sign=1  # Standard uses + error
-        )
+        # Signed correction: subtracts the net drift whatever its polarity.
+        corrected_flow, drift_error = correct_flow_drift(full_time, full_flow)
 
         # Step 2: Extract time window
         time_windowed, flow_windowed = self._extract_time_window(

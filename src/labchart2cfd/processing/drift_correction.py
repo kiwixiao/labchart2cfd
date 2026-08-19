@@ -4,11 +4,19 @@ Flow sensors can exhibit baseline drift over time, causing the integrated
 volume to not return to zero after a breathing cycle. This module provides
 functions to calculate and correct for this drift.
 
-The correction is based on cumulative integration:
-    error = abs(cumtrapz(time, flow)[-1]) / time[-1]
+The correction subtracts the signed mean drift rate:
 
-This represents the average offset needed to make the integrated volume
-return to zero.
+    error     = cumtrapz(flow, time)[-1] / (time[-1] - time[0])
+    corrected = flow - error
+
+so the integrated volume returns to zero for either drift polarity.
+
+History: the MATLAB original (and the first port of it) computed
+``abs(flow_vol(end)) / time(end)`` and applied it with a per-workflow sign
+(+1 standard, -1 CPAP). Taking abs() discards the drift's direction, so
+whenever the actual polarity did not match the assumed one the "correction"
+doubled the drift instead of removing it. The signed form needs no per
+workflow sign and is correct for both directions.
 """
 
 from typing import Tuple
@@ -19,63 +27,63 @@ from scipy.integrate import cumulative_trapezoid
 
 def calculate_drift_error(time, flow):
     # type: (np.ndarray, np.ndarray) -> float
-    """Calculate the drift error rate from flow data.
+    """Calculate the signed drift error rate from flow data.
 
-    Uses cumulative trapezoidal integration to find the total volume
-    drift, then divides by the total time to get the drift rate.
+    Integrates the flow to volume, then divides the net (signed) final volume
+    by the elapsed time to get the mean drift rate.
 
     Args:
-        time: Time array in seconds
+        time: Time array in seconds (at least 2 samples)
         flow: Flow rate array (L/s or any consistent units)
 
     Returns:
-        Drift error rate in flow units per second
+        Signed drift error rate in flow units per second. Positive means the
+        signal drifts positive.
+
+    Raises:
+        ValueError: If the window has fewer than 2 samples or zero duration.
     """
+    if len(time) < 2:
+        raise ValueError(
+            f"Drift correction needs at least 2 samples, got {len(time)}."
+        )
+    total_time = time[-1] - time[0]
+    if total_time <= 0:
+        raise ValueError(
+            f"Drift correction needs a positive time span, got {total_time}."
+        )
+
     # cumulative_trapezoid returns array of length n-1, use initial=0 to match MATLAB
     flow_volume = cumulative_trapezoid(flow, time, initial=0)
 
-    # Get total time span
-    total_time = time[-1] - time[0]
-
-    # Calculate error rate: absolute final volume divided by time
-    # This matches MATLAB: error = abs(flow_vol(end)) / time(end)
-    error = abs(flow_volume[-1]) / total_time
-
-    return float(error)
+    return float(flow_volume[-1] / total_time)
 
 
-def apply_drift_correction(flow, error, sign=1):
-    # type: (np.ndarray, float, int) -> np.ndarray
-    """Apply drift correction to flow data.
+def apply_drift_correction(flow, error):
+    # type: (np.ndarray, float) -> np.ndarray
+    """Subtract the signed drift error rate from the flow.
 
     Args:
         flow: Flow rate array
-        error: Drift error rate (from calculate_drift_error)
-        sign: Correction sign (+1 for standard OSAMRI, -1 for CPAP)
-              - Standard: correctedFlow = flow + error
-              - CPAP: correctedFlow = flow - error
+        error: Signed drift error rate (from calculate_drift_error)
 
     Returns:
-        Drift-corrected flow array
+        Drift-corrected flow array whose integral returns to ~zero.
     """
-    return flow + (sign * error)
+    return flow - error
 
 
-def correct_flow_drift(time, flow, sign=1):
-    # type: (np.ndarray, np.ndarray, int) -> Tuple[np.ndarray, float]
+def correct_flow_drift(time, flow):
+    # type: (np.ndarray, np.ndarray) -> Tuple[np.ndarray, float]
     """Calculate and apply drift correction in one step.
-
-    Convenience function that combines calculate_drift_error and
-    apply_drift_correction.
 
     Args:
         time: Time array in seconds
         flow: Flow rate array
-        sign: Correction sign (+1 for standard, -1 for CPAP)
 
     Returns:
-        Tuple of (corrected_flow, error_rate)
+        Tuple of (corrected_flow, signed_error_rate)
     """
     error = calculate_drift_error(time, flow)
-    corrected = apply_drift_correction(flow, error, sign)
+    corrected = apply_drift_correction(flow, error)
     return corrected, error

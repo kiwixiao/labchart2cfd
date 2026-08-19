@@ -136,7 +136,7 @@ class CTWorkflow(BaseWorkflow):
 
         # Step 3: Drift correction on rearranged signal
         corrected_flow, drift_error = correct_flow_drift(
-            time_windowed, flow_windowed, sign=1
+            time_windowed, flow_windowed
         )
 
         # Step 4: Convert to mass flow (L/s → kg/s)
