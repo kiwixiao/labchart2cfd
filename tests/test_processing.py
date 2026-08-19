@@ -75,17 +75,36 @@ class TestDriftCorrection:
 class TestResampling:
     """Tests for resampling functions."""
 
-    def test_resample_to_rate_length(self):
-        """Output length should match target sample rate."""
-        time = np.linspace(0, 3.0, 3000)  # 1000 Hz, 3 seconds
+    def test_resample_fencepost_count_and_true_rate(self):
+        """N intervals need N+1 samples, and the achieved rate is the nominal one.
+
+        The old count int(period*rate) with endpoint-inclusive linspace gave
+        spacing period/(N-1): a "100 Hz" request actually produced 99.75 Hz,
+        which drifted the CT image map ~9.5 ms across a 4 s window.
+        """
+        time = np.linspace(0, 3.0, 3001)  # 1000 Hz, exactly 3 s
         data = np.sin(2 * np.pi * time)
-        target_rate = 100  # Hz
 
-        time_out, data_out = resample_to_rate(time, data, target_rate)
+        time_out, data_out = resample_to_rate(time, data, 100)
 
-        expected_samples = int(3.0 * target_rate)
-        assert len(time_out) == expected_samples
-        assert len(data_out) == expected_samples
+        assert len(time_out) == 301          # 300 intervals + 1
+        assert len(data_out) == 301
+        spacing = np.diff(time_out)
+        assert_allclose(spacing, 0.01, rtol=1e-9)  # truly 100 Hz
+
+    def test_resample_count_is_immune_to_float_fuzz(self):
+        """Regression: a window whose float span lands a hair under the exact
+        value must not lose a sample. int(409.99999999999994) == 409 used to
+        make ~16% of grid anchors fail the synthetic-profile assembly with
+        'needs samples up to N but the window only has N-1'."""
+        t = np.arange(0, 10, 0.001)          # 1000 Hz
+        mask = (t >= 0.137) & (t <= 4.137)   # 4.000 s window off the exact grid
+        data = np.sin(t)
+
+        time_out, _ = resample_to_rate(t[mask], data[mask], 100)
+
+        # 400 intervals + 1, never 399/400 depending on float luck.
+        assert len(time_out) == 401
 
     def test_resample_preserves_time_range(self):
         """Resampled time should cover same range."""
@@ -96,6 +115,13 @@ class TestResampling:
 
         assert_allclose(time_out[0], time[0], rtol=0.01)
         assert_allclose(time_out[-1], time[-1], rtol=0.01)
+
+    def test_resample_rejects_degenerate_window(self):
+        """A window too short to hold one interval raises instead of returning
+        an empty array that looks like success."""
+        time = np.linspace(0, 0.004, 5)      # 4 ms at 1000 Hz
+        with pytest.raises(ValueError):
+            resample_to_rate(time, np.ones(5), 100)
 
 
 class TestSmoothing:

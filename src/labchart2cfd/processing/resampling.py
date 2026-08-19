@@ -1,24 +1,45 @@
 """Resampling functions for flow profile data.
 
 Provides interpolation to a desired sample rate using cubic spline
-interpolation, matching MATLAB's interp1(..., 'spline') behavior.
-"""
+interpolation (MATLAB interp1(..., 'spline') equivalent).
 
-from typing import Tuple
+Sample-count convention: a window of duration ``period`` at ``rate`` holds
+``round(period * rate)`` intervals and therefore ``round(...) + 1`` samples,
+endpoint inclusive. Rounding (not truncation) makes the count immune to float
+representation of the window span: ``int(409.99999999999994)`` used to drop a
+sample and fail the CT synthetic-profile assembly for ~16% of grid anchors.
+The endpoint-inclusive fencepost also makes the achieved spacing equal
+``period / round(period*rate)``, i.e. the nominal rate, where the old
+``int(period*rate)`` count silently delivered 99.75 Hz for a "100 Hz" request.
+"""
 
 import numpy as np
 from scipy.interpolate import CubicSpline
+from typing import Tuple
+
+
+def _target_indices(time, target_rate_hz):
+    # type: (np.ndarray, float) -> np.ndarray
+    """Index positions to interpolate at, for the shared fencepost count."""
+    if len(time) < 2:
+        raise ValueError(
+            f"Resampling needs at least 2 samples, got {len(time)}."
+        )
+    if target_rate_hz <= 0:
+        raise ValueError(f"target_rate_hz must be positive, got {target_rate_hz}.")
+    period = time[-1] - time[0]
+    intervals = int(round(period * target_rate_hz))
+    if intervals < 1:
+        raise ValueError(
+            f"Window of {period:.6f}s holds no complete interval at "
+            f"{target_rate_hz:g} Hz; widen the window or raise the rate."
+        )
+    return np.linspace(0, len(time) - 1, intervals + 1)
 
 
 def resample_to_rate(time, data, target_rate_hz=100.0):
     # type: (np.ndarray, np.ndarray, float) -> Tuple[np.ndarray, np.ndarray]
     """Resample data to a target sample rate using cubic spline interpolation.
-
-    This matches the MATLAB workflow:
-        period = endTime - startTime
-        desiredSamples = period * desiredSampleRate
-        DS = linspace(1, size(TimeU, 2), desiredSamples)
-        dataDS = interp1(1:size(TimeU, 2), data, DS, 'spline')
 
     Args:
         time: Original time array
@@ -26,33 +47,29 @@ def resample_to_rate(time, data, target_rate_hz=100.0):
         target_rate_hz: Target sample rate in Hz (default: 100)
 
     Returns:
-        Tuple of (resampled_time, resampled_data)
+        Tuple of (resampled_time, resampled_data), endpoint inclusive, with
+        ``round(period * rate) + 1`` samples.
+
+    Raises:
+        ValueError: For a window shorter than one output interval, fewer than
+            2 input samples, or a non-positive rate.
     """
-    # Calculate period and desired number of samples
-    period = time[-1] - time[0]
-    num_samples = int(period * target_rate_hz)
+    target_indices = _target_indices(time, target_rate_hz)
 
-    # MATLAB uses linspace on indices, then interpolates
-    # We'll do the same for exact matching
     original_indices = np.arange(len(time))
-    target_indices = np.linspace(0, len(time) - 1, num_samples)
-
-    # Create spline interpolators
-    time_spline = CubicSpline(original_indices, time)
-    data_spline = CubicSpline(original_indices, data)
-
-    # Interpolate
-    resampled_time = time_spline(target_indices)
-    resampled_data = data_spline(target_indices)
+    resampled_time = CubicSpline(original_indices, time)(target_indices)
+    resampled_data = CubicSpline(original_indices, data)(target_indices)
 
     return resampled_time, resampled_data
 
 
-def resample_multiple(time, *data_arrays, **kwargs):
-    # type: (np.ndarray, *np.ndarray, **float) -> Tuple[np.ndarray, ...]
-    """Resample multiple data arrays to the same time base.
+def resample_multiple(time, *data_arrays, target_rate_hz=100.0):
+    # type: (np.ndarray, *np.ndarray, float) -> Tuple[np.ndarray, ...]
+    """Resample multiple data arrays sharing one time base.
 
-    Useful when processing both flow and pressure simultaneously.
+    Useful when processing both flow and pressure simultaneously. The rate is
+    an explicit keyword (a misspelled keyword used to fall back silently to
+    100 Hz via kwargs.get).
 
     Args:
         time: Original time array
@@ -62,22 +79,15 @@ def resample_multiple(time, *data_arrays, **kwargs):
     Returns:
         Tuple of (resampled_time, resampled_data1, resampled_data2, ...)
     """
-    target_rate_hz = kwargs.get('target_rate_hz', 100.0)
-
-    period = time[-1] - time[0]
-    num_samples = int(period * target_rate_hz)
+    target_indices = _target_indices(time, target_rate_hz)
 
     original_indices = np.arange(len(time))
-    target_indices = np.linspace(0, len(time) - 1, num_samples)
+    resampled_time = CubicSpline(original_indices, time)(target_indices)
 
-    # Interpolate time
-    time_spline = CubicSpline(original_indices, time)
-    resampled_time = time_spline(target_indices)
-
-    # Interpolate each data array
     resampled_arrays = [resampled_time]
     for data in data_arrays:
-        data_spline = CubicSpline(original_indices, data)
-        resampled_arrays.append(data_spline(target_indices))
+        resampled_arrays.append(
+            CubicSpline(original_indices, data)(target_indices)
+        )
 
     return tuple(resampled_arrays)
