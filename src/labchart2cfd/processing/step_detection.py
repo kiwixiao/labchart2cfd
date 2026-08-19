@@ -46,19 +46,31 @@ def detect_steps(
     if len(trigger_data) == 0 or len(trigger_time) == 0:
         return []
 
-    max_val = np.max(np.abs(trigger_data))
-    if max_val == 0:
-        return []
+    lo = float(np.min(trigger_data))
+    hi = float(np.max(trigger_data))
+    if hi == lo:
+        return []  # flat signal: nothing steps
 
-    threshold = threshold_fraction * max_val
+    # Threshold sits inside the signal's RANGE, not at a fraction of max(|x|).
+    # A trigger idling at 4 V stepping to 5 V is entirely above 0.5*max(|x|),
+    # which used to make the "step" span the whole recording.
+    threshold = lo + threshold_fraction * (hi - lo)
 
     # Binary signal: above threshold = high
     high = trigger_data >= threshold
 
+    # Polarity: steps are the minority excursion. If the baseline (median)
+    # sits above the threshold, the steps go downward, so invert.
+    if float(np.median(trigger_data)) >= threshold:
+        high = ~high
+
     # Detect edges by diff: +1 = rising, -1 = falling
     edges = np.diff(high.astype(np.int8))
     rising_indices = np.where(edges == 1)[0] + 1  # index of first high sample
-    falling_indices = np.where(edges == -1)[0]     # index of last high sample
+    # First sample BELOW threshold: the step's end boundary. Using the last
+    # high sample understated every duration by one sample period (a 4.000 s
+    # step reported as 3.999 s).
+    falling_indices = np.where(edges == -1)[0] + 1
 
     # Handle edge cases where signal starts or ends high
     if len(rising_indices) == 0 and len(falling_indices) == 0:
