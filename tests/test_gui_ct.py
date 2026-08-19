@@ -400,6 +400,44 @@ def test_pick_on_plot_accepts_a_single_image(win):
     assert not win._capturing_part
 
 
+def test_every_offset_control_allows_negative_values(win):
+    """The detected step edge can sit either side of the true first image, so
+    each correction control has to move the window earlier as well as later.
+    Start Shift was positive-only in three places (spin, slider, and the
+    step-select handler that raised only the maximum)."""
+    for ctl in (win.ct_shift_spin, win.ct_shift_slider,
+                win.synth_window_offset_spin, win.synth_grid_offset_spin):
+        assert ctl.minimum() < 0, f"{ctl} cannot go negative"
+
+
+def test_start_shift_stays_symmetric_after_selecting_a_step(win):
+    from labchart2cfd.io.labchart import LabChartData
+
+    t = np.linspace(0.0, 60.0, 60001)
+    flow = np.sin(2 * np.pi * 0.3 * t)
+    trig = np.zeros_like(t)
+    trig[(t >= 30.0) & (t <= 34.0)] = 5.0
+    win.data = LabChartData(data_cell=[[trig], [flow]], time_cell=[[t], [t]],
+                            num_channels=2, num_blocks=1)
+    win.flow_row_spin.setValue(2)
+    win.col_spin.setValue(1)
+    win._ct_steps = [{"index": 1, "start_time": 30.0, "end_time": 34.0,
+                      "duration": 4.0}]
+    win.ct_step_spin.setValue(1)
+
+    win._select_ct_step()
+
+    assert win.ct_shift_spin.minimum() == -win.ct_shift_spin.maximum()
+
+    # A negative shift survives the entry handler and reaches Start Time.
+    win.ct_shift_spin.setValue(-300)
+    win._on_shift_entry_changed()
+    assert win.ct_shift_spin.value() == -300
+
+    win._apply_ct_correction()
+    assert win.start_spin.value() == pytest.approx(29.7)
+
+
 def _select_fake_step(win, start=0.0, end=2.0, dt_ms=200):
     win._ct_selected_step = {
         "index": 1, "start_time": start, "end_time": end, "duration": end - start,

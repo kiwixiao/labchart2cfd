@@ -424,16 +424,19 @@ class FlowProfileApp(QMainWindow):
 
         # Row 2: Start Shift (manual correction) + Apply button
         ct_grid.addWidget(QLabel("Start Shift (ms):"), 2, 0)
+        # Bidirectional: the detected step edge can sit either side of the true
+        # first image, so the correction has to move the window earlier as well
+        # as later. Positive-only meant a late-detected edge was uncorrectable.
         self.ct_shift_spin = QSpinBox()
-        self.ct_shift_spin.setRange(0, 2000)
+        self.ct_shift_spin.setRange(-2000, 2000)
         self.ct_shift_spin.setSingleStep(10)
         self.ct_shift_spin.setValue(0)
-        self.ct_shift_spin.setFixedWidth(70)
+        self.ct_shift_spin.setFixedWidth(80)
         self.ct_shift_spin.editingFinished.connect(self._on_shift_entry_changed)
         ct_grid.addWidget(self.ct_shift_spin, 2, 1)
 
         self.ct_shift_slider = QSlider(Qt.Horizontal)
-        self.ct_shift_slider.setRange(0, 2000)
+        self.ct_shift_slider.setRange(-2000, 2000)
         self.ct_shift_slider.setSingleStep(10)
         self.ct_shift_slider.setPageStep(10)
         self.ct_shift_slider.setValue(0)
@@ -1390,8 +1393,10 @@ class FlowProfileApp(QMainWindow):
         self.ct_shift_slider.setValue(0)
         step_dur_ms = (step["end_time"] - step["start_time"]) * 1000.0
         slider_max = max(int(step_dur_ms * 0.5), 500)
-        self.ct_shift_slider.setMaximum(slider_max)
-        self.ct_shift_spin.setMaximum(slider_max)
+        # Symmetric: only raising the maximum left the minimum pinned at 0, so
+        # the shift could never move the window earlier.
+        self.ct_shift_slider.setRange(-slider_max, slider_max)
+        self.ct_shift_spin.setRange(-slider_max, slider_max)
         self._suppress_shift_slider = False
 
         # Auto-fill start/end time from step boundaries
@@ -1547,9 +1552,10 @@ class FlowProfileApp(QMainWindow):
     def _on_shift_entry_changed(self) -> None:
         """Sync entry value to slider and redraw interval lines."""
         val = self.ct_shift_spin.value()
-        # Clamp to slider range to avoid desync
-        slider_max = self.ct_shift_slider.maximum()
-        val = max(0, min(val, slider_max))
+        # Clamp to the slider's own range, both ends: clamping the low end to 0
+        # silently discarded any negative (earlier) correction.
+        val = max(self.ct_shift_slider.minimum(),
+                  min(val, self.ct_shift_slider.maximum()))
         self.ct_shift_spin.setValue(val)
         # Suppress slider callback to avoid double-redraw
         self._suppress_shift_slider = True
@@ -1577,6 +1583,28 @@ class FlowProfileApp(QMainWindow):
         # so the window ends at the closing line of the last image.
         corrected_start = self._ct_detected_start + shift_ms / 1000.0
         corrected_end = corrected_start + manual_frames * temporal_res_s
+
+        # The corrected window must still have data behind it. A negative shift
+        # can push it before the recording starts, and a large image count can
+        # push it past the end; both used to be written to the spinboxes and
+        # only failed later, deep in processing.
+        if self.data is not None:
+            try:
+                t_axis = self.data.get_time(self.flow_row_spin.value(),
+                                            self.col_spin.value())
+            except ValueError:
+                t_axis = None
+            if t_axis is not None:
+                rec_lo, rec_hi = float(t_axis[0]), float(t_axis[-1])
+                if corrected_start < rec_lo or corrected_end > rec_hi:
+                    QMessageBox.warning(
+                        self, "Correction Outside Recording",
+                        f"That correction gives {corrected_start:.3f}s to "
+                        f"{corrected_end:.3f}s, outside the recording "
+                        f"({rec_lo:.3f}s to {rec_hi:.3f}s).\n\n"
+                        "Reduce the shift or the image count.",
+                    )
+                    return
 
         # Update the processing fields
         self.start_spin.setValue(corrected_start)
