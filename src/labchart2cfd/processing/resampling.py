@@ -8,9 +8,13 @@ Sample-count convention: a window of duration ``period`` at ``rate`` holds
 endpoint inclusive. Rounding (not truncation) makes the count immune to float
 representation of the window span: ``int(409.99999999999994)`` used to drop a
 sample and fail the CT synthetic-profile assembly for ~16% of grid anchors.
-The endpoint-inclusive fencepost also makes the achieved spacing equal
-``period / round(period*rate)``, i.e. the nominal rate, where the old
-``int(period*rate)`` count silently delivered 99.75 Hz for a "100 Hz" request.
+
+Achieved rate: the output spans the window exactly, so the spacing is
+``period / round(period * rate)``. That equals the requested rate only when
+``period * rate`` is a whole number; otherwise it differs by at most half a
+sample over the window (the old ``int(period*rate)`` count could be off by a
+full sample, delivering 99.75 Hz for a "100 Hz" request). ``WorkflowResult``
+reports the nominal rate, so treat it as the request, not a measurement.
 """
 
 import numpy as np

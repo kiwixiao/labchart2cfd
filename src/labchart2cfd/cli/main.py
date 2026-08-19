@@ -204,6 +204,9 @@ def process(
         if step_number is not None:
             from labchart2cfd.processing.step_detection import detect_steps
             trigger_row = _resolve_trigger_row(trigger_row, row, column, data)
+            # Record which channel the step boundaries came from, so the
+            # transcript says it whether or not the row was given explicitly.
+            console.print(f"  Reading trigger from row {trigger_row}, column {column}")
             trigger_data = data.get_data(trigger_row, column)
             trigger_time = data.get_time(trigger_row, column)
             # Use the same detection parameters as the `detect-steps` command

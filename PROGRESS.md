@@ -4,7 +4,13 @@
 User reviews and merges branch `fix/review-findings` (9 commits: the full bug-fix batch from the 2026-08-19 deep review). After merge: the MATLAB parity comparison remains the one outstanding correctness check. NOTE: the drift-correction fix deliberately breaks parity with the MATLAB original (which carries the same abs() bug), so old outputs for positive-drift recordings will differ, correctly.
 
 ## LAST SESSION
-2026-08-19. Deep review of the whole codebase (3 parallel reviewers, findings independently verified), then fixed everything except the xenon calibration (deferred by user). On branch `fix/review-findings`, stacked on the unmerged trigger-row branch. 123 tests (was 97). Highlights: drift correction doubled the drift for one polarity (abs() inherited from MATLAB, now signed); CSV %.5f quantized mass flow to a ~61-step staircase (now %.9e); CT rearrangement silently skipped in the CLI's documented invocation; resampler delivered 99.75 Hz while reporting 100 and lost samples to int() truncation; step detection swallowed the whole recording on DC-offset triggers; the GUI Execute worker's completion callbacks never fired (QTimer from a plain thread, now pyqtSignal); the .mat reader trusted the file's index tables (truncation clamped silently, bad sentinels returned another channel's data); pressure was masked with the flow channel's time array and crashed on mixed-rate recordings. An adversarial verification workflow over the branch ran before handoff.
+2026-08-19. Deep review of the whole codebase (3 parallel reviewers, findings independently verified), then fixed everything except the xenon calibration (deferred by user). On branch `fix/review-findings`, stacked on the unmerged trigger-row branch. **14 commits, 130 tests (was 97).**
+
+Engine fixes: drift correction doubled the drift for one polarity (abs() inherited from MATLAB, now signed, deliberately diverging from the original); CSV %.5f quantized mass flow to a ~61-step staircase (now %.9e, plus length/finite validation); resampler delivered 99.75 Hz while reporting 100 and lost samples to int() truncation; step detection swallowed the whole recording on DC-offset triggers and missed negative-going ones; CT rearrangement was silently skipped in the CLI's documented invocation; the .mat reader trusted the file's index tables (truncation clamped silently, a bad sentinel returned another channel's data); pressure was masked with the flow channel's time array and crashed on mixed-rate recordings.
+
+Surface fixes: the GUI Execute worker's completion callbacks never fired (QTimer from a plain thread, now pyqtSignal), plus failed-load state hygiene, pre-Execute validation, exclusive click modes; CLI gained --pressure-row and guarded loads.
+
+**Four rounds of self- and adversarial verification found six defects in my own fixes**, all fixed: a median polarity heuristic that inverted >50%-duty steps; a first-sample anchor that then inverted recordings starting mid-step; pressure trimming that silently shortened the exported flow; `validate --verbose` crashing on the corrupt-block dicts the reader newly emits; `pressure_note` reaching no operator; tab 3/tab 4 dt truncation. Note that 3 of 4 verifier agents died on network errors, so IO, GUI and math have had less independent scrutiny than the completeness pass.
 
 Before that (2026-08-18): CLI --trigger-row fix on `fix/cli-explicit-trigger-row` (now part of the same line). Before that (2026-08-13, merged): CT synthetic-profile work, user-validated on real data.
 
@@ -28,6 +34,7 @@ Before that (2026-08-18): CLI --trigger-row fix on `fix/cli-explicit-trigger-row
 
 ## SESSION LOG
 
+- 2026-08-19: full-codebase review + fix batch on `fix/review-findings` (14 commits, 130 tests). Six defects in the fixes themselves were caught by verification and fixed. IO/GUI/math verifier agents died on network errors; those subsystems rest on my own checks plus the suite.
 - 2026-08-18: CLI trigger-row bug found by user question, fixed on a feature branch with tests driving the real CLI on a 3-channel file (trigger ch1, decoy ch2, flow ch3). 97 tests. Created this file.
 - 2026-08-17: Confirmed main merged and pushed (`9755710`), workspace clean.
 - 2026-08-13: Reorder map absolute time (`9755710`); grid offset bidirectional (`03b7c82`); dt/image-count decoupled (`4ac6941`); keyboard tracking (`0a112ed`). Merged the 18-commit feature branch to main and pushed.
