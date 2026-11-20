@@ -119,8 +119,9 @@ _CT_METHODS = (
      "start at the inhale image when needed, and the trigger info file lists "
      "the images from inhale to exhale."),
     ("Label cycle frames", "cycle",
-     "Click frames in breathing order. Runs of consecutive frames are cut out "
-     "and joined in the order you clicked."),
+     "Click the images of a breath in order. You may go back to an earlier "
+     "image: each run of consecutive images is cut out, and the runs are "
+     "joined in the order you clicked."),
 )
 
 # Roles a channel can play: (name shown, picker attribute, word fragments a
@@ -157,8 +158,8 @@ _BANNERS = {
                    "Click the plot where exhale ends. Right click cancels."),
     "cycle": ("active",
               "Labelling cycle frames: click the images in breathing order. "
-              "A click takes the image that starts at the nearest grid line. "
-              "Right click removes the last label."),
+              "A click takes the image under the pointer, and you may go "
+              "back to an earlier image. Right click removes the last label."),
     "ct_need_step": ("idle",
                      "Scan steps are named along the top of the plot (Step 1, "
                      "Step 2, ...). Click one on the plot to select it, or "
@@ -336,7 +337,7 @@ class FlowProfileApp(QMainWindow):
         # CT cycle-labeling state (independent alternative to inhale/exhale trim)
         self._ct_cycle_mode: bool = False
         self._ct_cycle_frames: list = []  # original image indices in click order
-        self._ct_cycle_artists: list = []  # artists for green numbered labels
+        self._ct_cycle_artists: list = []  # per label: (shading, numbered circle)
 
         # Full-manual synthetic-profile state (window + ordered parts)
         self._synth_mode: bool = False
@@ -1413,8 +1414,8 @@ class FlowProfileApp(QMainWindow):
         self.cycle_mode_btn.setCheckable(True)
         self.cycle_mode_btn.setToolTip(
             "Toggle: click the images in breathing order to build a cycle. "
-            "A click takes the image that starts at the nearest grid line. "
-            "Right click removes the most recent label."
+            "A click takes the image under the pointer. Right click removes "
+            "the most recent label."
         )
         self.cycle_mode_btn.toggled.connect(self._on_cycle_mode_toggled)
         self.cycle_count_label = self._readout("0 frames")
@@ -3946,23 +3947,38 @@ class FlowProfileApp(QMainWindow):
             start_t = self._ct_selected_step["start_time"]
         return start_t, dt, total_imgs
 
-    def _snap_to_fencepost(self, x_time: float) -> Optional[int]:
-        """Snap a click time to the nearest fencepost 1-based image index."""
+    def _image_at(self, x_time: float) -> Optional[int]:
+        """The 1-based image whose slice of the grid holds a time, or None.
+
+        An image is the slice between two grid lines, and the export cuts
+        whole slices. A click therefore takes the slice it lands in. It used
+        to take the image starting at the nearest line, so the right half of
+        the slice numbered 7 recorded image 8 (changed by the owner's
+        decision, 2026-11-20; the reorder parts method already worked so).
+        """
         meta = self._cycle_start_time_dt()
         if meta is None:
             return None
         start_t, dt, total_imgs = meta
-        img = int(round((x_time - start_t) / dt)) + 1
-        return max(1, min(img, total_imgs))
+        # The small term keeps a click exactly on a line in the image that
+        # starts there, against the rounding of the division.
+        position = (x_time - start_t) / dt + 1e-9
+        if position < 0 or position >= total_imgs:
+            return None
+        return int(position) + 1
 
     def _add_cycle_label(self, x_time: float) -> None:
-        """Add a cycle label at the fencepost nearest to the click."""
+        """Label the image under a click as the next one of the cycle."""
         if self._ct_selected_step is None:
             QMessageBox.warning(self, "No Step", "Select a CT step before labeling frames.")
             return
 
-        img_idx = self._snap_to_fencepost(x_time)
+        img_idx = self._image_at(x_time)
         if img_idx is None:
+            if self._cycle_start_time_dt() is not None:
+                self.status_bar.showMessage(
+                    "That click is outside the scan, so no image was labelled."
+                )
             return
 
         # Stack repeated labels vertically so multiple visits to the same
@@ -3972,27 +3988,32 @@ class FlowProfileApp(QMainWindow):
         new_frame_num = len(self._ct_cycle_frames)
 
         start_t, dt, _ = self._cycle_start_time_dt()
-        fencepost_time = start_t + (img_idx - 1) * dt
+        image_start = start_t + (img_idx - 1) * dt
         y_pos = min(0.55 + prior_visits * 0.14, 0.95)
 
+        # The image itself is shaded and the number sits in its middle, so
+        # the plot shows which image was taken. The circle used to sit on
+        # the line between two images.
+        shade = Rectangle(
+            (image_start, 0.0), dt, 1.0, transform=self.ax_top.get_xaxis_transform(),
+            facecolor="green", edgecolor="none", alpha=0.18, zorder=0.6,
+        )
+        shade.set_in_layout(False)
+        self.ax_top.add_artist(shade)
         ann = self.ax_top.annotate(
             str(new_frame_num),
-            xy=(fencepost_time, y_pos),
+            xy=(image_start + dt / 2, y_pos),
             xycoords=("data", "axes fraction"),
             fontsize=9, color="white", fontweight="bold",
             ha="center", va="center",
             bbox=dict(boxstyle="circle,pad=0.25", fc="green", ec="darkgreen", lw=1),
         )
-        self._ct_cycle_artists.append(ann)
+        # One entry per label: what is drawn for it.
+        self._ct_cycle_artists.append((shade, ann))
 
         self._cycle_labels_changed()
         self.canvas.draw_idle()
-        # The image taken is the one that starts at the nearest grid line,
-        # which is not always the number under the pointer. Say which.
-        self.status_bar.showMessage(
-            f"Label {new_frame_num} is image {img_idx}, the image that starts "
-            "at the grid line nearest your click."
-        )
+        self.status_bar.showMessage(f"Label {new_frame_num} is image {img_idx}.")
 
     def _remove_last_cycle_label(self) -> None:
         """Undo the most recently added cycle label."""
@@ -4000,22 +4021,15 @@ class FlowProfileApp(QMainWindow):
             return
         removed = self._ct_cycle_frames.pop()
         if self._ct_cycle_artists:
-            last_artist = self._ct_cycle_artists.pop()
-            try:
-                last_artist.remove()
-            except (ValueError, AttributeError):
-                pass
+            _remove_all(self._ct_cycle_artists.pop())
         self._cycle_labels_changed()
         self.canvas.draw_idle()
         self.status_bar.showMessage(f"Removed the cycle label of image {removed}.")
 
     def _clear_cycle_labels(self) -> None:
         """Remove every cycle label and its artists."""
-        for artist in self._ct_cycle_artists:
-            try:
-                artist.remove()
-            except (ValueError, AttributeError):
-                pass
+        for drawn in self._ct_cycle_artists:
+            _remove_all(drawn)
         self._ct_cycle_artists = []
         self._ct_cycle_frames = []
         self._cycle_labels_changed()

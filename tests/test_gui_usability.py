@@ -111,20 +111,85 @@ def test_no_builder_word_reaches_the_user(win, mat_file):
     assert not [t for t in texts if "fencepost" in t.lower()]
 
 
-def test_a_cycle_click_says_which_image_it_took(win, mat_file):
-    """A click takes the image that starts at the nearest grid line, which is
-    not always the number under the pointer. The screen has to say which."""
+def test_a_cycle_click_takes_the_image_under_the_pointer(win, mat_file):
+    """The owner's decision, 2026-11-20. A click used to take the image that
+    starts at the nearest grid line, so the right half of the slice numbered
+    7 recorded image 8, although the export cuts whole slices. The reorder
+    parts method already took the slice under the pointer."""
+    _ct_step_selected(win, mat_file, "cycle")       # step 2 to 5 s, 200 ms images
+    win.cycle_mode_btn.setChecked(True)
+
+    win._on_click(ClickEvent(win.ax_top, 3.21))    # image 7 runs from 3.2 to 3.4 s
+    win._on_click(ClickEvent(win.ax_top, 3.39))
+    win._on_click(ClickEvent(win.ax_top, 3.41))    # image 8
+
+    assert win._ct_cycle_frames == [7, 7, 8]
+    assert "image 8" in win.status_bar.currentMessage()
+    assert "under the pointer" in win.mode_banner.text()
+
+
+def test_cycle_clicks_at_the_edges_of_the_scan(win, mat_file):
     _ct_step_selected(win, mat_file, "cycle")
     win.cycle_mode_btn.setChecked(True)
 
-    # 3.35 s lies in the slice numbered 7 (3.2 to 3.4 s), nearer its right
-    # edge, where image 8 starts.
-    win._on_click(ClickEvent(win.ax_top, 3.35))
+    win._on_click(ClickEvent(win.ax_top, 2.0))     # the first instant of image 1
+    win._on_click(ClickEvent(win.ax_top, 4.999))   # the last image, 15
+    win._on_click(ClickEvent(win.ax_top, 1.5))     # before the scan
+    win._on_click(ClickEvent(win.ax_top, 6.0))     # after the scan
 
-    status = win.status_bar.currentMessage()
-    assert win._ct_cycle_frames == [8]
-    assert "image 8" in status and "grid line" in status
-    assert "grid line" in win.mode_banner.text()
+    assert win._ct_cycle_frames == [1, 15]
+    assert "outside the scan" in win.status_bar.currentMessage()
+
+
+def test_a_cycle_label_sits_on_its_image_and_shades_it(win, mat_file):
+    """The green circle was drawn on the line between two numbers, so the
+    picture did not say which image it meant."""
+    _ct_step_selected(win, mat_file, "cycle")
+    win.cycle_mode_btn.setChecked(True)
+
+    win._on_click(ClickEvent(win.ax_top, 3.3))     # image 7, 3.2 to 3.4 s
+
+    shade, circle = win._ct_cycle_artists[-1]
+    assert circle.xy[0] == pytest.approx(3.3)      # the middle of the image
+    assert shade.get_x() == pytest.approx(3.2) and shade.get_width() == pytest.approx(0.2)
+
+
+def test_removing_a_cycle_label_removes_its_shading_too(win, mat_file):
+    _ct_step_selected(win, mat_file, "cycle")
+    win.cycle_mode_btn.setChecked(True)
+    win._on_click(ClickEvent(win.ax_top, 3.3))
+    win._on_click(ClickEvent(win.ax_top, 3.5))
+    shade, circle = win._ct_cycle_artists[-1]
+
+    win._on_click(ClickEvent(win.ax_top, 3.0, button=3))
+
+    assert win._ct_cycle_frames == [7] and len(win._ct_cycle_artists) == 1
+    assert shade.axes is None and circle.axes is None
+
+
+def test_clicking_backward_starts_a_new_run_of_images(win, qapp, mat_file, tmp_path):
+    """What the method is for: click a breath in order, also backward, and
+    the runs of images are cut out and joined in click order."""
+    import time
+    _ct_step_selected(win, mat_file, "cycle")
+    win.subject_edit.setText("S1")
+    win._set_output_dir(tmp_path / "out")
+    win.cycle_mode_btn.setChecked(True)
+    for t in (3.3, 3.5, 3.7, 2.1, 2.3):            # images 7, 8, 9, then back to 1, 2
+        win._on_click(ClickEvent(win.ax_top, t))
+    assert win._ct_cycle_frames == [7, 8, 9, 1, 2]
+
+    win._export()
+    deadline = time.time() + 30
+    while win._last_export_report is None and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    facts = dict(win._last_export_report["summary"])
+    assert facts["Images selected"] == "5 (7,8,9,1,2)"
+    assert float(facts["Duration"].split()[0]) == pytest.approx(1.0, abs=0.02)   # 5 x 200 ms
+    if win._result_dialog is not None:
+        win._result_dialog.close()
 
 
 # ----------------------------------------- CT controls that explain themselves
