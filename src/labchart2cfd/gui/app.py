@@ -155,6 +155,10 @@ _BANNERS = {
               "Labelling cycle frames: click the images in breathing order. "
               "A click takes the image that starts at the nearest grid line. "
               "Right click removes the last label."),
+    "ct_need_step": ("idle",
+                     "Scan steps are marked in orange. Choose one under "
+                     "4 CT scan and press Select Step. Clicks on the plot do "
+                     "nothing until then."),
     "ct_landmarks_idle": ("idle",
                           "Scan step selected. Press Mark Inhale Start or "
                           "Mark Exhale End, then click the plot. Plain clicks "
@@ -263,6 +267,10 @@ class FlowProfileApp(QMainWindow):
         # The study type the window is laid out for, to go back to when a
         # change is declined.
         self._workflow_index_shown = 0
+        # Start Shift and Images in step as last applied to Start and End, to
+        # tell a value that is only previewed from one that is in force.
+        self._ct_applied_shift = 0
+        self._ct_applied_images: Optional[int] = None
         # The channel name warnings the user has already accepted for this
         # recording, so the same question is not asked at every export.
         self._accepted_channel_warnings: Optional[tuple] = None
@@ -747,6 +755,8 @@ class FlowProfileApp(QMainWindow):
             return "cycle"
         if self._ct_landmark_mode is not None:
             return self._ct_landmark_mode
+        if self._ct_needs_step():
+            return "ct_need_step"
         if self._synth_mode:
             return "parts_idle"
         if self._workflow_name() == "CT" and self._ct_selected_step is not None:
@@ -755,6 +765,33 @@ class FlowProfileApp(QMainWindow):
             # show it. Before a step is selected, clicks still set the window.
             return "ct_cycle_idle" if self._ct_method() == "cycle" else "ct_landmarks_idle"
         return "window"
+
+    def _ct_needs_step(self) -> bool:
+        """True in CT while scan steps were found and none is selected yet.
+
+        Selecting the step is the first action of every CT method: it sets
+        the window and the image grid. A recording whose trigger shows no
+        step is not held up, its window is set by hand.
+        """
+        return (self._workflow_name() == "CT" and self._plot_mode == "selected"
+                and bool(self._ct_steps) and self._ct_selected_step is None)
+
+    def _ct_pending_correction(self) -> List[str]:
+        """Shift or image count shown in section 4 but not applied yet.
+
+        Both only preview on the plot until Apply shift and image count is
+        pressed. Exported in that state, the files followed the old window
+        while the plot showed the new grid.
+        """
+        if self._workflow_name() != "CT" or self._ct_selected_step is None:
+            return []
+        pending = []
+        if self.ct_shift_spin.value() != self._ct_applied_shift:
+            pending.append(f"Start Shift {self.ct_shift_spin.value()} ms")
+        if (self._ct_applied_images is not None
+                and self.ct_total_images_spin.value() != self._ct_applied_images):
+            pending.append(f"Images in step {self.ct_total_images_spin.value()}")
+        return pending
 
     def _refresh_banner(self) -> None:
         """Make the banner describe the current click mode."""
@@ -1057,7 +1094,8 @@ class FlowProfileApp(QMainWindow):
         form.addRow("", self.ct_shift_slider)
         section.add_layout(form)
         section.add_widget(self._hint(
-            "Temporal Res is the time one image covers. Images in step is "
+            "Temporal Res is the time one image covers. The program cannot "
+            "measure it: take it from your image series. Images in step is "
             "counted from the step. If the step edge is not where the first "
             "image starts, Start Shift moves the scan window earlier "
             "(negative) or later; the slider does the same."
@@ -1376,7 +1414,8 @@ class FlowProfileApp(QMainWindow):
         self.start_spin.valueChanged.connect(lambda _v: self._update_export_hint())
         self.end_spin.valueChanged.connect(lambda _v: self._update_export_hint())
         # Everything the list of blockers reads refreshes the line.
-        for box in (self.ct_temporal_res_spin, self.synth_dt_spin, self.synth_images_spin):
+        for box in (self.ct_temporal_res_spin, self.synth_dt_spin, self.synth_images_spin,
+                    self.ct_shift_spin, self.ct_total_images_spin):
             box.valueChanged.connect(lambda _v: self._update_export_hint())
         self.start_spin.valueChanged.connect(lambda _v: self._update_window_readout())
         self.end_spin.valueChanged.connect(lambda _v: self._update_window_readout())
@@ -1712,6 +1751,8 @@ class FlowProfileApp(QMainWindow):
             )
         if not self.subject_edit.text().strip():
             blockers.append("enter a Subject ID")
+        if self._ct_needs_step():
+            blockers.append("select the scan step (4 CT scan, Select Step)")
         if self._uses_assembly():
             if not self._parts:
                 blockers.append("add at least one part")
@@ -1733,6 +1774,13 @@ class FlowProfileApp(QMainWindow):
                 blockers.append(
                     f"raise Temporal Res ({dt_ms:g} ms gives {images} images in "
                     f"this window, the limit is {self._MAX_GRID_IMAGES})"
+                )
+            pending = self._ct_pending_correction()
+            if pending:
+                blockers.append(
+                    "press Apply shift and image count, or put the value back "
+                    f"({' and '.join(pending)} on screen, not applied to Start "
+                    "and End)"
                 )
         return blockers
 
@@ -1771,10 +1819,27 @@ class FlowProfileApp(QMainWindow):
         else:
             window = f"{self.start_spin.value():.3f} s to {self.end_spin.value():.3f} s"
             if self._workflow_name() == "CT":
-                what = self._ct_export_description(study, window)
+                what = (self._ct_export_description(study, window)
+                        + ", " + self._ct_image_count_text())
             else:
                 what = f"{study}, {window}"
         self.export_hint.setText(f"Ready to export: {what}. {self._export_sources()}.")
+
+    def _ct_image_count_text(self) -> str:
+        """Temporal Res and the image count that follows from it.
+
+        The tool cannot measure Temporal Res. It is the user's number, every
+        image number in the export follows from it, and 200 ms sat in its box
+        looking like a detected value. So the export line states it, and
+        says when the window is not a whole number of images.
+        """
+        dt_ms = self.ct_temporal_res_spin.value()
+        exact = (self.end_spin.value() - self.start_spin.value()) / (dt_ms / 1000.0)
+        images = int(round(exact))
+        text = f"Temporal Res {dt_ms:g} ms gives {images} image{'s' if images != 1 else ''}"
+        if abs(exact - images) > 0.05:
+            text += f" (the window is {exact:.2f} images long)"
+        return text
 
     def _export_sources(self) -> str:
         """Block and channels the export reads, as shown in the pickers."""
@@ -1937,6 +2002,8 @@ class FlowProfileApp(QMainWindow):
         self._comment_labels_withheld = False
         self._y_reference = {}
         self._title_forms = []
+        self._ct_applied_shift = 0
+        self._ct_applied_images = None
         self._trigger_times = np.array([])
         self._trigger_count = 0
         self._ct_steps = []
@@ -2919,7 +2986,7 @@ class FlowProfileApp(QMainWindow):
                 self.status_bar.showMessage(
                     "Reorder parts: press 'Pick on Plot' first to select images."
                 )
-            elif mode in ("ct_landmarks_idle", "ct_cycle_idle"):
+            elif mode in ("ct_need_step", "ct_landmarks_idle", "ct_cycle_idle"):
                 self.status_bar.showMessage(_BANNERS[mode][1])
             else:
                 self._add_time_marker(event.xdata)
@@ -3224,6 +3291,7 @@ class FlowProfileApp(QMainWindow):
         # Reset shift to 0 when selecting a new step (suppress callback to avoid
         # premature redraw with stale frame count before _draw_ct_intervals is called)
         self._suppress_shift_slider = True
+        self._ct_applied_shift = 0
         self.ct_shift_spin.setValue(0)
         self.ct_shift_slider.setValue(0)
         step_dur_ms = (step["end_time"] - step["start_time"]) * 1000.0
@@ -3390,6 +3458,8 @@ class FlowProfileApp(QMainWindow):
 
         total_images = n_images
         if update_total_images_field:
+            # A count the program derived is in force, not a pending edit.
+            self._ct_applied_images = total_images
             self.ct_total_images_spin.setValue(total_images)
 
         # Populate Trigger Info box only on step selection, not during slider preview
@@ -3467,6 +3537,8 @@ class FlowProfileApp(QMainWindow):
                     return
 
         # Update the processing fields
+        self._ct_applied_shift = shift_ms
+        self._ct_applied_images = manual_frames
         self.start_spin.setValue(corrected_start)
         self.end_spin.setValue(corrected_end)
 
@@ -4642,10 +4714,25 @@ class FlowProfileApp(QMainWindow):
                 if pressure_file:
                     files.append(pressure_file)
                 files += [trigger_file, plot_file]
+                # Which images the export took. It was only in the trigger
+                # info file, so a selection of one image went unseen.
+                ct_facts = []
+                if workflow_name == "CT":
+                    meta = result.metadata
+                    chosen = meta.get("selected_image_indices", [])
+                    listed = ",".join(str(i) for i in chosen)
+                    if len(listed) > 80:
+                        listed = listed[:77] + "..."
+                    ct_facts = [
+                        ("Images in the scan", str(meta.get("total_images", ""))),
+                        ("Inhale starts at image", str(meta.get("inhale_image", ""))),
+                        ("Exhale ends at image", str(meta.get("exhale_image", ""))),
+                        ("Images selected", f"{len(chosen)} ({listed})"),
+                    ]
                 self._processing_report.emit({
                     "folder": output_dir,
                     "files": files,
-                    "summary": provenance + [
+                    "summary": provenance + ct_facts + [
                         ("Duration", f"{result.time[-1]:.2f} s"),
                         ("Sample rate", f"{result.sample_rate:.0f} Hz"),
                         ("Samples", str(len(result.time))),

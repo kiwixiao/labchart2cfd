@@ -47,25 +47,15 @@ def test_the_banner_names_the_button_to_press_next(win, mat_file, method, button
     assert "set Start" not in banner
 
 
-def test_before_a_step_is_selected_clicks_still_set_the_window(win, mat_file):
-    """A recording without a usable trigger has no step to select."""
-    win.workflow_combo.setCurrentText("CT")
-    choose_ct_method(win, "landmarks")
-    open_block(win, mat_file)
-
-    win._on_click(ClickEvent(win.ax_bottom, 3.0))
-    win._on_click(ClickEvent(win.ax_bottom, 4.0))
-
-    assert (win.start_spin.value(), win.end_spin.value()) == (3.0, 4.0)
-
-
 def test_selecting_a_step_removes_window_markers_that_no_longer_apply(win, mat_file):
     """A green marker stayed at a time that was no longer Start."""
-    win.workflow_combo.setCurrentText("CT")
-    choose_ct_method(win, "landmarks")
+    win.workflow_combo.setCurrentText("MRI")       # markers placed as an MRI window
     open_block(win, mat_file)
     win._on_click(ClickEvent(win.ax_bottom, 3.0))
     win._on_click(ClickEvent(win.ax_bottom, 4.0))
+    win.workflow_combo.setCurrentText("CT")
+    choose_ct_method(win, "landmarks")
+    win._add_time_marker(3.0)                      # as if left over on the plot
 
     win._select_ct_step()
 
@@ -377,3 +367,146 @@ def test_the_help_menu_states_the_version(win, monkeypatch):
     win.about_action.trigger()
 
     assert labchart2cfd.__version__ in shown[0]
+
+
+# -------------------------------------- CT cannot be exported half set up
+
+def test_ct_is_not_ready_until_a_scan_step_is_selected(win, mat_file):
+    """The steps were drawn and 'Ready to export' appeared without one being
+    selected. Following the banner then built a part on a grid of one image
+    at 0 s, and the export wrote 0.2 s from the start of the recording."""
+    win.workflow_combo.setCurrentText("CT")
+    choose_ct_method(win, "landmarks")
+    open_block(win, mat_file)
+    win.subject_edit.setText("S1")
+    win.start_spin.setValue(2.0)
+    win.end_spin.setValue(5.0)
+
+    hint = win.export_hint.text()
+    assert hint.startswith("Before export") and "Select Step" in hint
+
+    win._select_ct_step()
+    assert win.export_hint.text().startswith("Ready to export")
+
+
+@pytest.mark.parametrize("method", ["parts", "landmarks", "cycle"])
+def test_the_banner_says_to_select_the_step_first(win, mat_file, method):
+    """In the parts method the banner explained why clicks do nothing, not
+    what to do. The first action in every CT method is Select Step."""
+    win.workflow_combo.setCurrentText("CT")
+    choose_ct_method(win, method)
+    open_block(win, mat_file)
+
+    assert "Select Step" in win.mode_banner.text()
+
+    win._on_click(ClickEvent(win.ax_bottom, 3.0))  # and a click moves nothing
+    assert win._time_markers == []
+
+
+def test_ct_without_any_step_can_still_take_a_window_by_hand(win, mat_file):
+    """A recording whose trigger shows no step must not be a dead end."""
+    win.workflow_combo.setCurrentText("CT")
+    choose_ct_method(win, "landmarks")
+    win.trigger_row_spin.setValue(0)
+    open_block(win, mat_file)
+    win.subject_edit.setText("S1")
+
+    win._on_click(ClickEvent(win.ax_bottom, 3.0))
+    win._on_click(ClickEvent(win.ax_bottom, 4.0))
+
+    assert (win.start_spin.value(), win.end_spin.value()) == (3.0, 4.0)
+    assert win.export_hint.text().startswith("Ready to export")
+
+
+def test_a_shift_shown_but_not_applied_holds_the_export_back(win, mat_file):
+    """The slider moved the grid on the plot. The export used the window
+    without the shift and counted its images on a grid no longer drawn."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+    assert win.export_hint.text().startswith("Ready to export")
+
+    win.ct_shift_slider.setValue(300)
+
+    hint = win.export_hint.text()
+    assert hint.startswith("Before export") and "Apply shift and image count" in hint
+
+    win._apply_ct_correction()
+    assert win.export_hint.text().startswith("Ready to export")
+    assert win.start_spin.value() == pytest.approx(2.3)
+
+
+def test_an_image_count_typed_but_not_applied_holds_the_export_back(win, mat_file):
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+
+    win.ct_total_images_spin.setValue(12)
+
+    assert "Apply shift and image count" in win.export_hint.text()
+
+    win.ct_total_images_spin.setValue(15)          # put back: nothing is pending
+    assert win.export_hint.text().startswith("Ready to export")
+
+
+def test_changing_temporal_res_is_not_a_pending_correction(win, mat_file):
+    """The image count follows Temporal Res by itself. That is not an edit
+    waiting for Apply."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+
+    win.ct_temporal_res_spin.setValue(150.0)
+
+    assert win.ct_total_images_spin.value() == 20
+    assert win.export_hint.text().startswith("Ready to export")
+
+
+def test_the_export_line_states_the_temporal_res_it_will_use(win, mat_file):
+    """200 ms sat in the box like a measured value. It is the user's to
+    supply, and every image number follows from it."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+
+    assert "Temporal Res 200 ms" in win.export_hint.text()
+    assert "15 images" in win.export_hint.text()
+
+
+def test_the_export_line_says_when_the_window_is_not_whole_images(win, mat_file):
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+
+    win.ct_temporal_res_spin.setValue(180.0)       # 3 s is 16.67 images
+
+    assert "16.67 images long" in win.export_hint.text()
+    assert "17 images" in win.export_hint.text()
+
+
+def test_the_ct_section_says_temporal_res_is_the_users_to_supply(win):
+    win.workflow_combo.setCurrentText("CT")
+
+    assert "cannot measure" in _visible_text(win.ct_scan_section).lower()
+
+
+def test_a_ct_result_lists_the_images_it_selected(win, qapp, mat_file, tmp_path):
+    """Inhale and exhale marked on the same image gave a one image result,
+    and the panel showed nothing about which images were taken."""
+    import time
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+    win._set_output_dir(tmp_path / "out")
+    win._mark_inhale_start()
+    win._on_click(ClickEvent(win.ax_bottom, 4.0))
+    win._mark_exhale_end()
+    win._on_click(ClickEvent(win.ax_bottom, 3.0))
+
+    win._export()
+    deadline = time.time() + 30
+    while win._last_export_report is None and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    facts = dict(win._last_export_report["summary"])
+    assert facts["Images in the scan"] == "15"
+    assert facts["Inhale starts at image"] == "11"
+    assert facts["Exhale ends at image"] == "6"
+    assert facts["Images selected"].startswith("11 (")
+    if win._result_dialog is not None:
+        win._result_dialog.close()

@@ -268,8 +268,7 @@ def test_export_hint_names_the_ct_method_that_will_be_exported(win, mat_file):
     choose_ct_method(win, "landmarks")
     open_block(win, mat_file)
     win.subject_edit.setText("S1")
-    win.start_spin.setValue(2.0)
-    win.end_spin.setValue(5.0)
+    win._select_ct_step()                          # Start 2.0, End 5.0
     # With no landmark the export is the plain window, and the hint says so
     # (tests/test_gui_review_fixes.py). The method is named once one is marked.
     win._mark_inhale_start()

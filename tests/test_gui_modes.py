@@ -83,6 +83,9 @@ def test_banner_announces_cycle_labelling(win, mat_file):
 def test_banner_explains_why_plain_clicks_do_nothing_in_parts_method(win, mat_file):
     win.workflow_combo.setCurrentText("CT")
     open_block(win, mat_file)
+    assert "select step" in _banner(win)          # the first action in CT
+
+    win._select_ct_step()
 
     assert "pick on plot" in _banner(win)
 
@@ -90,9 +93,7 @@ def test_banner_explains_why_plain_clicks_do_nothing_in_parts_method(win, mat_fi
 def test_banner_walks_through_picking_a_part(win, mat_file):
     win.workflow_combo.setCurrentText("CT")
     open_block(win, mat_file)
-    win.start_spin.setValue(2.0)
-    win.end_spin.setValue(5.0)
-    win.synth_images_spin.setValue(15)
+    win._select_ct_step()                          # Start 2.0, End 5.0, 15 images
 
     win._arm_add_part()
     assert "first image" in _banner(win)
