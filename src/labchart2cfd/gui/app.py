@@ -150,8 +150,19 @@ _BANNERS = {
     "inhale_start": ("active", "Click the plot where inhale starts."),
     "exhale_end": ("active", "Click the plot where exhale ends."),
     "cycle": ("active",
-              "Labelling cycle frames: click frames in breathing order. "
+              "Labelling cycle frames: click the images in breathing order. "
+              "A click takes the image that starts at the nearest grid line. "
               "Right click removes the last label."),
+    "ct_landmarks_idle": ("idle",
+                          "Scan step selected. Press Mark Inhale Start or "
+                          "Mark Exhale End, then click the plot. Plain clicks "
+                          "do nothing here, so the scan window cannot move by "
+                          "accident."),
+    "ct_cycle_idle": ("idle",
+                      "Scan step selected. Press Label Cycle Frames, then "
+                      "click the images in breathing order. Plain clicks do "
+                      "nothing here, so the scan window cannot move by "
+                      "accident."),
     "parts_idle": ("idle",
                    "Reorder parts: plain clicks do nothing here, so the image "
                    "grid cannot move by accident. Press Pick on Plot to "
@@ -162,6 +173,16 @@ _BANNERS = {
     "part_second": ("active",
                     "Picking a part: now click the last image of the range. "
                     "Right click cancels."),
+}
+
+
+# What to do next once a scan step is selected, by CT method. The status
+# line used to point at the landmark buttons in every method, also where they
+# are not on screen.
+_CT_NEXT_STEP = {
+    "parts": "Reorder parts: choose image ranges under 5 Build the breath, then Add Part",
+    "landmarks": "Landmarks: press Mark Inhale Start, then click the plot",
+    "cycle": "Cycle frames: press Label Cycle Frames, then click the images in breathing order",
 }
 
 
@@ -703,6 +724,11 @@ class FlowProfileApp(QMainWindow):
             return self._ct_landmark_mode
         if self._synth_mode:
             return "parts_idle"
+        if self._workflow_name() == "CT" and self._ct_selected_step is not None:
+            # The window is the scan step now. A plain click that moved it
+            # would cut the wrong part of the recording, with nothing to
+            # show it. Before a step is selected, clicks still set the window.
+            return "ct_cycle_idle" if self._ct_method() == "cycle" else "ct_landmarks_idle"
         return "window"
 
     def _refresh_banner(self) -> None:
@@ -1201,8 +1227,9 @@ class FlowProfileApp(QMainWindow):
         self.cycle_mode_btn = QPushButton("Label Cycle Frames")
         self.cycle_mode_btn.setCheckable(True)
         self.cycle_mode_btn.setToolTip(
-            "Toggle: click fenceposts in order to build a breathing cycle. "
-            "Right-click removes the most recent label."
+            "Toggle: click the images in breathing order to build a cycle. "
+            "A click takes the image that starts at the nearest grid line. "
+            "Right click removes the most recent label."
         )
         self.cycle_mode_btn.toggled.connect(self._on_cycle_mode_toggled)
         self.cycle_count_label = self._readout("0 frames")
@@ -1473,6 +1500,9 @@ class FlowProfileApp(QMainWindow):
             self.ct_method_stack.widget(i).setSizePolicy(QSizePolicy.Preferred, policy)
         self.ct_method_stack.adjustSize()
         self._sync_ct_method()
+        if self._workflow_name() == "CT" and new != old:
+            # Replaces a line about the method just left.
+            self.status_bar.showMessage(_CT_NEXT_STEP[new] + ".")
 
     def _update_outdir(self, *_args) -> None:
         """Recompute output dir based on current mat file and subject.
@@ -2746,8 +2776,10 @@ class FlowProfileApp(QMainWindow):
                 # those, so a stray click would silently redefine the grid and
                 # invalidate parts already added.
                 self.status_bar.showMessage(
-                    "Reorder parts: press 'Pick on Plot' first to select frames."
+                    "Reorder parts: press 'Pick on Plot' first to select images."
                 )
+            elif mode in ("ct_landmarks_idle", "ct_cycle_idle"):
+                self.status_bar.showMessage(_BANNERS[mode][1])
             else:
                 self._add_time_marker(event.xdata)
         elif event.button == 3:  # Right click
@@ -3092,12 +3124,17 @@ class FlowProfileApp(QMainWindow):
         self._clear_ct_landmarks()
         self._clear_cycle_labels()
 
+        # Start and End are the step now. Markers clicked for an earlier
+        # window would show times that no longer apply.
+        self._clear_time_markers()
+
         self.canvas.draw_idle()
         self.status_bar.showMessage(
             f"Step {step_num} selected ({step['duration']:.2f}s, "
             f"{self.ct_total_images_spin.value()} images) | "
-            f"Use buttons to mark Inhale Start and Exhale End"
+            f"{_CT_NEXT_STEP[self._ct_method()]}"
         )
+        self._refresh_banner()
 
     def _claim_click_mode(self) -> None:
         """Make the interaction modes exclusive.
@@ -3424,7 +3461,8 @@ class FlowProfileApp(QMainWindow):
             self._ct_landmark_mode = None
             self._cancel_part_capture()
             self.status_bar.showMessage(
-                "CYCLE LABEL MODE: left-click fenceposts in order (right-click undoes last)."
+                "Cycle labelling on: click the images in breathing order "
+                "(right click removes the last label)."
             )
         else:
             self.status_bar.showMessage("Cycle label mode off.")
@@ -3489,6 +3527,12 @@ class FlowProfileApp(QMainWindow):
 
         self._cycle_labels_changed()
         self.canvas.draw_idle()
+        # The image taken is the one that starts at the nearest grid line,
+        # which is not always the number under the pointer. Say which.
+        self.status_bar.showMessage(
+            f"Label {new_frame_num} is image {img_idx}, the image that starts "
+            "at the grid line nearest your click."
+        )
 
     def _remove_last_cycle_label(self) -> None:
         """Undo the most recently added cycle label."""
@@ -3503,7 +3547,7 @@ class FlowProfileApp(QMainWindow):
                 pass
         self._cycle_labels_changed()
         self.canvas.draw_idle()
-        self.status_bar.showMessage(f"Removed cycle label for original frame {removed}.")
+        self.status_bar.showMessage(f"Removed the cycle label of image {removed}.")
 
     def _clear_cycle_labels(self) -> None:
         """Remove every cycle label and its artists."""
@@ -3811,7 +3855,7 @@ class FlowProfileApp(QMainWindow):
         self._capturing_part = True
         self._part_click_buffer = []
         self.capture_hint.setText("Click the START frame on the plot...")
-        self.status_bar.showMessage("Click the START frame on the plot (right-click cancels).")
+        self.status_bar.showMessage("Click the first image of the range (right click cancels).")
         self._refresh_banner()
 
     def _cancel_part_capture(self) -> None:
@@ -3855,7 +3899,7 @@ class FlowProfileApp(QMainWindow):
             self.part_from_spin.setValue(img)
             self._draw_capture_marker(img)
             self.capture_hint.setText(f"START = image {img} — click END frame")
-            self.status_bar.showMessage(f"START = image {img}. Click the END frame.")
+            self.status_bar.showMessage(f"First image: {img}. Now click the last image of the range.")
             return
         a, b = sorted(self._part_click_buffer)
         self._capturing_part = False
