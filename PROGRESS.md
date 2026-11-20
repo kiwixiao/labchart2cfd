@@ -8,7 +8,7 @@ Still open from before, neither blocking:
 2. **MATLAB parity on a real subject.** Still unmeasured. The drift-correction fix deliberately diverges from the MATLAB original, which carries the same `abs()` bug, so old outputs for positive-drift recordings will legitimately differ.
 
 ## LAST SESSION
-2026-11-20. GUI redesign on `feature/gui-pro-redesign`, built test first in four units. 215 tests (was 143). Engine untouched: no file under `processing/`, `workflows/` or `io/` changed.
+2026-11-20. GUI redesign on `feature/gui-pro-redesign`, built test first in four units. 239 tests (was 143). Engine untouched: no file under `processing/`, `workflows/` or `io/` changed.
 
 What changed for the user:
 - **Layout.** Controls moved from a tab strip under the plot to a sidebar of numbered sections beside it (1 Recording, 2 Study type, 3 Time window, then 4 Triggers, or for CT 4 CT scan and 5 Build the breath). Subject, output folder and Export are pinned below.
@@ -23,11 +23,18 @@ Behaviour changes worth knowing when testing by hand:
 - A hand picked output folder now survives typing the Subject ID. It resets only when another recording is opened.
 - The study type list shows "CPAP" and "Phase contrast (xenon)". The handlers still receive `cpap` and `phase-contrast`.
 
+**First run on a real recording** (the user's LabChart export of ENT005: 5 channels, 92,144,000 samples per channel at 40 kHz in block 2). It loaded in about 3 s and found 7 scan steps whose times agree with the recording's comments. It also showed three weaknesses that synthetic data had hidden, all fixed:
+- Every sample was drawn, three times, on every redraw: 21.5 s to open the block and 9.5 s per redraw at full range. Lines now draw the minimum and maximum of each group of samples at the current zoom (`gui/decimate.py`): 0.6 s and 0.1 s on the same file. Zooming in ends at the raw samples. Only the picture is reduced.
+- The overview kept every Nth sample and showed 4 trigger spikes where 7 steps exist. It uses the same minimum and maximum reduction now.
+- The default rows put Flow on "2: ESOPH PRESS" and Pressure on "4: VOL" for this recording. A warning under the pickers now names the mismatch, and the export asks before going on. It flags and never chooses.
+
+Peak memory on that file is about 10 GB and comes from the loader (`io/labchart.py` expands every channel to 64 bit and builds a time array per channel). That is engine code and was not touched.
+
 Two defects were found by looking at screenshots, not by tests: the sidebar clipped its widest controls behind the scroll bar in CT mode, and choosing CT left the CT sections below the fold. Both are fixed and pinned by tests. `scripts/gui_screenshots.py` renders the window offscreen for this kind of check.
 
 Also this session: project memory moved into the project folder (`.claude/memory/`, loaded from `CLAUDE.md`), per the standing rule. `.claude/` is git ignored here, so it travels by rsync, not by clone.
 
-Not verified: any real recording, Windows, and the PyInstaller freeze with the three new GUI modules.
+Not verified: a person clicking through it on a real display, any real MRI recording, an export from real data compared with a known good result, Windows, and the PyInstaller freeze with the new GUI modules.
 
 Before that (2026-08-19): deep review of the whole codebase and a fix batch, merged to main as `9755710..5d83081`.
 
@@ -35,7 +42,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 | Work item | Stage |
 |---|---|
-| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 215 tests; needs a manual pass on real data, then merge |
+| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 239 tests; needs a manual pass on real data, then merge |
 | Read native LabChart `.adicht` files without LabChart | in progress, see SESSION LOG |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
@@ -45,6 +52,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 | Auto-zoom to working window; numeric boxes commit on Enter | done, on main |
 | CLI explicit `--trigger-row` and `--pressure-row` | done, on main |
 | 2026-08-19 review fixes (drift sign, CSV precision, resampler, step threshold + declared polarity, CT rearrange, reader validation, GUI worker signals + state hygiene, bidirectional Start Shift) | done, on main |
+| Loader memory: about 10 GB for a 1.85 GB export (`io/labchart.py` makes every channel 64 bit plus a time array each) | open; engine code, not touched by the GUI work |
 | Export logic still inside the Execute worker closure in `gui/app.py` | open; the CLI does not write the trigger info file or the sanity plot, so GUI and CLI outputs differ |
 | Xenon / phase-contrast calibration questions | deferred by user ("leave xenon, no worries for now") |
 | MATLAB parity check on real data | not started, blocked on a known-good reference; drift fix intentionally diverges |
@@ -54,7 +62,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 ## SESSION LOG
 
-- 2026-11-20: GUI redesign on `feature/gui-pro-redesign` in four tested units (layout, click modes and CT methods, export, polish). 143 to 215 tests. Memory migrated into the project folder. Started decoding the native `.adicht` format for `ENT005`.
+- 2026-11-20: GUI redesign on `feature/gui-pro-redesign` in four tested units (layout, click modes and CT methods, export, polish). 143 to 239 tests. Memory migrated into the project folder. Started decoding the native `.adicht` format for `ENT005`.
 - 2026-08-19: full-codebase review + fix batch on `fix/review-findings` (15 commits, 141 tests). Fifteen defects in the fixes themselves were caught by five rounds of verification and fixed, the worst being three failed attempts to auto-detect trigger polarity (now a declared parameter). All four subsystems got an adversarial pass.
 - 2026-08-18: CLI trigger-row bug found by user question, fixed on a feature branch with tests driving the real CLI on a 3-channel file (trigger ch1, decoy ch2, flow ch3). 97 tests. Created this file.
 - 2026-08-17: Confirmed main merged and pushed (`9755710`), workspace clean.

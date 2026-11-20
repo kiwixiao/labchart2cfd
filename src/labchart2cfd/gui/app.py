@@ -47,6 +47,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtGui import QKeySequence
 
+from labchart2cfd.gui.decimate import EnvelopeLine, minmax_envelope
 from labchart2cfd.gui.dialogs import (
     AssemblyPreviewDialog, ExportResultDialog, QuickGuideDialog,
 )
@@ -110,6 +111,15 @@ _CT_METHODS = (
     ("Label cycle frames", "cycle",
      "Click frames in breathing order. Runs of consecutive frames are cut out "
      "and joined in the order you clicked."),
+)
+
+# Roles a channel can play: (name shown, picker attribute, word fragments a
+# channel title of that kind contains). Used only to flag a choice that
+# contradicts the titles, never to make the choice.
+_ROLE_TITLE_WORDS = (
+    ("Flow", "flow_row_spin", ("flow",)),
+    ("Trigger", "trigger_row_spin", ("trig",)),
+    ("Pressure", "pressure_row_spin", ("press",)),
 )
 
 # Line colours for the role a channel plays, used on the overview.
@@ -191,6 +201,9 @@ class FlowProfileApp(QMainWindow):
         # Overview tiles by (row, column), both 1-indexed, so a click on a
         # tile can be traced back to the block it shows.
         self._overview_axes: dict = {}
+        # The signal lines of the detail view. Each draws an envelope of its
+        # full data and is refreshed whenever the visible range changes.
+        self._envelopes: List[EnvelopeLine] = []
 
         # Export state
         self._outdir_user_set = False   # True once the user picks the folder
@@ -452,6 +465,7 @@ class FlowProfileApp(QMainWindow):
         # loaded is one of the things the Export line reports.
         if hasattr(self, "export_hint"):
             self._update_export_hint()
+            self._update_channel_check()
         if self.mode_banner.property("kind") != kind:
             self.mode_banner.setProperty("kind", kind)
             # A changed dynamic property only restyles after a repolish.
@@ -526,6 +540,13 @@ class FlowProfileApp(QMainWindow):
         form.addRow("Pressure", self.pressure_row_spin)
         form.addRow("Block", self.col_spin)
         section.add_layout(form)
+
+        # Shown only when a chosen channel's title contradicts its role.
+        self.channel_check = QLabel("")
+        self.channel_check.setObjectName("warningBox")
+        self.channel_check.setWordWrap(True)
+        self.channel_check.hide()
+        section.add_widget(self.channel_check)
 
         # `activated` fires for a choice the user makes, never for setValue,
         # so restoring a value in code does not redraw the plot.
@@ -1305,13 +1326,23 @@ class FlowProfileApp(QMainWindow):
         if not self.execute_btn.isEnabled():
             self.status_bar.showMessage("An export is already running.")
             return
-        # Ask about replacing files only when the inputs are complete. If
-        # something is missing, the export itself says exactly what.
-        if not self._export_blockers() and not self._confirm_overwrite(
-            self._export_targets()
-        ):
-            self.status_bar.showMessage("Export cancelled. No file was changed.")
-            return
+        # Ask the questions only when the inputs are complete. If something is
+        # missing, the export itself says exactly what.
+        if not self._export_blockers():
+            # A channel named like another role would be exported as if it
+            # were the right one, with nothing wrong in the output files.
+            name_warnings = self._channel_name_warnings()
+            if name_warnings and QMessageBox.question(
+                self, "Check Channels",
+                "\n".join(name_warnings)
+                + "\n\nExport with these channels anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) != QMessageBox.Yes:
+                self.status_bar.showMessage("Export cancelled. No file was changed.")
+                return
+            if not self._confirm_overwrite(self._export_targets()):
+                self.status_bar.showMessage("Export cancelled. No file was changed.")
+                return
         if self._uses_assembly():
             self._assemble_and_export()
         else:
@@ -1346,6 +1377,7 @@ class FlowProfileApp(QMainWindow):
         """
         self._disconnect_click()
         self._overview_axes = {}
+        self._envelopes = []
         self._time_markers = []
         self._trigger_markers = []
         self._ct_step_markers = []
@@ -1430,6 +1462,45 @@ class FlowProfileApp(QMainWindow):
             return f"ch {row}"
         return f"ch {row} {self._channel_titles()[row - 1]}".strip()
 
+    def _channel_name_warnings(self) -> List[str]:
+        """One line per role whose chosen channel is named like something else.
+
+        A role is flagged only when its channel's title lacks the role's word
+        while another channel's title has it. Titles are a hint, so nothing
+        is changed here: channel layouts differ between recordings and the
+        choice stays the user's. On a real recording the default rows put
+        Flow on an esophageal pressure channel, and nothing said so.
+        """
+        if self.data is None:
+            return []
+        titles = self._channel_titles()
+        warnings = []
+        for role, picker_name, words in _ROLE_TITLE_WORDS:
+            row = getattr(self, picker_name).value()
+            if row < 1 or row > len(titles):
+                continue  # "None", or not a channel of this recording
+
+            def fits(title: str) -> bool:
+                return any(word in title.lower() for word in words)
+
+            if fits(titles[row - 1]):
+                continue
+            named = [channel_label(i + 1, t) for i, t in enumerate(titles) if fits(t)]
+            if named:
+                warnings.append(
+                    f"{role} is set to {channel_label(row, titles[row - 1])}, "
+                    f"but {' and '.join(named)} "
+                    f"{'is' if len(named) == 1 else 'are'} named like "
+                    f"{role.lower()}."
+                )
+        return warnings
+
+    def _update_channel_check(self) -> None:
+        """Show or hide the channel name warning under the pickers."""
+        warnings = self._channel_name_warnings()
+        self.channel_check.setText("\n".join(warnings))
+        self.channel_check.setVisible(bool(warnings))
+
     def _role_of(self, row: int) -> Optional[str]:
         """Role the pickers give a channel row: flow, trigger, pressure or None."""
         if row == self.flow_row_spin.value():
@@ -1492,6 +1563,19 @@ class FlowProfileApp(QMainWindow):
         self.col_spin.setValue(col)
         self._plot_selected()
 
+    # Groups of samples per overview tile. A tile is a few hundred pixels wide.
+    _OVERVIEW_BINS = 250
+
+    def _on_view_changed(self, ax) -> None:
+        """Redraw the signal lines for the range now visible.
+
+        Connected to every detail axes, because which of the linked axes
+        reports a change depends on which one the user dragged.
+        """
+        x_lo, x_hi = ax.get_xlim()
+        for envelope in self._envelopes:
+            envelope.update(x_lo, x_hi)
+
     def _show_overview(self) -> None:
         """Draw the channels-x-blocks overview grid for the loaded file."""
 
@@ -1536,9 +1620,14 @@ class FlowProfileApp(QMainWindow):
                 else:
                     time = self.data.get_time(row, col)
                     data = self.data.get_data(row, col)
-                    # Downsample for speed
-                    step = max(1, len(time) // 500)
-                    ax.plot(time[::step], data[::step], color=color, linewidth=0.5)
+                    # Reduced for speed, by the minimum and maximum of each
+                    # group of samples. Keeping every Nth sample instead hid
+                    # scan steps shorter than the stride.
+                    ax.plot(
+                        *minmax_envelope(time, data, time[0], time[-1],
+                                         max_bins=self._OVERVIEW_BINS),
+                        color=color, linewidth=0.5,
+                    )
 
                 if ch_idx == 0:
                     ax.set_title(f"Block {col}", fontsize=9, pad=3)
@@ -1621,8 +1710,16 @@ class FlowProfileApp(QMainWindow):
         self.ax_bottom = self.fig.add_subplot(212, sharex=self.ax_top)
         self.ax_top_trig = None
 
+        # The signal lines draw an envelope of the data at the current zoom
+        # and are refreshed when the visible range changes. Drawing all of a
+        # 92 million sample channel took 9.5 s per redraw on a real recording.
+        for ax in (self.ax_top, self.ax_bottom):
+            ax.callbacks.connect("xlim_changed", self._on_view_changed)
+
         # Top subplot: flow on primary y-axis
-        self.ax_top.plot(time, flow, "b-", linewidth=0.5, label="flow info")
+        self._envelopes.append(EnvelopeLine(
+            self.ax_top, time, flow, "b-", linewidth=0.5, label="flow info"
+        ))
 
         has_trigger = trigger_row >= 1 and not self.data.is_block_empty(trigger_row, col)
         is_ct = self._workflow_name() == "CT"
@@ -1631,7 +1728,11 @@ class FlowProfileApp(QMainWindow):
             trigger_time = self.data.get_time(trigger_row, col)
             # Trigger on twin y-axis: different amplitude range won't squeeze flow.
             self.ax_top_trig = self.ax_top.twinx()
-            self.ax_top_trig.plot(trigger_time, trigger, "r-", linewidth=0.5, label="trigger info")
+            self.ax_top_trig.callbacks.connect("xlim_changed", self._on_view_changed)
+            self._envelopes.append(EnvelopeLine(
+                self.ax_top_trig, trigger_time, trigger, "r-", linewidth=0.5,
+                label="trigger info",
+            ))
             self.ax_top_trig.set_ylabel("Trigger", color="red")
             self.ax_top_trig.tick_params(axis="y", labelcolor="red")
 
@@ -1667,7 +1768,9 @@ class FlowProfileApp(QMainWindow):
         self._refresh_top_legend()
 
         # Bottom subplot: flow only (for zoom/selection)
-        self.ax_bottom.plot(time, flow, "b-", linewidth=0.5)
+        self._envelopes.append(EnvelopeLine(
+            self.ax_bottom, time, flow, "b-", linewidth=0.5
+        ))
         self.ax_bottom.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
         self.ax_bottom.set_xlabel("Time (s)")
         self.ax_bottom.set_ylabel("Flow (L/s)")

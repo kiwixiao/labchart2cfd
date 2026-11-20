@@ -188,12 +188,17 @@ def test_a_finished_export_lists_the_files_it_wrote(qapp, win, mat_file, tmp_pat
     assert win._result_dialog is not None
 
 
-def test_a_missing_pressure_profile_is_reported_as_a_warning(qapp, win, mat_file, tmp_path):
+def test_a_missing_pressure_profile_is_reported_as_a_warning(
+        qapp, win, mat_file, tmp_path, monkeypatch):
     """Pressure was asked for but the channel is empty in this block."""
     _ready_mri_export(win, mat_file, tmp_path)
     win.pressure_row_spin.setValue(3)        # channel 3 is empty in block 1
+    # Channel 4 is the one named Pressure, so the export asks first. Go on.
+    asked = []
+    _answer_question(monkeypatch, QMessageBox.Yes, asked)
 
     win._export()
+    assert "Pressure is set to Channel 3" in asked[0]
     _wait_for_export(win, qapp)
 
     report = win._last_export_report
@@ -324,3 +329,24 @@ def test_accepting_the_preview_writes_the_profile_and_the_reorder_map(
     ]
     assert all(p.exists() for p in report["files"])
     assert win._result_dialog is not None
+
+
+# ------------------------------------------------------- channel name check
+
+def test_export_asks_when_a_channel_name_contradicts_its_role(
+        win, mat_file, tmp_path, monkeypatch):
+    """The last line of defence against writing pressure out as flow."""
+    _ready_mri_export(win, mat_file, tmp_path)
+    win.flow_row_spin.setValue(4)                       # named Pressure
+    win.flow_row_spin.activated.emit(win.flow_row_spin.currentIndex())
+    calls, asked = [], []
+    monkeypatch.setattr(win, "_execute_processing", lambda: calls.append("execute"))
+
+    _answer_question(monkeypatch, QMessageBox.No, asked)
+    win._export()
+    assert calls == []
+    assert "Flow is set to 4: Pressure" in asked[0]
+
+    _answer_question(monkeypatch, QMessageBox.Yes, asked)
+    win._export()
+    assert calls == ["execute"]

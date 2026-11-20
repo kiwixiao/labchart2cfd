@@ -151,3 +151,63 @@ def test_ct_method_chooser_shows_one_method_at_a_time(win):
 
     _choose_ct_method(win, "cycle")
     assert win.ct_method_stack.currentWidget() is win.cycle_page
+
+
+# -------------------------------------------------------- channel name check
+
+def _pick(picker, row):
+    """Choose a row the way a user does, which also redraws the view."""
+    picker.setValue(row)
+    picker.activated.emit(picker.currentIndex())
+
+
+def test_no_channel_warning_when_names_fit_the_roles(win, mat_file):
+    win.open_recording(mat_file)
+
+    assert win.channel_check.isHidden()
+
+
+def test_a_role_on_a_differently_named_channel_is_flagged(win, mat_file):
+    """On a real recording the default rows put Flow on a pressure channel.
+    Exported like that, pressure would have been written as flow."""
+    win.open_recording(mat_file)
+
+    _pick(win.flow_row_spin, 4)             # channel 4 is named Pressure
+
+    assert not win.channel_check.isHidden()
+    text = win.channel_check.text()
+    assert "Flow is set to 4: Pressure" in text
+    assert "2: Flow" in text                # the channel that is named like flow
+
+
+def test_the_name_check_never_changes_a_choice(win, mat_file):
+    """Channels are flagged, not inferred: the user decides."""
+    win.open_recording(mat_file)
+
+    _pick(win.flow_row_spin, 4)
+
+    assert win.flow_row_spin.value() == 4
+
+
+def test_fixing_the_channel_clears_the_warning(win, mat_file):
+    win.open_recording(mat_file)
+    _pick(win.flow_row_spin, 4)
+
+    _pick(win.flow_row_spin, 2)
+
+    assert win.channel_check.isHidden()
+
+
+def test_untitled_channels_raise_no_warning(win):
+    import numpy as np
+    from labchart2cfd.io.labchart import LabChartData
+
+    t = np.linspace(0.0, 1.0, 1001)
+    win.data = LabChartData(
+        data_cell=[[t], [t], [t], [t]], time_cell=[[t], [t], [t], [t]],
+        num_channels=4, num_blocks=1,
+    )
+
+    win._show_overview()
+
+    assert win.channel_check.isHidden()
