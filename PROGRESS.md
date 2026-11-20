@@ -1,7 +1,15 @@
 # PROGRESS
 
 ## NEXT STEP
-The user is trying `feature/gui-pro-redesign` by hand on ENT005 (GUI relaunched on the latest commit). Collect that feedback, fix what it finds, then the user merges. The first try already produced two requests, both done: a trigger scale that keeps its whole range, with zoom controls for each y scale, and LabChart's comments on the plot. Still wanted: one real MRI recording driven by hand.
+The user tries `feature/gui-pro-redesign` by hand on ENT005 and says whether it reads as intuitive; that judgement is the one thing no test, script or reviewer here can give. Then decide the open design questions below, then the user merges. Still wanted: one real MRI recording driven by hand.
+
+Open design questions, raised by two independent usability reviews and left for the user because each changes what is exported or how the tool is meant to be used:
+1. **Cycle frames click rule.** A click takes the image that starts at the nearest grid line, so a click in the second half of the slice numbered N records N+1 (same on `main`). The parts method takes the slice under the pointer. Both reviewers ranked this near the top. The screen now says which image a click took; the rule itself is unchanged. Recommendation: take the slice under the pointer in both methods and shade it.
+2. **Phase contrast calibration is invisible.** The GUI passes no bag and no baseline time, so the engine scales by the window clicked. The engine has Bag1, Bag2 and Bag4 presets that the GUI does not offer, and the result panel does not show the calibration factor.
+3. **Nothing is remembered between sessions** (last folder, window size, channel roles per recording layout). Remembering channel roles for recordings with the same channel names would end the wrong default rows on the ENT recordings, but it selects channels without a click, which the standing rule forbids for name guessing.
+4. **CT opens in the reorder parts method**, the hardest of the three.
+5. **Trigger info file in MRI and CPAP** reports start_trigger and num_triggers even when the window was clicked by hand (engine output, not touched).
+6. Smaller: button captions mix Title Case and sentence case; question boxes answer Yes and No instead of naming the action; the pressure channel is never drawn.
 
 Still open from before, neither blocking:
 1. **Confirm Star-CCM+ accepts the CSV data format.** The data column is scientific notation (`3.001234560e-04`) because the old `%.5f` quantised mass flow (~1e-4 kg/s) to about 61 distinct values. Nobody has loaded one of the new files into Star-CCM+. If its table reader rejects it, switch to a high-precision fixed format in `io/csv_export.py` rather than reverting to `%.5f`.
@@ -51,7 +59,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 | Work item | Stage |
 |---|---|
-| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 382 tests, two independent review passes fixed, checked once on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
+| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 434 tests, two review passes and two usability reviews acted on, checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
 | Read native LabChart `.adicht` files without LabChart (`io/adicht.py`, `io/recording.py`, GUI open, `convert-adicht` command) | done on `feature/gui-pro-redesign`; equals LabChart's export bit for bit on ENT005 (user's manual export) and on 72 recording pairs; refuses what it was not checked on |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
@@ -70,6 +78,8 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 | Windows packaging / CI | not started; see notes on PyInstaller freeze |
 
 ## SESSION LOG
+
+- 2026-11-20: two independent usability reviews as a first time user (the first reviewer's ranking of 17 points, and a fresh reviewer on `aa5a48a` whose verdict was: MRI reachable without the author, CT not). Acted on, test first (`tests/test_gui_usability.py`, 434 tests in total): once a scan step is selected a plain click no longer moves the scan window; the status line and banner name the next action of the CT method on screen; the CT sections explain their controls on screen (Images in step, Images in grid, Apply shift and image count, which numbers on the plot are the exported grid); CT is not exportable until a scan step is selected, nor while a Start Shift or image count is shown but not applied; the export line states the Temporal Res and image count it will use, the block and the channels, and is amber or green; the result panel records recording, study type, block, channels, the conversion (gas density, sign inversion, cmH2O to Pa) and for CT the images selected; the window is shaded on both plots wherever Start and End are; the wheel over a plot zooms in time; pickers are off until a recording is open; phase contrast switches the Pressure picker off; the plot names its channels; the toolbar lost the two tools that break the layout; window title, About, Triggers hint. The reviewer's byte comparison against `main` was rerun on `7d1a0f7`: all 11 export paths identical. The two real recording tests pass on `aa5a48a` (25 passed, none skipped). `scripts/gui_native_check.py` reports no clipped control in any state on the real display.
 
 - 2026-11-20: the reviewer reran its experiments on `0cbcd5d` and proved a hole in the Temporal Res fix: the line above Export named the problem and Export wrote the files anyway, and in the parts method the line said Ready while Export answered Bad Grid. The line and the export each kept their own list. `_export()` now refuses on `_export_blockers()` itself and shows the line word for word, and a parts grid shorter than one flow sample is a blocker. 382 tests.
 
