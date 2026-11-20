@@ -1,7 +1,9 @@
 # PROGRESS
 
 ## NEXT STEP
-The user tries `feature/gui-pro-redesign` by hand on ENT005 and says whether it reads as intuitive; that judgement is the one thing no test, script or reviewer here can give. Then decide the open design questions below, then the user merges. Still wanted: one real MRI recording driven by hand.
+Building has stopped at the user's word (2026-11-20, `78863f0`). The user tries `feature/gui-pro-redesign` by hand on ENT005 and then merges it (the user merges). Relaunch `labchart2cfd` first: a window opened before 15:26 runs older code. Still wanted: one real MRI recording driven by hand.
+
+Left open on purpose, from the third retest (`c44adee`), all narrow: a half image window draws an image the file only half holds (amber); Temporal Res is cautioned, not blocked; `Mark triggers` replaces a hand window without asking; the trigger info file reports trigger numbers for a hand window. One test logs matplotlib's constrained layout notice. No reviewer has retested since `c44adee`.
 
 Decided by the user on 2026-11-20 (asked directly, after two usability reviews raised them):
 1. **Cycle frames click rule: the image under the pointer.** Done in `52dc6d6`. What the export does with the labels is unchanged (it always cut whole slices); only which image a click names changed, for clicks in the right half of a slice.
@@ -59,7 +61,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 | Work item | Stage |
 |---|---|
-| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 488 tests, two review passes, two usability reviews and two CT retests acted on, four design questions decided by the user, checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
+| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 502 tests, two review passes, two usability reviews and three CT retests acted on, four design questions decided by the user, checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
 | Read native LabChart `.adicht` files without LabChart (`io/adicht.py`, `io/recording.py`, GUI open, `convert-adicht` command) | done on `feature/gui-pro-redesign`; equals LabChart's export bit for bit on ENT005 (user's manual export) and on 72 recording pairs; refuses what it was not checked on |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
@@ -78,6 +80,8 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 | Windows packaging / CI | not started; see notes on PyInstaller freeze |
 
 ## SESSION LOG
+
+- 2026-11-20: third retest by the usability reviewer on `c44adee`, the first with a yes for all three CT methods for a user who reads the screen. It read the exported files independently (a pressure ramp shows which seconds were cut) and found every green cycle and parts export matching the plot. Its remaining narrow findings are fixed in `78863f0` (502 tests): a landmark outside a changed window blocks the export; a window set by hand gets an image grid and works with cycle frames and reorder parts; selecting another step asks before dropping parts, and a part past the grid blocks; the export line follows the grid offset; a window or grid outside the recording is named before Export; no cycle label on a previewed grid; moved labels are announced; the result summary gets the height it needs. On `78863f0`: byte comparison against `main` 11 of 11 identical with and without comments, the two real recording tests pass (25 passed), the real display check reports no clipped control in 9 states. The user then asked whether the work was done, and building stopped here.
 
 - 2026-11-20: the user reported, from the window, that Images in step would not stay below the number covering a detected step. Reproduced on the version they ran (`046d863`): the box took any number, but every grid redraw (Temporal Res change, typed Start, Select step) recomputed it from the window, so a typed 9 came back as 16. Same on `main` for a Temporal Res change. Fixed in `cf06ee1` (488 tests): a count the user types is never rewritten; once applied the window is that many images long and End follows Temporal Res and Start; a typed End hands the count back to the window; a newly selected step is counted afresh. Byte comparison against `main`: 11 of 11 identical.
 
