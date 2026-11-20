@@ -1355,3 +1355,232 @@ def test_the_section_says_the_count_is_yours_to_set(win):
 
     text = _visible_text(win.ct_scan_section).lower()
     assert "images in step" in text and "your own" in text
+
+
+# ------------------------ third retest: the narrow cases left under a green line
+
+def test_a_landmark_left_outside_the_window_holds_the_export_back(win, mat_file):
+    """Inhale was marked, then Start was typed past it. The mark was off
+    screen and the file said inhale_image 1, under a green line. Cycle
+    labels were refused in the same situation."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+    win._mark_inhale_start()
+    win._on_click(ClickEvent(win.ax_bottom, 2.42))
+
+    win.start_spin.setValue(3.0)
+
+    hint = win.export_hint.text()
+    assert hint.startswith("Before export") and "inhale" in hint and "2.420 s" in hint
+
+    win._clear_ct_landmarks()
+    win._update_export_hint()
+    assert win.export_hint.text().startswith("Ready to export")
+
+
+def test_an_exhale_landmark_past_a_shortened_scan_holds_the_export_back(win, mat_file):
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+    win._mark_exhale_end()
+    win._on_click(ClickEvent(win.ax_bottom, 4.9))
+
+    win.ct_total_images_spin.setValue(12)          # the scan now ends at 4.4 s
+    win._apply_ct_correction()
+
+    assert "exhale" in win.export_hint.text() and win.export_hint.text().startswith("Before export")
+
+
+def _ct_hand_window(win, mat_file, method):
+    """CT on a recording with no usable trigger: the window is set by hand."""
+    win.workflow_combo.setCurrentText("CT")
+    choose_ct_method(win, method)
+    win.trigger_row_spin.setValue(0)
+    open_block(win, mat_file)
+    win.subject_edit.setText("S1")
+    win.start_spin.setValue(2.0)
+    win.end_spin.setValue(5.0)
+
+
+def test_a_hand_window_gets_an_image_grid_too(win, mat_file):
+    """The banner sends users to Trigger None when no step fits. On that
+    route no grid was drawn, yet the file named image numbers."""
+    _ct_hand_window(win, mat_file, "landmarks")
+
+    grid = _grid_starts(win)
+    assert grid[0] == pytest.approx(2.0) and len(grid) == 16      # 15 images, 16 lines
+    assert win.ct_total_images_spin.value() == 15
+
+    win._mark_inhale_start()
+    win._on_click(ClickEvent(win.ax_bottom, 3.12))
+    assert "image 7 at 3.200" in win.status_bar.currentMessage()
+
+
+def test_cycle_frames_work_on_a_hand_window(win, mat_file):
+    """It answered 'No Step: Select a CT step' where there was no step to
+    select, with the button left pressed."""
+    _ct_hand_window(win, mat_file, "cycle")
+    win.cycle_mode_btn.setChecked(True)
+
+    win._on_click(ClickEvent(win.ax_top, 2.9))
+
+    assert win._ct_cycle_frames == [5]
+    assert _cycle_shades(win) == [(2.8, 0.2)]
+
+
+def test_reorder_parts_on_a_hand_window_takes_clicks_for_the_window(win, mat_file):
+    """With no step and no window the plot took no clicks at all, and the
+    grid held one image until a count was typed."""
+    win.workflow_combo.setCurrentText("CT")
+    win.trigger_row_spin.setValue(0)
+    open_block(win, mat_file)
+
+    win._on_click(ClickEvent(win.ax_bottom, 2.0))
+    win._on_click(ClickEvent(win.ax_bottom, 5.0))
+
+    assert (win.start_spin.value(), win.end_spin.value()) == (2.0, 5.0)
+    assert win.synth_images_spin.value() == 15
+
+
+def test_selecting_another_step_asks_before_dropping_the_parts_of_this_one(
+        win, mat_file, tmp_path, monkeypatch):
+    """Parts built on one scan were carried to the next without a question,
+    where cycle labels and landmarks ask."""
+    from PyQt5.QtWidgets import QMessageBox
+    from tests.test_gui_view import _recording_with_steps
+    two_steps = _recording_with_steps(mat_file, tmp_path, [(1.0, 3.0), (6.0, 7.0)])
+    _ct_step_selected(win, two_steps, "parts")
+    win.part_from_spin.setValue(1)
+    win.part_to_spin.setValue(10)
+    win._add_part_from_spins()
+    asked = []
+
+    def _answer(reply):
+        monkeypatch.setattr(
+            "labchart2cfd.gui.app.QMessageBox.question",
+            staticmethod(lambda _p, title, text, *a, **k: (asked.append(text), reply)[1]),
+        )
+
+    win.ct_step_spin.setValue(2)
+    _answer(QMessageBox.No)
+    win.select_step_btn.click()
+    assert "1 part" in asked[0] and len(win._parts) == 1
+    assert win._ct_selected_step["index"] == 1
+
+    _answer(QMessageBox.Yes)
+    win.select_step_btn.click()
+    assert win._parts == [] and win._ct_selected_step["index"] == 2
+
+
+def test_a_part_that_names_images_past_the_grid_holds_the_export_back(win, mat_file):
+    """The line said Ready and Export answered 'Assembly Failed: Each part
+    must satisfy ... <= 18; got 1..20.'"""
+    from labchart2cfd.processing.profile_assembly import ProfilePart
+    _ct_step_selected(win, mat_file, "parts")      # 15 images in the grid
+    win.subject_edit.setText("S1")
+    win._parts.append(ProfilePart(start_image=1, end_image=20, label=""))
+    win._refresh_parts_list()
+    win._update_export_hint()
+
+    hint = win.export_hint.text()
+    assert hint.startswith("Before export") and "15 images" in hint and "1 to 20" in hint
+
+
+def test_the_export_line_follows_the_grid_offset(win, mat_file):
+    """The line stayed as it was until some other edit refreshed it."""
+    from labchart2cfd.processing.profile_assembly import ProfilePart
+    _ct_step_selected(win, mat_file, "parts")
+    win.subject_edit.setText("S1")
+    win.ct_temporal_res_spin.lineEdit().returnPressed.emit()
+    win._parts.append(ProfilePart(start_image=1, end_image=3, label=""))
+    win._refresh_parts_list()
+    win._update_export_hint()
+    assert win.export_hint.property("state") == "ready"
+
+    win.synth_grid_offset_spin.setValue(100)
+
+    assert win.export_hint.property("state") == "caution"
+    assert "2.100 s to 5.100 s" in win.export_hint.text()
+
+
+def test_a_window_outside_the_recording_is_named_before_export(win, mat_file):
+    """'Window Outside Recording' came only after a line that began Ready."""
+    open_block(win, mat_file)                      # the block is 10 s long
+    win.subject_edit.setText("S1")
+    win.start_spin.setValue(8.0)
+
+    win.end_spin.setValue(64.0)
+
+    hint = win.export_hint.text()
+    assert hint.startswith("Before export") and "recording" in hint and "9.999" in hint
+
+
+def test_a_parts_grid_outside_the_recording_is_named_before_export(win, mat_file):
+    from labchart2cfd.processing.profile_assembly import ProfilePart
+    _ct_step_selected(win, mat_file, "parts")
+    win.subject_edit.setText("S1")
+    win._parts.append(ProfilePart(start_image=1, end_image=3, label=""))
+    win._refresh_parts_list()
+
+    win.synth_images_spin.setValue(250)            # 50 s of grid in a 10 s block
+
+    hint = win.export_hint.text()
+    assert hint.startswith("Before export") and "recording" in hint
+
+
+def test_no_cycle_label_can_be_placed_on_a_grid_that_is_only_previewed(win, mat_file):
+    """With a shift on screen and not applied, the numbers drawn were the
+    preview while the click took an image of the grid in force."""
+    _ct_step_selected(win, mat_file, "cycle")
+    win.cycle_mode_btn.setChecked(True)
+    win.ct_shift_slider.setValue(300)
+
+    win._on_click(ClickEvent(win.ax_top, 2.95))
+
+    assert win._ct_cycle_frames == []
+    assert "Apply shift and image count" in win.status_bar.currentMessage()
+
+
+def test_the_blocker_about_lost_cycle_labels_names_the_way_out(win, mat_file):
+    _ct_step_selected(win, mat_file, "cycle")
+    win.subject_edit.setText("S1")
+    win.cycle_mode_btn.setChecked(True)
+    win._on_click(ClickEvent(win.ax_top, 4.9))
+    win.cycle_mode_btn.setChecked(False)
+
+    win.end_spin.setValue(4.0)
+
+    assert "Clear cycle labels" in win.export_hint.text()
+
+
+def test_moved_cycle_labels_are_announced_after_a_shift_and_a_typed_start(win, mat_file):
+    """Only a Temporal Res change said 'check them'."""
+    _two_cycle_labels(win, mat_file)
+    win.ct_shift_slider.setValue(300)
+    win._apply_ct_correction()
+    assert "cycle label" in win.status_bar.currentMessage().lower()
+
+    win.start_spin.setValue(2.5)
+    assert "cycle label" in win.status_bar.currentMessage().lower()
+
+
+def test_a_long_result_summary_is_given_the_height_it_needs(qapp, tmp_path):
+    """The single summary label was 368 px for text that needs 384, in every
+    study type, so the last row was sliced through."""
+    from labchart2cfd.gui.dialogs import ExportResultDialog
+    rows = [("Recording", "rec.mat"), ("Study type", "CT"), ("Block", "1"),
+            ("Flow channel", "2: Flow"), ("Pressure channel", "4: Pressure"),
+            ("Mass flow", "L/s x 0.001 x 1.2 kg/m3 (air), sign inverted"),
+            ("Pressure", "cmH2O x 98.0665 = Pa"), ("Images in the scan", "15"),
+            ("Inhale starts at image", "11"), ("Exhale ends at image", "6"),
+            ("Images selected", "11 (11,12,13,14,15,1,2,3,4,5,6)"),
+            ("Duration", "3.00 s"), ("Sample rate", "100 Hz"), ("Samples", "301"),
+            ("Drift error", "0.214545"), ("Time", "starts at 0, as STAR-CCM+ expects")]
+    dialog = ExportResultDialog({"folder": tmp_path, "files": [tmp_path / "a.csv"] * 4,
+                                 "summary": rows, "warnings": [], "plot": None})
+    dialog.show()
+    qapp.processEvents()
+
+    label = dialog.summary_label
+    assert label.height() >= label.heightForWidth(label.width())
+    assert label.minimumHeight() >= label.heightForWidth(dialog.PLOT_WIDTH)
+    dialog.close()

@@ -280,6 +280,8 @@ class FlowProfileApp(QMainWindow):
         # The shading of the window on each detail axes (see _update_window_span).
         self._window_spans: dict = {}
         self._placing_marker = False
+        # The scan step the parts list was built on (see _refresh_parts_list).
+        self._parts_step: Optional[int] = None
         # Images in step follows the window until the user types a count of
         # their own. From then on the program never rewrites it, and the
         # window is that many images long (the user's rule, as for the parts
@@ -819,6 +821,8 @@ class FlowProfileApp(QMainWindow):
         if self._ct_needs_step():
             return "ct_need_step"
         if self._synth_mode:
+            if not self._ct_steps and self.end_spin.value() <= self.start_spin.value():
+                return "window"  # no step was found: the window is clicked first
             return "parts_idle"
         if self._workflow_name() == "CT" and self._ct_selected_step is not None:
             # The window is the scan step now. A plain click that moved it
@@ -840,7 +844,7 @@ class FlowProfileApp(QMainWindow):
         for step in self._ct_steps:
             if step["start_time"] - reach <= x_time <= step["end_time"] + reach:
                 self.ct_step_spin.setValue(step["index"])
-                self._select_ct_step()
+                self._user_select_step()
                 return
         self.status_bar.showMessage(
             "No scan step there. Click on one of the steps named along the top."
@@ -1569,7 +1573,8 @@ class FlowProfileApp(QMainWindow):
         self.ct_temporal_res_spin.valueChanged.connect(
             lambda _v: self.ct_temporal_res_spin.hasFocus() and self._confirm_temporal_res())
         for box in (self.ct_temporal_res_spin, self.synth_dt_spin, self.synth_images_spin,
-                    self.ct_shift_spin, self.ct_total_images_spin, self.ct_step_spin):
+                    self.ct_shift_spin, self.ct_total_images_spin, self.ct_step_spin,
+                    self.synth_grid_offset_spin):
             box.valueChanged.connect(lambda _v: self._update_export_hint())
         self.start_spin.valueChanged.connect(lambda _v: self._update_window_readout())
         self.end_spin.valueChanged.connect(lambda _v: self._update_window_readout())
@@ -1969,12 +1974,23 @@ class FlowProfileApp(QMainWindow):
         if self._uses_assembly():
             if not self._parts:
                 blockers.append("add at least one part")
-            if self._synth_grid() is None:
+            grid = self._synth_grid()
+            if grid is None:
                 # Shorter than one flow sample, or no image: no grid exists.
                 blockers.append(
                     "set a Temporal Res of at least one flow sample "
                     f"({1000.0 / self._SYNTH_SAMPLE_RATE:g} ms) and at least one image"
                 )
+            else:
+                # A part made on a longer grid. Export answered "Assembly
+                # Failed" after the line had said Ready.
+                past = [p for p in self._parts if p.end_image > grid[2] or p.start_image < 1]
+                if past:
+                    named = ", ".join(f"{p.start_image} to {p.end_image}" for p in past)
+                    blockers.append(
+                        f"change or delete the parts that name images the grid "
+                        f"does not have ({named}; the grid has {grid[2]} images)"
+                    )
         elif self.end_spin.value() <= self.start_spin.value():
             blockers.append("set Start before End")
         elif self._workflow_name() == "CT":
@@ -1988,6 +2004,9 @@ class FlowProfileApp(QMainWindow):
                     f"raise Temporal Res ({dt_ms:g} ms gives {images} images in "
                     f"this window, the limit is {self._MAX_GRID_IMAGES})"
                 )
+        blockers += self._window_outside_recording()
+        if self._workflow_name() == "CT" and not self._uses_assembly():
+            blockers += self._landmarks_outside_window()
         if self._workflow_name() == "CT" and self._ct_selected_step is not None:
             # These hold for every CT method. Each is a state where the plot
             # showed one thing and the files would hold another.
@@ -2000,7 +2019,8 @@ class FlowProfileApp(QMainWindow):
             gone = self._cycle_labels_off_grid() if self._ct_method() == "cycle" else []
             if gone:
                 blockers.append(
-                    "remove the cycle labels of images that no longer exist "
+                    "press Clear cycle labels, or widen the window: labels "
+                    f"sit on images that no longer exist "
                     f"({', '.join(str(i) for i in gone)}; the scan now has "
                     f"{self._ct_grid()[2]} images)"
                 )
@@ -2011,6 +2031,51 @@ class FlowProfileApp(QMainWindow):
                     f"but step {selected} is the one selected)"
                 )
         return blockers
+
+    def _window_outside_recording(self) -> List[str]:
+        """A blocker when the exported range has no data behind it.
+
+        The export itself refused this, but only after the line above the
+        button had said Ready.
+        """
+        if self.data is None:
+            return []
+        flow_row, col = self.flow_row_spin.value(), self.col_spin.value()
+        if self.data.is_block_empty(flow_row, col):
+            return []
+        if self._uses_assembly():
+            window = self._synth_export_window()
+        else:
+            window = (self.start_spin.value(), self.end_spin.value())
+        if window is None or window[1] <= window[0]:
+            return []
+        time = self.data.get_time(flow_row, col)
+        lo, hi = float(time[0]), float(time[-1])
+        if window[0] >= lo and window[1] <= hi:
+            return []
+        return [
+            f"move the window inside the recording, which runs from {lo:.3f} s "
+            f"to {hi:.3f} s (the window is {window[0]:.3f} s to {window[1]:.3f} s)"
+        ]
+
+    def _landmarks_outside_window(self) -> List[str]:
+        """Blockers for landmarks that the window no longer holds.
+
+        A mark left outside a changed window was exported as the first or
+        the last image, with the mark itself off screen and the line green.
+        """
+        if self._ct_method() != "landmarks":
+            return []
+        start, end = self.start_spin.value(), self.end_spin.value()
+        out = []
+        for name, t in (("inhale start", self._ct_inhale_start),
+                        ("exhale end", self._ct_exhale_end)):
+            if t is not None and not start - 1e-9 <= t <= end + 1e-9:
+                out.append(
+                    f"mark the {name} again or press Clear landmarks (it is at "
+                    f"{t:.3f} s, outside the window)"
+                )
+        return out
 
     def _ct_export_description(self, study: str, window: str) -> str:
         """What a CT export through Execute will really hold.
@@ -2529,9 +2594,21 @@ class FlowProfileApp(QMainWindow):
             self._clear_all_markers()
 
     def _user_select_step(self) -> None:
-        """Select step, from the button."""
-        if self._ask_before_dropping("Selecting a step redraws its image grid and"):
-            self._select_ct_step()
+        """Select step, from the button or from a click on a step.
+
+        Parts name images of the step they were built on. Selecting another
+        step used to carry them over without a question, so a breath order
+        made for one scan was applied to the next.
+        """
+        other_step = (bool(self._parts) and self._parts_step is not None
+                      and self.ct_step_spin.value() != self._parts_step)
+        if not self._ask_before_dropping(
+                "Selecting a step redraws its image grid and", include_parts=other_step):
+            return
+        if other_step:
+            self._parts = []
+            self._refresh_parts_list()
+        self._select_ct_step()
 
     def _on_selection_changed(self, *_args) -> None:
         """Redraw the current view after the user changes a channel or block.
@@ -3717,7 +3794,7 @@ class FlowProfileApp(QMainWindow):
         """
         if self.ax_top is None or self.ax_bottom is None:
             return
-        if self._ct_selected_step is None:
+        if self._ct_grid() is None:
             return
 
         # Clear previous interval artists
@@ -3805,7 +3882,12 @@ class FlowProfileApp(QMainWindow):
         if not manual_override:
             # The grid in force was drawn: the cycle labels are image numbers
             # on it, so they are drawn again where those images are now.
-            self._redraw_cycle_labels()
+            if self._redraw_cycle_labels():
+                self.status_bar.showMessage(self._cycle_moved_note().strip())
+            if update_total_images_field and self._ct_selected_step is None:
+                # A window set by hand: the parts grid starts from its count,
+                # as it does from a selected step.
+                self._seed_synth_image_count()
 
         # Populate Trigger Info box only on step selection, not during slider preview
         if update_total_images_field:
@@ -3904,7 +3986,8 @@ class FlowProfileApp(QMainWindow):
         self.status_bar.showMessage(
             f"Correction applied: start shifted +{shift_ms:.0f}ms, "
             f"{manual_frames} images, "
-            f"window {corrected_start:.3f}s - {corrected_end:.3f}s"
+            f"window {corrected_start:.3f}s - {corrected_end:.3f}s."
+            f"{self._cycle_moved_note()}"
         )
 
     def _clear_ct_interval_markers(self) -> None:
@@ -4044,13 +4127,20 @@ class FlowProfileApp(QMainWindow):
         in others, so after a shift or a typed time the plot showed images
         the files did not hold.
         """
-        if self._ct_selected_step is None:
-            return None
         dt = self.ct_temporal_res_spin.value() / 1000.0
         if dt <= 0:
             return None
         start_t, end_t = self.start_spin.value(), self.end_spin.value()
-        if end_t <= start_t:  # no window yet: the step itself
+        if self._ct_selected_step is None:
+            if self._workflow_name() != "CT":
+                return None  # a window in another study type is not a scan
+            # No step selected. Where steps were found, one has to be chosen
+            # first. Where none was found (no usable trigger), a window set
+            # by hand is the scan: it used to get no grid at all, so the
+            # files named image numbers the plot never showed.
+            if self._ct_steps or end_t <= start_t:
+                return None
+        elif end_t <= start_t:  # no window yet: the step itself
             start_t = self._ct_selected_step["start_time"]
             end_t = self._ct_selected_step["end_time"]
         return start_t, dt, compute_image_count(end_t - start_t, dt)
@@ -4081,8 +4171,21 @@ class FlowProfileApp(QMainWindow):
 
     def _add_cycle_label(self, x_time: float) -> None:
         """Label the image under a click as the next one of the cycle."""
-        if self._ct_selected_step is None:
-            QMessageBox.warning(self, "No Step", "Select a CT step before labeling frames.")
+        if self._ct_grid() is None:
+            # Not a dialog: where no step was found there is none to select,
+            # and the message that said to select one was a dead end.
+            self.status_bar.showMessage(
+                "Set the scan window first: select a step, or without one "
+                "click or type Start and End."
+            )
+            return
+        if self._ct_pending_correction():
+            # The numbers on the plot are a preview. A click would take an
+            # image of the grid in force, which is not the one drawn.
+            self.status_bar.showMessage(
+                "Press Apply shift and image count (4 CT scan) first: the "
+                "grid on the plot is a preview until then."
+            )
             return
 
         img_idx = self._image_at(x_time)
@@ -4138,15 +4241,22 @@ class FlowProfileApp(QMainWindow):
         )
         return (shade, ann)
 
-    def _redraw_cycle_labels(self) -> None:
+    def _redraw_cycle_labels(self) -> bool:
         """Draw every cycle label again, where its image is on the grid now.
+        Returns whether any label moved.
 
         A label is an image number. When Start, the shift, the image count
         or Temporal Res changed, the shading stayed where it was while the
         export cut the same numbers on the new grid.
         """
         if not self._ct_cycle_frames:
-            return
+            return False
+
+        def _places() -> list:
+            return [(round(d[0].get_x(), 9), round(d[0].get_width(), 9)) if d else None
+                    for d in self._ct_cycle_artists]
+
+        before = _places()
         for drawn in self._ct_cycle_artists:
             _remove_all(drawn)
         self._ct_cycle_artists = []
@@ -4155,6 +4265,15 @@ class FlowProfileApp(QMainWindow):
             visits = seen.get(img_idx, 0)
             seen[img_idx] = visits + 1
             self._ct_cycle_artists.append(self._draw_cycle_label(number, img_idx, visits))
+        return _places() != before
+
+    def _cycle_moved_note(self) -> str:
+        """A sentence for the status line when cycle labels sit on a new grid."""
+        n = len(self._ct_cycle_frames)
+        if not n:
+            return ""
+        return (f" The {n} cycle label{'s' if n != 1 else ''} now sit on the "
+                "new grid: check them.")
 
     def _cycle_labels_off_grid(self) -> List[int]:
         """Labelled images that the grid in force no longer holds."""
@@ -4299,12 +4418,10 @@ class FlowProfileApp(QMainWindow):
         if self._ct_selected_step is not None and self._ct_interval_markers:
             # Replaces a line about an earlier state, such as a correction.
             # Not when the grid was refused: that line says why.
-            n_labels = len(self._ct_cycle_frames)
-            moved = (f" The {n_labels} cycle label{'s' if n_labels != 1 else ''} "
-                     "now sit on the new grid: check them." if n_labels else "")
             self.status_bar.showMessage(
                 f"Temporal Res {dt_ms:g} ms: "
-                f"{self.ct_total_images_spin.value()} images in the window.{moved}"
+                f"{self.ct_total_images_spin.value()} images in the window."
+                f"{self._cycle_moved_note()}"
             )
 
     def _redraw_ct_intervals_if_active(self) -> None:
@@ -4314,11 +4431,13 @@ class FlowProfileApp(QMainWindow):
         snapping and the export used the NEW one, so a click was labelled and
         exported as a different image than the number drawn over it.
         """
-        if (self._ct_selected_step is not None
-                and self.ax_top is not None
-                and self._plot_mode == "selected"):
+        if self.ax_top is None or self._plot_mode != "selected" or self._workflow_name() != "CT":
+            return
+        if self._ct_grid() is not None:
             self._draw_ct_intervals(update_total_images_field=True)
-            self.canvas.draw_idle()
+        elif self._ct_selected_step is None and self._ct_interval_markers:
+            self._clear_ct_interval_markers()  # the hand window is gone
+        self.canvas.draw_idle()
 
     def _on_synth_images_changed(self, n_images: int) -> None:
         """Image count edited: redraw. Temporal Res is left exactly as typed."""
@@ -4578,6 +4697,12 @@ class FlowProfileApp(QMainWindow):
             self._part_artists.append(ann)
 
     def _refresh_parts_list(self) -> None:
+        # The step the parts were built on: noted with the first part,
+        # forgotten with the last.
+        if not self._parts:
+            self._parts_step = None
+        elif self._parts_step is None and self._ct_selected_step is not None:
+            self._parts_step = self._ct_selected_step["index"]
         self.parts_list.clear()
         meta = self._synth_grid()
         dt = meta[1] if meta else 0.2

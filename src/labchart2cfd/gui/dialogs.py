@@ -169,6 +169,11 @@ class ExportResultDialog(QDialog):
         self.summary_label.setWordWrap(True)
         self.summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.summary_label.setMinimumWidth(self.PLOT_WIDTH)
+        # A wrapped rich text label reports too small a height to the layout,
+        # so the last row was sliced through. Its height at this width is
+        # given to it outright; a wider dialog only needs less.
+        self.summary_label.setMinimumHeight(
+            self.summary_label.heightForWidth(self.PLOT_WIDTH) + 4)
         layout.addWidget(self.summary_label)
 
         plot = report.get("plot")
