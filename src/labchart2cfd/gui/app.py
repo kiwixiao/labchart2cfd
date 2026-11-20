@@ -40,14 +40,14 @@ from matplotlib.transforms import Bbox, TransformedBbox
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from scipy.signal import find_peaks
 
-from PyQt5.QtCore import QEventLoop, Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QEventLoop, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QComboBox,
     QSpinBox, QDoubleSpinBox, QSlider, QFileDialog, QMessageBox,
     QStatusBar, QGridLayout, QSizePolicy, QFrame,
     QCheckBox, QListWidget, QListWidgetItem, QInputDialog, QDialog,
-    QSplitter, QStackedWidget, QFormLayout, QAction,
+    QSplitter, QStackedWidget, QFormLayout, QAction, QBoxLayout,
 )
 from PyQt5.QtGui import QKeySequence
 
@@ -225,6 +225,8 @@ class FlowProfileApp(QMainWindow):
         self._comment_labels_withheld = False
         # Whole block range of the channel behind each y scale, read once.
         self._y_reference: dict = {}
+        # The plot title of the open block, from whole to shortest.
+        self._title_forms: List[str] = []
         # (flow row, trigger row, block) the current view was drawn from, so a
         # picker change can tell whether anything on the plot changed.
         self._shown_selection: Optional[Tuple[int, int, int]] = None
@@ -467,11 +469,22 @@ class FlowProfileApp(QMainWindow):
         self.mode_banner.setWordWrap(True)
         self.mode_banner.setProperty("kind", "idle")
 
-        tools = QHBoxLayout()
+        # The plot tools and the y scale buttons share a row while both fit.
+        # In a narrow window the buttons move to a row of their own: squeezed
+        # into one, the toolbar hid pan, zoom and save behind an overflow arrow.
+        self.y_scale_strip = QWidget()
+        strip_row = QHBoxLayout(self.y_scale_strip)
+        strip_row.setContentsMargins(0, 0, 0, 0)
+        strip_row.setSpacing(4)
+        self._build_y_scale_controls(strip_row)
+        tools = QBoxLayout(QBoxLayout.LeftToRight)
         tools.setContentsMargins(0, 0, 0, 0)
         tools.setSpacing(4)
         tools.addWidget(self.toolbar, 1)
-        self._build_y_scale_controls(tools)
+        tools.addWidget(self.y_scale_strip, 0, Qt.AlignRight)
+        self._tools_row = tools
+        self.plot_panel = panel
+        panel.installEventFilter(self)
 
         # Over the numbers of a y axis, the wheel stretches that axis.
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
@@ -481,6 +494,24 @@ class FlowProfileApp(QMainWindow):
         layout.addLayout(tools)
         layout.addWidget(self.canvas, 1)
         return panel
+
+    # Room kept beside the toolbar buttons for its time and value readout.
+    _TOOLBAR_READOUT_PX = 180
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt spelling)
+        if watched is getattr(self, "plot_panel", None) and event.type() == QEvent.Resize:
+            self._arrange_plot_tools()
+        return super().eventFilter(watched, event)
+
+    def _arrange_plot_tools(self) -> None:
+        """One row for the plot tools while they fit, two when they do not."""
+        margins = self.plot_panel.layout().contentsMargins()
+        room = self.plot_panel.width() - margins.left() - margins.right()
+        needed = (self.toolbar.sizeHint().width() + self.y_scale_strip.sizeHint().width()
+                  + self._tools_row.spacing() + self._TOOLBAR_READOUT_PX)
+        direction = QBoxLayout.LeftToRight if room >= needed else QBoxLayout.TopToBottom
+        if self._tools_row.direction() != direction:
+            self._tools_row.setDirection(direction)
 
     # ------------------------------------------------------------------
     # Y scales
@@ -1739,6 +1770,7 @@ class FlowProfileApp(QMainWindow):
         self._comment_layout_key = None
         self._comment_labels_withheld = False
         self._y_reference = {}
+        self._title_forms = []
         self._trigger_times = np.array([])
         self._trigger_count = 0
         self._ct_steps = []
@@ -2315,9 +2347,16 @@ class FlowProfileApp(QMainWindow):
         # Padded so the marker times and image numbers drawn along the top
         # edge of the axes sit under the title instead of across it.
         # File name and channel titles are drawn as typed, never as a formula.
-        self.ax_top.set_title(
-            " | ".join(title_parts) + trigger_info, pad=16, parse_math=False
-        )
+        # Shorter forms follow for a window too narrow for the whole title:
+        # the file name goes first, because the sidebar shows it too.
+        self._title_forms = [
+            " | ".join(title_parts) + trigger_info,
+            " | ".join(title_parts[1:]) + trigger_info,
+            " | ".join(title_parts[1:]),
+            " | ".join(title_parts[1:3]),
+            title_parts[1],
+        ]
+        self.ax_top.set_title(self._title_forms[0], pad=16, parse_math=False)
         self.ax_top.grid(True, alpha=0.3)
         self._refresh_top_legend()
 
@@ -2328,7 +2367,9 @@ class FlowProfileApp(QMainWindow):
         self.ax_bottom.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
         self.ax_bottom.set_xlabel("Time (s)")
         self.ax_bottom.set_ylabel("Flow (L/s)")
-        self.ax_bottom.set_title("Flow only")
+        # Raised like the upper title, so the marker times along the top edge
+        # sit under it. Without the room the End time printed into the title.
+        self.ax_bottom.set_title("Flow only", pad=16)
         self.ax_bottom.grid(True, alpha=0.3)
         self.ax_bottom.format_coord = lambda x, y: f"time={x:.3f}s, flow={y:.4f}"
 
@@ -2340,7 +2381,8 @@ class FlowProfileApp(QMainWindow):
         # layout of the axes is only settled by a draw.
         if n_comments:
             self._layout_comment_labels()
-            self.canvas.draw_idle()
+        self._fit_title()
+        self.canvas.draw_idle()
 
         # Connect click handler for data picker
         self._click_cid = self.canvas.mpl_connect("button_press_event", self._on_click)
@@ -2606,6 +2648,23 @@ class FlowProfileApp(QMainWindow):
             return
         self._layout_comment_labels()
         self._layout_step_labels()
+        self._fit_title()
+
+    def _fit_title(self) -> None:
+        """Show the longest form of the plot title that fits the plot area.
+
+        A title is neither wrapped nor shortened by the plot library, so in
+        a narrow window it ran off both edges and its ends could not be read.
+        """
+        if self.ax_top is None or not self._title_forms:
+            return
+        title = self.ax_top.title
+        room = self.fig.bbox.width - 8
+        renderer = self.canvas.get_renderer()
+        for form in self._title_forms:
+            title.set_text(form)
+            if title.get_window_extent(renderer).width <= room:
+                break
 
     # Steps whose middles are closer than this on screen share one label.
     _STEP_LABEL_MIN_PX = 50.0
@@ -2685,6 +2744,23 @@ class FlowProfileApp(QMainWindow):
                 self._clear_time_markers()
         self._refresh_banner()
 
+    def _align_time_marker_labels(self) -> None:
+        """Put each marker's time on the outer side of its line.
+
+        Centred on their lines, the two times of a short window printed into
+        each other ("21.000s24.300s"). The earlier one now ends at its line
+        and the later one starts at its line, so they cannot meet however
+        close the markers are. A single marker keeps its time centred.
+        """
+        markers = sorted(self._time_markers, key=lambda m: m[0].get_xdata()[0])
+        sides = ["center"] if len(markers) == 1 else ["right", "left"]
+        for (_line_top, ann_top, _line_bot, ann_bot), side in zip(markers, sides):
+            for ann in (ann_top, ann_bot):
+                text = ann.get_text().strip()
+                ann.set_ha(side)
+                # One space keeps the time off its own line.
+                ann.set_text({"right": text + " ", "left": " " + text}.get(side, text))
+
     def _add_time_marker(self, x_time: float) -> None:
         """Add a vertical time marker on both top and bottom plots."""
         if self.ax_bottom is None or self.ax_top is None:
@@ -2712,6 +2788,7 @@ class FlowProfileApp(QMainWindow):
             ha="center", va="bottom",
         )
         self._time_markers.append((line_top, ann_top, line_bot, ann_bot))
+        self._align_time_marker_labels()
 
         # Auto-populate Start/End Time from first two markers
         marker_count = len(self._time_markers)

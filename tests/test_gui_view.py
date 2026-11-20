@@ -415,3 +415,122 @@ def test_a_shared_label_sits_between_its_steps(win, mat_file, tmp_path):
 
     shared = [a for _step, a in win._ct_step_labels if a.get_visible()][-1]
     assert shared.get_position()[0] == pytest.approx((5.3 + 6.7) / 2)
+
+
+# ------------------------------------------ found on the real display at 900 x 600
+
+def test_a_narrow_window_keeps_every_plot_tool(win, qapp, mat_file):
+    """At the smallest window the y scale buttons squeezed the plot toolbar,
+    and pan, zoom and save went behind an overflow arrow."""
+    win.resize(900, 600)
+    win.show()
+    open_block(win, mat_file)
+    qapp.processEvents()
+
+    assert win.toolbar.width() >= win.toolbar.sizeHint().width()
+    # The scale buttons moved to a row of their own, still all on screen.
+    assert win.y_scale_strip.geometry().top() >= win.toolbar.geometry().bottom() - 2
+    assert win.y_scale_strip.geometry().right() <= win.plot_panel.width()
+
+
+def test_a_wide_window_keeps_the_tools_on_one_row(win, qapp, mat_file):
+    win.resize(1400, 860)
+    win.show()
+    open_block(win, mat_file)
+    qapp.processEvents()
+
+    assert win.y_scale_strip.geometry().top() < win.toolbar.geometry().bottom()
+    assert win.toolbar.width() >= win.toolbar.sizeHint().width()
+
+
+def _title_overhang(win):
+    win.canvas.draw()
+    box = win.ax_top.title.get_window_extent()
+    return min(box.x0, win.fig.bbox.width - box.x1)
+
+
+def test_the_plot_title_is_shortened_until_it_fits(win, qapp, mat_file, tmp_path):
+    """In a narrow window the title ran off both edges of the plot."""
+    import shutil
+    long_name = tmp_path / "a_recording_with_quite_a_long_file_name_2026.mat"
+    shutil.copy(mat_file, long_name)
+    win.resize(900, 600)
+    win.show()
+    open_block(win, long_name)
+    qapp.processEvents()
+
+    assert _title_overhang(win) >= 0
+    assert "Block 1" in win.ax_top.get_title()     # what cannot be read elsewhere stays
+
+
+def test_the_plot_title_is_whole_when_there_is_room(win, qapp, mat_file):
+    win.resize(1400, 860)
+    win.show()
+    open_block(win, mat_file)
+    qapp.processEvents()
+
+    title = win.ax_top.get_title()
+    assert _title_overhang(win) >= 0
+    assert "rec.mat" in title and "Flow" in title and "Trigger" in title
+
+
+def test_the_title_comes_back_when_the_window_grows(win, qapp, mat_file, tmp_path):
+    import shutil
+    long_name = tmp_path / "a_recording_with_quite_a_long_file_name_2026.mat"
+    shutil.copy(mat_file, long_name)
+    win.resize(900, 600)
+    win.show()
+    open_block(win, long_name)
+    qapp.processEvents()
+    assert long_name.name not in win.ax_top.get_title()
+
+    win.resize(1700, 900)
+    qapp.processEvents()
+    win.canvas.draw()
+
+    assert long_name.name in win.ax_top.get_title()
+
+
+def _marker_label_boxes(win, which):
+    win.canvas.draw()
+    return [artists[which].get_window_extent() for artists in win._time_markers]
+
+
+def test_start_and_end_times_do_not_print_into_each_other(win, mat_file):
+    """Two markers close together showed '21.000s24.300s' as one word."""
+    open_block(win, mat_file)
+    win._on_click(ClickEvent(win.ax_bottom, 5.0))
+    win._on_click(ClickEvent(win.ax_bottom, 5.2))
+
+    for which in (1, 3):                           # label on the top and the bottom plot
+        first, second = _marker_label_boxes(win, which)
+        assert not first.overlaps(second)
+        assert first.x1 <= second.x0               # each on the outer side of its line
+
+
+def test_the_labels_point_outward_whichever_marker_was_clicked_first(win, mat_file):
+    open_block(win, mat_file)
+    win._on_click(ClickEvent(win.ax_bottom, 5.2))
+    win._on_click(ClickEvent(win.ax_bottom, 5.0))
+
+    later, earlier = _marker_label_boxes(win, 1)
+    assert earlier.x1 <= later.x0
+
+
+def test_a_single_marker_label_is_centred_on_its_line(win, mat_file):
+    open_block(win, mat_file)
+    win._on_click(ClickEvent(win.ax_bottom, 5.0))
+
+    assert win._time_markers[0][1].get_ha() == "center"
+
+
+def test_marker_times_on_the_lower_plot_stay_clear_of_its_title(win, mat_file):
+    """Seen on the real display: the End time printed into 'Flow only'."""
+    open_block(win, mat_file)
+    win._on_click(ClickEvent(win.ax_bottom, 4.9))  # under the centred title
+    win._on_click(ClickEvent(win.ax_bottom, 5.1))
+
+    win.canvas.draw()
+    title = win.ax_bottom.title.get_window_extent()
+
+    assert not any(box.overlaps(title) for box in _marker_label_boxes(win, 3))
