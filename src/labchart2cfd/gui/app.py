@@ -213,8 +213,10 @@ class FlowProfileApp(QMainWindow):
 
         # Remarks from the reader of the open recording.
         self._load_notes: List[str] = []
-        # Lines and texts of the LabChart comments drawn on the detail view.
+        # Lines and texts of the LabChart comments drawn on the detail view,
+        # and the texts alone, in time order, for keeping them apart.
         self._comment_artists: list = []
+        self._comment_labels: list = []
         # (flow row, trigger row, block) the current view was drawn from, so a
         # picker change can tell whether anything on the plot changed.
         self._shown_selection: Optional[Tuple[int, int, int]] = None
@@ -459,6 +461,9 @@ class FlowProfileApp(QMainWindow):
 
         # Over the numbers of a y axis, the wheel stretches that axis.
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
+        # Comment labels are kept apart in pixels, which a resize changes.
+        self.canvas.mpl_connect(
+            "resize_event", lambda _event: self._layout_comment_labels())
 
         layout.addWidget(self.mode_banner)
         layout.addLayout(tools)
@@ -1659,6 +1664,7 @@ class FlowProfileApp(QMainWindow):
         self._ct_interval_markers = []
         self._ct_landmark_artists = []
         self._comment_artists = []
+        self._comment_labels = []
         self._trigger_times = np.array([])
         self._trigger_count = 0
         self._ct_steps = []
@@ -1941,6 +1947,8 @@ class FlowProfileApp(QMainWindow):
         x_lo, x_hi = ax.get_xlim()
         for envelope in self._envelopes:
             envelope.update(x_lo, x_hi)
+        # Which comment labels crowd each other depends on the zoom.
+        self._layout_comment_labels()
 
     def _show_overview(self) -> None:
         """Draw the channels-x-blocks overview grid for the loaded file."""
@@ -2154,6 +2162,11 @@ class FlowProfileApp(QMainWindow):
 
         self.canvas.draw()
         self.toolbar.update()
+        # After the draw, because the labels are placed in pixels and the
+        # layout of the axes is only settled by a draw.
+        if n_comments:
+            self._layout_comment_labels()
+            self.canvas.draw_idle()
 
         # Connect click handler for data picker
         self._click_cid = self.canvas.mpl_connect("button_press_event", self._on_click)
@@ -2195,6 +2208,7 @@ class FlowProfileApp(QMainWindow):
         they never change a scale or the range of the time axis.
         """
         self._comment_artists = []
+        self._comment_labels = []
         comments = self.data.comments_in(self.col_spin.value())
         visible = self.comments_action.isChecked()
         for comment in comments:
@@ -2221,7 +2235,56 @@ class FlowProfileApp(QMainWindow):
             )
             text.set_in_layout(False)
             self._comment_artists.append(text)
+            self._comment_labels.append(text)
         return len(comments)
+
+    # Where a comment label starts, as a fraction of the axes height, and the
+    # room kept between two labels, in pixels.
+    _COMMENT_LABEL_BASE = 0.04
+    _COMMENT_LABEL_GAP_PX = 4.0
+
+    def _layout_comment_labels(self) -> None:
+        """Keep the labels of comments that are close in time apart.
+
+        Every label starts at the bottom edge. One that would print over a
+        neighbour at the current zoom is moved up to the first free height,
+        and comes back down once zooming in separates them. On a real
+        recording two comments 13 s apart in a 2300 s block were unreadable.
+        """
+        labels = self._comment_labels
+        if not labels:
+            return
+        host = labels[0].axes
+        box = host.bbox
+        if box.height <= 0:
+            return
+        renderer = self.canvas.get_renderer()
+        base_px = box.y0 + self._COMMENT_LABEL_BASE * box.height
+        gap = self._COMMENT_LABEL_GAP_PX
+        x_lo, x_hi = host.get_xlim()
+        placed = []  # (right edge, bottom, top) in pixels, in time order
+        for label in labels:
+            time = label.get_position()[0]
+            label.set_y(self._COMMENT_LABEL_BASE)
+            if not x_lo <= time <= x_hi:
+                continue  # out of view: clipped, and in nobody's way
+            extent = label.get_window_extent(renderer)
+            # The labels in reach sideways, nearest first. All labels are
+            # one line of the same font, so all are equally wide.
+            blocked = []
+            for right, bottom, top in reversed(placed):
+                if extent.x1 - right >= extent.width + gap:
+                    break
+                blocked.append((bottom, top))
+            bottom = base_px
+            for other_bottom, other_top in sorted(blocked):
+                if bottom + extent.height + gap <= other_bottom:
+                    break  # fits underneath this one
+                bottom = max(bottom, other_top + gap)
+            if bottom + extent.height > box.y1:
+                bottom = base_px  # no room left above: accept the overlap
+            label.set_y((bottom - box.y0) / box.height)
+            placed.append((extent.x1, bottom, bottom + extent.height))
 
     def _set_comments_visible(self, visible: bool) -> None:
         """Show or hide the comments (View menu)."""

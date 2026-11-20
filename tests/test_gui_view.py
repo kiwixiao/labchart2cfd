@@ -279,3 +279,78 @@ def test_a_note_about_unreadable_comments_is_shown_under_the_file_name(
 
     assert "comment" in win.load_notes.text().lower()
     assert win.data is not None
+
+
+# ------------------------------------------- comment labels that would collide
+
+def _recording_with_comments(mat_file, tmp_path, times, texts=None):
+    texts = texts or [f"comment {i + 1:02d}" for i in range(len(times))]
+    width = max(len(t) for t in texts)
+    mat = {k: v for k, v in loadmat(str(mat_file)).items() if not k.startswith("__")}
+    mat["com"] = np.array(
+        [[-1, 1, round(t * 1000), 1, i + 1] for i, t in enumerate(times)], dtype=float)
+    mat["comtext"] = np.array([t.ljust(width) for t in texts])
+    mat["tickrate"] = np.full((1, 3), 1000.0)
+    path = tmp_path / "close_comments.mat"
+    savemat(str(path), mat)
+    return path
+
+
+def _label_boxes(win):
+    win.canvas.draw()
+    return [a.get_window_extent() for a in win._comment_artists if isinstance(a, Text)]
+
+
+def _any_overlap(boxes):
+    return any(a.overlaps(b) for i, a in enumerate(boxes) for b in boxes[i + 1:])
+
+
+def test_labels_of_two_comments_close_in_time_do_not_print_over_each_other(
+        win, mat_file, tmp_path):
+    """On a real recording two comments 13 s apart in a 2300 s block were
+    drawn on top of each other and neither could be read."""
+    open_block(win, _recording_with_comments(mat_file, tmp_path, [5.00, 5.02]))
+
+    boxes = _label_boxes(win)
+
+    assert len(boxes) == 2 and not _any_overlap(boxes)
+    assert boxes[1].y0 > boxes[0].y1               # the later one moved up
+
+
+def test_three_crowded_labels_take_three_heights(win, mat_file, tmp_path):
+    open_block(win, _recording_with_comments(
+        mat_file, tmp_path, [5.00, 5.02, 5.04], ["c1", "c2", "c3"]))
+
+    boxes = _label_boxes(win)
+
+    assert not _any_overlap(boxes)
+    assert len({round(b.y0) for b in boxes}) == 3
+
+
+def test_a_label_with_no_room_above_stays_inside_the_plot(win, mat_file, tmp_path):
+    """Three long labels do not fit above each other. The last one goes back
+    to the bottom and overlaps, which is better than leaving the plot."""
+    open_block(win, _recording_with_comments(
+        mat_file, tmp_path, [5.00, 5.02, 5.04], ["a comment of some length"] * 3))
+
+    top = win.ax_top.bbox.y1
+
+    assert all(b.y1 <= top for b in _label_boxes(win))
+
+
+def test_labels_return_to_the_bottom_once_zooming_separates_them(
+        win, mat_file, tmp_path):
+    open_block(win, _recording_with_comments(mat_file, tmp_path, [5.00, 5.02]))
+    crowded = sorted(round(b.y0) for b in _label_boxes(win))
+    assert len(set(crowded)) == 2                  # two heights while crowded
+
+    win.ax_top.set_xlim(4.99, 5.03)
+
+    separate = [round(b.y0) for b in _label_boxes(win)]
+    assert len(set(separate)) == 1 and separate[0] == crowded[0]
+
+
+def test_labels_of_comments_far_apart_all_sit_at_the_bottom(win, commented):
+    open_block(win, commented)
+
+    assert len({round(b.y0) for b in _label_boxes(win)}) == 1
