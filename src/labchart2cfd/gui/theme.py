@@ -10,6 +10,11 @@ from PyQt5.QtGui import QColor, QPalette
 from PyQt5.QtWidgets import QApplication
 
 ACCENT = "#1f6feb"
+
+# The line above Export: refusing, allowed with something to check, and ready.
+# Three colours, because refusing and cautioning used to share one and
+# differed only in their first words.
+EXPORT_HINT_COLORS = {"blocked": "#b3261e", "caution": "#8a4b00", "ready": "#17663a"}
 ACCENT_DARK = "#1a5fd0"
 TEXT = "#1f2933"
 MUTED_TEXT = "#5b6470"
@@ -56,9 +61,9 @@ QLabel#modeBanner {{ padding: 7px 10px; border-radius: 3px; font-size: 13px; }}
 {_banner_rules()}
 
 QLabel#hintLabel {{ color: {MUTED_TEXT}; }}
-QLabel#exportHint[state="blocked"] {{ color: #8a4b00; }}
-QLabel#exportHint[state="ready"] {{ color: #17663a; }}
-QLabel#exportHint[state="caution"] {{ color: #8a4b00; }}
+QLabel#exportHint[state="blocked"] {{ color: {EXPORT_HINT_COLORS['blocked']}; }}
+QLabel#exportHint[state="caution"] {{ color: {EXPORT_HINT_COLORS['caution']}; }}
+QLabel#exportHint[state="ready"] {{ color: {EXPORT_HINT_COLORS['ready']}; }}
 QComboBox:disabled, QAbstractSpinBox:disabled {{ color: #a3a9b3; background: #eef0f3; }}
 QLabel#captureHint {{ color: #b3261e; font-weight: bold; }}
 QLabel#readout {{ background: #f7f8fa; color: {TEXT}; padding: 2px 6px; }}

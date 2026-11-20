@@ -148,6 +148,50 @@ class ElidedLabel(QLabel):
         painter.drawText(area, int(self.alignment()) | Qt.TextSingleLine, shown)
 
 
+class PageSwitcher(QWidget):
+    """Shows one of several pages, and is only as tall as that page.
+
+    A QStackedWidget is as tall as its tallest page, so a short page was
+    followed by the blank height of a long one. Here the other pages are
+    hidden, and a hidden widget takes no room.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._pages = []
+        self._index = -1
+        self._layout = QVBoxLayout(self)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(0)
+
+    def addWidget(self, page: QWidget) -> int:  # noqa: N802 (QStackedWidget spelling)
+        self._pages.append(page)
+        self._layout.addWidget(page)
+        if self._index < 0:
+            self._index = 0
+        page.setVisible(len(self._pages) - 1 == self._index)
+        return len(self._pages) - 1
+
+    def count(self) -> int:
+        return len(self._pages)
+
+    def widget(self, index: int) -> QWidget:
+        return self._pages[index]
+
+    def currentIndex(self) -> int:  # noqa: N802 (QStackedWidget spelling)
+        return self._index
+
+    def currentWidget(self) -> QWidget:  # noqa: N802 (QStackedWidget spelling)
+        return self._pages[self._index]
+
+    def setCurrentIndex(self, index: int) -> None:  # noqa: N802 (QStackedWidget spelling)
+        if not 0 <= index < len(self._pages):
+            return
+        self._index = index
+        for i, page in enumerate(self._pages):
+            page.setVisible(i == index)
+
+
 class VerticalScrollArea(QScrollArea):
     """A scroll area that scrolls up and down only.
 

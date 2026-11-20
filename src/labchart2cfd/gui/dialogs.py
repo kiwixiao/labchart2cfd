@@ -1,5 +1,6 @@
 """Dialogs of the labchart2cfd GUI: the assembly preview and the export result."""
 
+import html
 from pathlib import Path
 
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
@@ -154,13 +155,21 @@ class ExportResultDialog(QDialog):
         self.file_list.setFixedHeight(max(1, len(files)) * row_height + 8)
         layout.addWidget(self.file_list)
 
-        summary = QFormLayout()
-        for label, value in report.get("summary", []):
-            value_label = QLabel(str(value))
-            value_label.setWordWrap(True)
-            value_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-            summary.addRow(f"{label}:", value_label)
-        layout.addLayout(summary)
+        # One wrapped label holding a two column table. Separate wrapped
+        # labels in a form layout were given one line of height each, so a
+        # long row (the image order, the conversion) was cut off mid text.
+        rows = "".join(
+            "<tr><td style='padding: 2px 12px 2px 0; white-space: nowrap;'>"
+            f"{html.escape(str(label))}:</td>"
+            f"<td style='padding: 2px 0;'>{html.escape(str(value))}</td></tr>"
+            for label, value in report.get("summary", [])
+        )
+        self.summary_label = QLabel(f"<table cellspacing='0'>{rows}</table>")
+        self.summary_label.setTextFormat(Qt.RichText)
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.summary_label.setMinimumWidth(self.PLOT_WIDTH)
+        layout.addWidget(self.summary_label)
 
         plot = report.get("plot")
         if plot is not None and Path(plot).exists():

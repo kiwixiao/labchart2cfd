@@ -849,7 +849,7 @@ def test_temporal_res_is_unconfirmed_until_the_user_touches_it(win, mat_file):
     assert win.export_hint.property("state") == "caution"
     assert "default" in hint and "confirm" in hint
 
-    win.ct_temporal_res_spin.editingFinished.emit()            # Enter in the box
+    win.ct_temporal_res_spin.lineEdit().returnPressed.emit()   # Enter in the box
 
     assert win.export_hint.property("state") == "ready"
     assert "default" not in win.export_hint.text()
@@ -858,7 +858,7 @@ def test_temporal_res_is_unconfirmed_until_the_user_touches_it(win, mat_file):
 def test_another_recording_needs_its_temporal_res_confirmed_again(win, mat_file, tmp_path):
     import shutil
     _ct_step_selected(win, mat_file, "landmarks")
-    win.ct_temporal_res_spin.editingFinished.emit()
+    win.ct_temporal_res_spin.lineEdit().returnPressed.emit()
     assert win._ct_dt_confirmed
     other = tmp_path / "other.mat"
     shutil.copy(mat_file, other)
@@ -980,3 +980,276 @@ def test_the_result_rows_are_short_enough_to_read_whole(win, mat_file):
 
     win.workflow_combo.setCurrentText("MRI")
     assert max(len(value) for _label, value in win._export_provenance()) <= 60
+
+
+# ---------------- second retest: one grid, and every mark is drawn from it
+
+def _cycle_shades(win):
+    """(start, width) of the shading of each cycle label, in label order."""
+    return [(round(drawn[0].get_x(), 6), round(drawn[0].get_width(), 6))
+            for drawn in win._ct_cycle_artists if drawn]   # empty: image no longer exists
+
+
+def _two_cycle_labels(win, mat_file):
+    """Images 5 and 6 of a step from 2 to 5 s at 200 ms: 2.8 to 3.0, 3.0 to 3.2."""
+    _ct_step_selected(win, mat_file, "cycle")
+    win.subject_edit.setText("S1")
+    win.cycle_mode_btn.setChecked(True)
+    win._on_click(ClickEvent(win.ax_top, 2.9))
+    win._on_click(ClickEvent(win.ax_top, 3.1))
+    win.cycle_mode_btn.setChecked(False)
+    assert win._ct_cycle_frames == [5, 6]
+    assert _cycle_shades(win) == [(2.8, 0.2), (3.0, 0.2)]
+
+
+def test_cycle_labels_are_redrawn_when_temporal_res_changes(win, mat_file):
+    """Labels are image numbers. After Temporal Res changed, the shading
+    stayed where it was while the export cut the same numbers on the new
+    grid: the plot shaded 2.8 to 3.2 s and the file held 2.4 to 2.6 s."""
+    _two_cycle_labels(win, mat_file)
+
+    win.ct_temporal_res_spin.setValue(100.0)
+
+    assert win._ct_cycle_frames == [5, 6]
+    assert _cycle_shades(win) == [(2.4, 0.1), (2.5, 0.1)]
+    assert "cycle label" in win.status_bar.currentMessage().lower()
+
+
+def test_cycle_labels_are_redrawn_when_a_shift_is_applied(win, mat_file):
+    _two_cycle_labels(win, mat_file)
+
+    win.ct_shift_slider.setValue(300)
+    win._apply_ct_correction()
+
+    assert _cycle_shades(win) == [(3.1, 0.2), (3.3, 0.2)]
+
+
+def test_a_cycle_label_on_an_image_that_no_longer_exists_holds_the_export_back(win, mat_file):
+    """Images 14 and 15 were labelled, then the scan was cut to 12 images.
+    The line stayed green."""
+    _ct_step_selected(win, mat_file, "cycle")
+    win.subject_edit.setText("S1")
+    win.cycle_mode_btn.setChecked(True)
+    win._on_click(ClickEvent(win.ax_top, 4.7))     # image 14
+    win._on_click(ClickEvent(win.ax_top, 4.9))     # image 15
+    win.cycle_mode_btn.setChecked(False)
+
+    win.ct_total_images_spin.setValue(12)
+    win._apply_ct_correction()
+
+    hint = win.export_hint.text()
+    assert hint.startswith("Before export") and "14" in hint and "12 images" in hint
+    assert len(win._ct_cycle_artists) == 2          # still two labels to remove
+    assert _cycle_shades(win) == []                  # but nothing false is shaded
+
+
+def test_a_cycle_click_counts_from_the_window_in_force(win, mat_file):
+    """With a typed window the grid started at Start, but the click and its
+    shading were counted from the step edge, so a click in the drawn image 1
+    was recorded as image 2 and shaded across two drawn images."""
+    _ct_step_selected(win, mat_file, "cycle")
+    win.start_spin.setValue(2.09)
+    win.end_spin.setValue(5.09)
+    win.cycle_mode_btn.setChecked(True)
+
+    win._on_click(ClickEvent(win.ax_top, 2.25))
+
+    assert win._ct_cycle_frames == [1]
+    assert _cycle_shades(win) == [(2.09, 0.2)]
+
+
+@pytest.mark.parametrize("touch", [
+    lambda win: win._on_shift_entry_changed(),                         # box entered and left
+    lambda win: (win.ct_shift_slider.setValue(200), win.ct_shift_slider.setValue(0)),
+], ids=["shift box left unchanged", "slider moved and moved back"])
+def test_touching_the_shift_without_changing_it_keeps_the_grid_in_force(win, mat_file, touch):
+    """Either one redrew the grid from the step edge under a green line."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.start_spin.setValue(2.1)
+    win.end_spin.setValue(5.1)
+    assert _grid_starts(win)[0] == pytest.approx(2.1)
+
+    touch(win)
+
+    assert _grid_starts(win)[0] == pytest.approx(2.1)
+
+
+def test_the_landmark_status_names_the_image_the_export_will_cut(win, mat_file):
+    """After an applied shift of 100 ms the status said image 7 while the
+    plot and the result panel said image 6: it counted from the step edge."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.ct_shift_slider.setValue(100)
+    win._apply_ct_correction()
+
+    win._mark_inhale_start()
+    win._on_click(ClickEvent(win.ax_bottom, 3.12))
+
+    assert "image 6 at 3.100" in win.status_bar.currentMessage()
+
+
+def test_a_ready_cycle_export_is_not_refused_afterwards(win, qapp, mat_file, tmp_path, monkeypatch):
+    """With Start typed after labelling, the line said Ready and Export then
+    answered 'Grid Out of Sync', naming a button that no longer exists."""
+    import time
+    _two_cycle_labels(win, mat_file)
+    win._set_output_dir(tmp_path / "out")
+    win.start_spin.setValue(2.4)                   # labels follow: images 5, 6 from 3.2 s
+    refused = []
+    monkeypatch.setattr(
+        "labchart2cfd.gui.app.QMessageBox.critical",
+        staticmethod(lambda _p, title, text, *a, **k: refused.append(title)),
+    )
+    assert win.export_hint.text().startswith("Ready to export")
+
+    win._export()
+    deadline = time.time() + 30
+    while win._last_export_report is None and not refused and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    assert refused == [] and win._last_export_report is not None
+    if win._result_dialog is not None:
+        win._result_dialog.close()
+
+
+# ------------------------------------------------------ cautions that were missing
+
+def test_reorder_parts_also_warns_about_a_default_temporal_res(win, mat_file):
+    """Nothing in this method warned about Temporal Res at all."""
+    from labchart2cfd.processing.profile_assembly import ProfilePart
+    _ct_step_selected(win, mat_file, "parts")
+    win.subject_edit.setText("S1")
+    win._parts.append(ProfilePart(start_image=1, end_image=3, label=""))
+    win._refresh_parts_list()
+
+    assert win.export_hint.property("state") == "caution"
+    assert "default" in win.export_hint.text()
+
+    win.ct_temporal_res_spin.lineEdit().returnPressed.emit()
+    assert win.export_hint.property("state") == "ready"
+
+
+def test_focus_leaving_the_box_does_not_confirm_temporal_res(win, mat_file):
+    """Tabbing through section 4, or clicking the box to read it, cleared
+    the warning."""
+    _ct_step_selected(win, mat_file, "landmarks")
+
+    win.ct_temporal_res_spin.editingFinished.emit()            # focus left, value untouched
+
+    assert not win._ct_dt_confirmed
+
+
+def test_a_parts_grid_that_is_not_the_scan_is_amber(win, mat_file):
+    """The grid's image count is the user's own and may differ from the scan
+    on purpose. But a grid of 2.25 s over a 3 s scan passed in green."""
+    from labchart2cfd.processing.profile_assembly import ProfilePart
+    _ct_step_selected(win, mat_file, "parts")
+    win.subject_edit.setText("S1")
+    win.ct_temporal_res_spin.lineEdit().returnPressed.emit()
+    win._parts.append(ProfilePart(start_image=1, end_image=3, label=""))
+    win._refresh_parts_list()
+    assert win.export_hint.property("state") == "ready"
+
+    win.synth_images_spin.setValue(11)             # 2.2 s of a 3 s scan
+
+    hint = win.export_hint.text()
+    assert win.export_hint.property("state") == "caution"
+    assert "2.000 s to 4.200 s" in hint and "2.000 s to 5.000 s" in hint
+
+
+def test_selecting_another_step_counts_its_images_for_the_parts_grid(win, mat_file, tmp_path):
+    """The grid's count was set from the first step selected and never
+    again, so a second, shorter scan was cut with the first one's count and
+    the export ran past its end under a green line."""
+    from tests.test_gui_view import _recording_with_steps
+    two_steps = _recording_with_steps(mat_file, tmp_path, [(1.0, 3.0), (6.0, 7.0)])
+    _ct_step_selected(win, two_steps, "parts")
+    assert win.synth_images_spin.value() == 10
+
+    win.ct_step_spin.setValue(2)
+    win._select_ct_step()
+
+    assert win.synth_images_spin.value() == 5
+
+
+def test_a_grid_count_typed_by_the_user_survives_another_step(win, mat_file, tmp_path):
+    from tests.test_gui_view import _recording_with_steps
+    two_steps = _recording_with_steps(mat_file, tmp_path, [(1.0, 3.0), (6.0, 7.0)])
+    _ct_step_selected(win, two_steps, "parts")
+    win.synth_images_spin.setValue(8)              # the user's own number
+
+    win.ct_step_spin.setValue(2)
+    win._select_ct_step()
+
+    assert win.synth_images_spin.value() == 8
+
+
+def test_landmarks_on_the_same_image_are_amber_and_say_so(win, mat_file):
+    """Inhale and exhale marked at the same zero crossing select one image
+    out of 15, under a green line."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+    win.ct_temporal_res_spin.lineEdit().returnPressed.emit()
+    win._mark_inhale_start()
+    win._on_click(ClickEvent(win.ax_bottom, 4.02))
+    win._mark_exhale_end()
+    win._on_click(ClickEvent(win.ax_bottom, 4.04))
+
+    assert win.export_hint.property("state") == "caution"
+    assert "same image" in win.export_hint.text()
+
+
+def test_refusing_and_cautioning_do_not_share_a_colour():
+    """Both were the same amber and differed only in their first words."""
+    from labchart2cfd.gui.theme import EXPORT_HINT_COLORS
+
+    assert len(set(EXPORT_HINT_COLORS.values())) == 3
+    assert set(EXPORT_HINT_COLORS) == {"blocked", "caution", "ready"}
+
+
+# ------------------------------------------------------------ layout leftovers
+
+def test_the_result_panel_shows_every_row_whole(qapp, tmp_path):
+    """In the reorder parts panel the image order stopped after '6,' and
+    another row was cut mid sentence: wrapped labels in a form lose height."""
+    from labchart2cfd.gui.dialogs import ExportResultDialog
+    order = ",".join(str(i) for i in list(range(6, 21)) + list(range(1, 6)))
+    dialog = ExportResultDialog({
+        "folder": tmp_path, "files": [tmp_path / "S1FlowProfile.csv"],
+        "summary": [("Image order (original numbers)", order),
+                    ("Time", "starts at 0 in the profile; the reorder map keeps recording time"),
+                    ("Odd <text> & more", "a < b")],
+        "warnings": [], "plot": None,
+    })
+    dialog.show()
+    qapp.processEvents()
+
+    text = dialog.summary_label.text()
+    assert order in text and "keeps recording time" in text
+    assert "a &lt; b" in text                      # file text is shown, not read as markup
+    needed = dialog.summary_label.heightForWidth(dialog.summary_label.width())
+    assert dialog.summary_label.height() >= needed
+    dialog.close()
+
+
+def test_a_short_method_page_does_not_keep_the_height_of_the_long_one(win, qapp):
+    """Section 5 kept 800 px for the landmarks page, the height of the parts
+    page, so blank white followed its three buttons."""
+    win.show()
+    win.workflow_combo.setCurrentText("CT")
+    qapp.processEvents()
+    parts_height = win.ct_method_stack.height()
+
+    choose_ct_method(win, "landmarks")
+    qapp.processEvents()
+
+    assert win.ct_method_stack.height() < parts_height * 0.6
+    assert win.ct_method_stack.currentWidget() is win.landmarks_page
+
+
+def test_the_banner_says_how_to_use_a_window_that_is_not_a_step(win, mat_file):
+    """Steps were found, the user wanted another window, and nothing said how."""
+    win.workflow_combo.setCurrentText("CT")
+    open_block(win, mat_file)
+
+    assert "Trigger to None" in win.mode_banner.text()
