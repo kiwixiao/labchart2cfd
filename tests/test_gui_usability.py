@@ -659,3 +659,259 @@ def test_the_export_line_looks_different_when_ready(win, mat_file):
     _ready(win, mat_file)
 
     assert win.export_hint.property("state") == "ready"
+
+
+# ------------------- the retest: a green line must mean the plot is what is exported
+
+def _grid_starts(win):
+    """Times of the step grid lines drawn on the top plot."""
+    lines = [a for a in win._ct_interval_markers if hasattr(a, "get_xdata") and a.axes is win.ax_top]
+    return sorted(round(float(a.get_xdata()[0]), 6) for a in lines)
+
+
+def test_the_step_grid_follows_the_window_after_an_applied_shift(win, mat_file):
+    """Apply a shift, then change Temporal Res: the grid was redrawn from the
+    step edge while the export used the shifted window, so a landmark sat on
+    image 5 on the plot and image 4 in the file, under a green line."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.ct_shift_slider.setValue(300)
+    win._apply_ct_correction()
+    assert win.start_spin.value() == pytest.approx(2.3)
+
+    win.ct_temporal_res_spin.setValue(250.0)
+
+    grid = _grid_starts(win)
+    assert grid[0] == pytest.approx(2.3)                       # from Start, not the step edge
+    assert len(grid) == win.ct_total_images_spin.value() + 1   # N images, N + 1 lines
+    assert win.ct_total_images_spin.value() == 12              # 3 s at 250 ms
+    assert "Correction applied" not in win.status_bar.currentMessage()
+
+
+def test_the_step_grid_follows_a_typed_start(win, mat_file):
+    """Typing Start moved the window. The plot kept 15 images from 2.0 s
+    while the export wrote the images of the new window."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+
+    win.start_spin.setValue(3.0)
+
+    grid = _grid_starts(win)
+    assert grid[0] == pytest.approx(3.0) and grid[-1] == pytest.approx(5.0)
+    assert win.ct_total_images_spin.value() == 10
+    assert "10 images" in win.export_hint.text()
+
+
+def test_a_step_number_that_is_not_the_selected_step_holds_the_export_back(win, tmp_path, mat_file):
+    """Step # was changed to 2 without pressing Select step, and step 1 was
+    exported under a box that said 2."""
+    from tests.test_gui_view import _recording_with_steps
+    two_steps = _recording_with_steps(mat_file, tmp_path, [(1.0, 2.0), (6.0, 8.0)])
+    _ct_step_selected(win, two_steps, "landmarks")
+    win.subject_edit.setText("S1")
+    assert win.export_hint.text().startswith("Ready to export")
+
+    win.ct_step_spin.setValue(2)
+
+    hint = win.export_hint.text()
+    assert hint.startswith("Before export") and "Select step" in hint and "step 1" in hint
+
+    win._select_ct_step()
+    assert win.export_hint.text().startswith("Ready to export")
+
+
+def test_a_previewed_shift_holds_a_parts_export_back_too(win, mat_file):
+    from labchart2cfd.processing.profile_assembly import ProfilePart
+    _ct_step_selected(win, mat_file, "parts")
+    win.subject_edit.setText("S1")
+    win._parts.append(ProfilePart(start_image=1, end_image=3, label=""))
+    win._refresh_parts_list()
+    assert win.export_hint.text().startswith("Ready to export")
+
+    win.ct_shift_slider.setValue(300)
+
+    assert "Apply shift and image count" in win.export_hint.text()
+
+
+def test_the_pending_blocker_says_what_is_in_force_and_where_the_button_is(win, mat_file):
+    """'Put the value back' did not say what the value was."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+
+    win.ct_shift_slider.setValue(300)
+
+    hint = win.export_hint.text()
+    assert "300 ms on screen, 0 ms in force" in hint and "4 CT scan" in hint
+
+
+# ------------------------------------------------ warnings are not shown in green
+
+def test_a_window_that_is_not_whole_images_is_amber_not_green(win, mat_file):
+    """'(the window is 26.67 images long)' was printed in the colour that
+    means go."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+    win._ct_dt_confirmed = True
+    win._mark_inhale_start()
+    win._on_click(ClickEvent(win.ax_bottom, 4.0))
+    win._update_export_hint()
+    assert win.export_hint.property("state") == "ready"
+
+    win.ct_temporal_res_spin.setValue(180.0)
+
+    assert win.export_hint.property("state") == "caution"
+    assert win.export_hint.text().startswith("Ready to export")    # still allowed
+
+
+def test_a_ct_export_with_nothing_marked_is_amber(win, mat_file):
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+    win._ct_dt_confirmed = True
+    win._update_export_hint()
+
+    assert "no landmark marked" in win.export_hint.text()
+    assert win.export_hint.property("state") == "caution"
+
+
+def test_temporal_res_is_unconfirmed_until_the_user_touches_it(win, mat_file):
+    """200 ms is the program's default, and a wrong value that divides the
+    step evenly passed in green with nothing to notice."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+    win._mark_inhale_start()
+    win._on_click(ClickEvent(win.ax_bottom, 4.0))
+
+    hint = win.export_hint.text()
+    assert win.export_hint.property("state") == "caution"
+    assert "default" in hint and "confirm" in hint
+
+    win.ct_temporal_res_spin.editingFinished.emit()            # Enter in the box
+
+    assert win.export_hint.property("state") == "ready"
+    assert "default" not in win.export_hint.text()
+
+
+def test_another_recording_needs_its_temporal_res_confirmed_again(win, mat_file, tmp_path):
+    import shutil
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.ct_temporal_res_spin.editingFinished.emit()
+    assert win._ct_dt_confirmed
+    other = tmp_path / "other.mat"
+    shutil.copy(mat_file, other)
+
+    win.open_recording(other)
+
+    assert not win._ct_dt_confirmed
+
+
+# ------------------------------------------------------ the screen agrees with itself
+
+def test_before_a_step_is_selected_no_ct_click_mode_can_be_armed(win, mat_file):
+    """The banner said clicks do nothing, yet Pick on plot and Mark inhale
+    start took clicks, and a part was built on a grid of one image."""
+    win.workflow_combo.setCurrentText("CT")
+    open_block(win, mat_file)
+
+    win._arm_add_part()
+    assert not win._capturing_part
+    choose_ct_method(win, "landmarks")
+    win._mark_inhale_start()
+    assert win._ct_landmark_mode is None
+    choose_ct_method(win, "cycle")
+    win.cycle_mode_btn.setChecked(True)
+    assert not win._ct_cycle_mode and not win.cycle_mode_btn.isChecked()
+    assert "Select step" in win.status_bar.currentMessage()
+
+
+def test_a_click_on_a_scan_step_selects_it(win, tmp_path, mat_file):
+    """The step could only be chosen by number in a box."""
+    from tests.test_gui_view import _recording_with_steps
+    two_steps = _recording_with_steps(mat_file, tmp_path, [(1.0, 2.0), (6.0, 8.0)])
+    win.workflow_combo.setCurrentText("CT")
+    choose_ct_method(win, "landmarks")
+    open_block(win, two_steps)
+    assert "click" in win.mode_banner.text().lower()
+
+    win._on_click(ClickEvent(win.ax_top, 7.0))     # inside the second step
+
+    assert win.ct_step_spin.value() == 2
+    assert (win.start_spin.value(), win.end_spin.value()) == (6.0, 8.0)
+
+def test_a_click_outside_every_step_selects_nothing(win, mat_file):
+    win.workflow_combo.setCurrentText("CT")
+    open_block(win, mat_file)
+
+    win._on_click(ClickEvent(win.ax_top, 8.0))
+
+    assert win._ct_selected_step is None
+
+
+def test_the_time_window_line_does_not_contradict_the_banner_in_ct(win, mat_file):
+    """Banner: 'Clicks on the plot do nothing until then.' Time window:
+    'Not set yet. Click the plot twice'."""
+    win.workflow_combo.setCurrentText("CT")
+    open_block(win, mat_file)
+
+    assert "Click the plot twice" not in win.window_readout.text()
+    assert "scan step" in win.window_readout.text().lower()
+
+
+def test_a_right_click_cancels_an_armed_landmark(win, mat_file):
+    """It answered 'Time markers cleared' and the banner stayed on 'Click
+    the plot where inhale starts'."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win._mark_inhale_start()
+
+    win._on_click(ClickEvent(win.ax_bottom, 3.0, button=3))
+
+    assert win._ct_landmark_mode is None and win._ct_inhale_start is None
+    assert "inhale starts" not in win.mode_banner.text()
+
+
+def test_clear_markers_keeps_the_selected_step_and_its_grid(win, mat_file):
+    """It removed the image grid and the step band without a question, while
+    the banner still said a step was selected."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    grid = len(win._ct_interval_markers)
+    assert grid > 0
+
+    win.clear_markers_btn.click()
+
+    assert len(win._ct_interval_markers) == grid and win._ct_step_markers
+
+
+def test_leaving_the_parts_method_removes_its_grid_from_the_plot(win, mat_file):
+    _ct_step_selected(win, mat_file, "parts")
+    win._draw_synth_grid(quiet=True)
+    assert win._grid_artists
+
+    choose_ct_method(win, "landmarks")
+
+    assert win._grid_artists == []
+
+
+def test_a_hand_window_removes_the_trigger_range_band(win, mat_file):
+    """The green 'selected range' band stayed beside a window clicked later."""
+    open_block(win, mat_file)
+    win._mark_trigger_range()
+    assert win._trigger_markers
+
+    win._on_click(ClickEvent(win.ax_bottom, 6.0))
+
+    assert win._trigger_markers == []
+
+
+def test_pickers_that_are_off_look_off(win):
+    """The palette gave disabled pickers the same text colour as live ones."""
+    from labchart2cfd.gui.theme import STYLE_SHEET
+
+    assert "QComboBox:disabled" in STYLE_SHEET
+
+
+def test_the_result_rows_are_short_enough_to_read_whole(win, mat_file):
+    """In the CT and phase contrast panels the conversion row was cut off."""
+    win.workflow_combo.setCurrentText("Phase contrast (xenon)")
+    open_block(win, mat_file)
+    assert max(len(value) for _label, value in win._export_provenance()) <= 60
+
+    win.workflow_combo.setCurrentText("MRI")
+    assert max(len(value) for _label, value in win._export_provenance()) <= 60

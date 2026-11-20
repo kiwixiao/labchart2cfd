@@ -58,6 +58,8 @@ QLabel#modeBanner {{ padding: 7px 10px; border-radius: 3px; font-size: 13px; }}
 QLabel#hintLabel {{ color: {MUTED_TEXT}; }}
 QLabel#exportHint[state="blocked"] {{ color: #8a4b00; }}
 QLabel#exportHint[state="ready"] {{ color: #17663a; }}
+QLabel#exportHint[state="caution"] {{ color: #8a4b00; }}
+QComboBox:disabled, QAbstractSpinBox:disabled {{ color: #a3a9b3; background: #eef0f3; }}
 QLabel#captureHint {{ color: #b3261e; font-weight: bold; }}
 QLabel#readout {{ background: #f7f8fa; color: {TEXT}; padding: 2px 6px; }}
 QLabel#dialogHeading {{ font-size: 15px; font-weight: bold; }}

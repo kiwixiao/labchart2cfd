@@ -40,6 +40,7 @@ def test_banner_follows_an_armed_landmark_and_returns_after_the_click(win, mat_f
     win.workflow_combo.setCurrentText("CT")
     choose_ct_method(win, "landmarks")
     open_block(win, mat_file)
+    win._select_ct_step()                          # nothing arms before a step
 
     win._mark_inhale_start()
     assert "inhale" in _banner(win)
@@ -47,7 +48,10 @@ def test_banner_follows_an_armed_landmark_and_returns_after_the_click(win, mat_f
 
     win._on_click(ClickEvent(win.ax_bottom, 3.0))
 
-    assert "inhale" not in _banner(win)          # the single click is spent
+    # The single click is spent: back to the idle banner, which names the
+    # button to press for the next mark.
+    assert win.mode_banner.property("kind") == "idle"
+    assert "inhale starts" not in _banner(win)
     assert win.ct_inhale_label.text() == "3.000 s"
 
 
@@ -56,8 +60,7 @@ def test_an_armed_landmark_click_does_not_move_the_window(win, mat_file):
     win.workflow_combo.setCurrentText("CT")
     choose_ct_method(win, "landmarks")
     open_block(win, mat_file)
-    win.start_spin.setValue(2.0)
-    win.end_spin.setValue(5.0)
+    win._select_ct_step()                          # Start 2.0, End 5.0
 
     win._mark_exhale_end()
     win._on_click(ClickEvent(win.ax_bottom, 4.0))
@@ -71,13 +74,15 @@ def test_banner_announces_cycle_labelling(win, mat_file):
     win.workflow_combo.setCurrentText("CT")
     choose_ct_method(win, "cycle")
     open_block(win, mat_file)
+    win._select_ct_step()
 
     win.cycle_mode_btn.setChecked(True)
     assert "cycle" in _banner(win)
     assert win.mode_banner.property("kind") == "active"
 
     win.cycle_mode_btn.setChecked(False)
-    assert "cycle" not in _banner(win)
+    assert win.mode_banner.property("kind") == "idle"
+    assert "labelling cycle frames" not in _banner(win)
 
 
 def test_banner_explains_why_plain_clicks_do_nothing_in_parts_method(win, mat_file):

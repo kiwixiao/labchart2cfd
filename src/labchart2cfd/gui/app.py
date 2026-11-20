@@ -151,16 +151,18 @@ _BANNERS = {
     "toolbar": ("blocked",
                 "The zoom or pan tool is on, so clicks on the plot are "
                 "ignored. Turn the tool off in the toolbar to place markers."),
-    "inhale_start": ("active", "Click the plot where inhale starts."),
-    "exhale_end": ("active", "Click the plot where exhale ends."),
+    "inhale_start": ("active",
+                     "Click the plot where inhale starts. Right click cancels."),
+    "exhale_end": ("active",
+                   "Click the plot where exhale ends. Right click cancels."),
     "cycle": ("active",
               "Labelling cycle frames: click the images in breathing order. "
               "A click takes the image that starts at the nearest grid line. "
               "Right click removes the last label."),
     "ct_need_step": ("idle",
-                     "Scan steps are marked in orange. Choose one under "
-                     "4 CT scan and press Select step. Clicks on the plot do "
-                     "nothing until then."),
+                     "Scan steps are named along the top of the plot (Step 1, "
+                     "Step 2, ...). Click one on the plot to select it, or "
+                     "choose it under 4 CT scan and press Select step."),
     "ct_landmarks_idle": ("idle",
                           "Scan step selected. Press Mark inhale start or "
                           "Mark exhale end, then click the plot. Plain clicks "
@@ -276,6 +278,10 @@ class FlowProfileApp(QMainWindow):
         # The shading of the window on each detail axes (see _update_window_span).
         self._window_spans: dict = {}
         self._placing_marker = False
+        # True once the user has entered or confirmed Temporal Res for this
+        # recording. The program cannot measure it, and its default looks
+        # like a value.
+        self._ct_dt_confirmed = False
         # Start Shift and Images in step as last applied to Start and End, to
         # tell a value that is only previewed from one that is in force.
         self._ct_applied_shift = 0
@@ -808,6 +814,45 @@ class FlowProfileApp(QMainWindow):
             return "ct_cycle_idle" if self._ct_method() == "cycle" else "ct_landmarks_idle"
         return "window"
 
+    def _select_step_at(self, x_time: float) -> None:
+        """Select the scan step under a click, if there is one.
+
+        A step could only be chosen by its number in a box. A short step in
+        a long recording is a hair line, so a click near it counts too.
+        """
+        if x_time is None or not self._ct_steps:
+            return
+        lo, hi = self.ax_top.get_xlim()
+        reach = 0.01 * (hi - lo)
+        for step in self._ct_steps:
+            if step["start_time"] - reach <= x_time <= step["end_time"] + reach:
+                self.ct_step_spin.setValue(step["index"])
+                self._select_ct_step()
+                return
+        self.status_bar.showMessage(
+            "No scan step there. Click on one of the steps named along the top."
+        )
+
+    def _refuse_before_step(self) -> bool:
+        """True, with a line saying why, while a step must be selected first.
+
+        The banner said clicks do nothing until a step is selected, while
+        Pick on plot and Mark inhale start armed anyway, and a part was built
+        on a grid of one image at 0 s.
+        """
+        if not self._ct_needs_step():
+            return False
+        self.status_bar.showMessage(
+            "Select the scan step first: click it on the plot, or press "
+            "Select step under 4 CT scan."
+        )
+        return True
+
+    def _confirm_temporal_res(self) -> None:
+        """The user typed Temporal Res, or pressed Enter in its box."""
+        self._ct_dt_confirmed = True
+        self._update_export_hint()
+
     def _ct_needs_step(self) -> bool:
         """True in CT while scan steps were found and none is selected yet.
 
@@ -829,10 +874,16 @@ class FlowProfileApp(QMainWindow):
             return []
         pending = []
         if self.ct_shift_spin.value() != self._ct_applied_shift:
-            pending.append(f"Start Shift {self.ct_shift_spin.value()} ms")
+            pending.append(
+                f"Start Shift {self.ct_shift_spin.value()} ms on screen, "
+                f"{self._ct_applied_shift:g} ms in force"
+            )
         if (self._ct_applied_images is not None
                 and self.ct_total_images_spin.value() != self._ct_applied_images):
-            pending.append(f"Images in step {self.ct_total_images_spin.value()}")
+            pending.append(
+                f"Images in step {self.ct_total_images_spin.value()} on screen, "
+                f"{self._ct_applied_images} in force"
+            )
         return pending
 
     def _refresh_banner(self) -> None:
@@ -1136,12 +1187,14 @@ class FlowProfileApp(QMainWindow):
         # In the form, under its box, so it reads as the same setting.
         form.addRow("", self.ct_shift_slider)
         section.add_layout(form)
+        # Two short lines, the one that decides the export first.
         section.add_widget(self._hint(
             "Temporal Res is the time one image covers. The program cannot "
-            "measure it: take it from your image series. Images in step is "
-            "counted from the step. If the step edge is not where the first "
-            "image starts, Start Shift moves the scan window earlier "
-            "(negative) or later; the slider does the same."
+            "measure it: enter it from your image series."
+        ))
+        section.add_widget(self._hint(
+            "Start Shift moves the scan window earlier (negative) or later, "
+            "for a step edge that is not where the first image starts."
         ))
 
         apply_correction_btn = QPushButton("Apply shift and image count")
@@ -1151,10 +1204,10 @@ class FlowProfileApp(QMainWindow):
         )
         apply_correction_btn.clicked.connect(self._apply_ct_correction)
         section.add_widget(apply_correction_btn)
-        section.add_widget(self._hint(
+        apply_correction_btn.setToolTip(
             "Sets Start to the step start plus the shift, and End to Start "
             "plus Images in step times Temporal Res."
-        ))
+        )
         return section
 
     def _build_ct_method_section(self) -> QWidget:
@@ -1259,16 +1312,13 @@ class FlowProfileApp(QMainWindow):
         layout.addWidget(self.synth_dt_warn_label)
 
         layout.addWidget(self._hint(
-            "On the plot, the grey numbers above the plot are this grid: the "
-            "images that are cut into parts and exported. The blue numbers "
-            "inside the plot are the images counted in the scan step "
-            "(section 4). They match until you change Images in grid or "
-            "Grid offset."
+            "Grey numbers above the plot: this grid, which is cut into parts "
+            "and exported. Blue numbers inside the plot: the scan step "
+            "(section 4)."
         ))
         layout.addWidget(self._hint(
-            "An image is the slice between two grid lines. Set From and To "
-            "(or use Pick on plot), then Add part. The order of the list is "
-            "the order of the breath. From equal to To selects one image."
+            "Set From and To (or use Pick on plot), then Add part. The order "
+            "of the list is the order of the breath."
         ))
 
         # Range entry: explicit begin/end image numbers.
@@ -1459,13 +1509,17 @@ class FlowProfileApp(QMainWindow):
         self.start_spin.valueChanged.connect(lambda _v: self._update_export_hint())
         self.end_spin.valueChanged.connect(lambda _v: self._update_export_hint())
         # Everything the list of blockers reads refreshes the line.
+        self.ct_temporal_res_spin.editingFinished.connect(self._confirm_temporal_res)
         for box in (self.ct_temporal_res_spin, self.synth_dt_spin, self.synth_images_spin,
-                    self.ct_shift_spin, self.ct_total_images_spin):
+                    self.ct_shift_spin, self.ct_total_images_spin, self.ct_step_spin):
             box.valueChanged.connect(lambda _v: self._update_export_hint())
         self.start_spin.valueChanged.connect(lambda _v: self._update_window_readout())
         self.end_spin.valueChanged.connect(lambda _v: self._update_window_readout())
         self.start_spin.valueChanged.connect(lambda _v: self._update_window_span())
         self.end_spin.valueChanged.connect(lambda _v: self._update_window_span())
+        # The CT step grid shows the images of the window in force.
+        self.start_spin.valueChanged.connect(lambda _v: self._redraw_ct_intervals_if_active())
+        self.end_spin.valueChanged.connect(lambda _v: self._redraw_ct_intervals_if_active())
 
     def _update_window_span(self) -> None:
         """Shade the window on both plots, exactly where Start and End are.
@@ -1509,7 +1563,9 @@ class FlowProfileApp(QMainWindow):
     def _update_window_readout(self) -> None:
         """Show the window length, or say why the window is not usable yet."""
         start, end = self.start_spin.value(), self.end_spin.value()
-        if start == 0 and end == 0:
+        if start == 0 and end == 0 and self._workflow_name() == "CT":
+            text = "Not set yet. Selecting the scan step in section 4 sets it."
+        elif start == 0 and end == 0:
             text = "Not set yet. Click the plot twice, or type the times."
         elif end <= start:
             text = "End must be after Start."
@@ -1563,6 +1619,7 @@ class FlowProfileApp(QMainWindow):
             return
         self._workflow_index_shown = index
         self._update_picker_state()
+        self._update_window_readout()
         is_ct = self._workflow_name() == "CT"
         self.study_hint.setText(
             self.workflow_combo.itemData(
@@ -1667,6 +1724,11 @@ class FlowProfileApp(QMainWindow):
                 {"landmarks": self._clear_ct_landmarks,
                  "cycle": self._clear_cycle_labels,
                  "parts": self._clear_parts}[old]()
+            if old == "parts":
+                # Its grey numbers stayed above the plot in the other
+                # methods, where nothing explains them.
+                self._clear_synth_grid()
+                self.canvas.draw_idle()
             self._active_ct_method = new
         index = self.ct_method_combo.currentIndex()
         self.ct_method_hint.setText(
@@ -1756,6 +1818,8 @@ class FlowProfileApp(QMainWindow):
         self._outdir_user_set = False
         self._update_outdir()
         self._accepted_channel_warnings = None  # another recording, another answer
+        if path != getattr(self, "_loaded_filepath", None):
+            self._ct_dt_confirmed = False       # and another image series
         self._load_and_overview()
         if self.data is None:  # the load failed and has already said why
             self.file_label.setText(f"Could not open {self.mat_filepath.name}")
@@ -1866,12 +1930,20 @@ class FlowProfileApp(QMainWindow):
                     f"raise Temporal Res ({dt_ms:g} ms gives {images} images in "
                     f"this window, the limit is {self._MAX_GRID_IMAGES})"
                 )
+        if self._workflow_name() == "CT" and self._ct_selected_step is not None:
+            # These hold for every CT method. Each is a state where the plot
+            # showed one thing and the files would hold another.
             pending = self._ct_pending_correction()
             if pending:
                 blockers.append(
-                    "press Apply shift and image count, or put the value back "
-                    f"({' and '.join(pending)} on screen, not applied to Start "
-                    "and End)"
+                    "press Apply shift and image count (4 CT scan), or put the "
+                    f"value back ({'; '.join(pending)})"
+                )
+            selected = self._ct_selected_step["index"]
+            if self.ct_step_spin.value() != selected:
+                blockers.append(
+                    f"press Select step (Step # shows {self.ct_step_spin.value()}, "
+                    f"but step {selected} is the one selected)"
                 )
         return blockers
 
@@ -1900,7 +1972,9 @@ class FlowProfileApp(QMainWindow):
     def _update_export_hint(self) -> None:
         """State what is missing, or exactly what Export will write."""
         blockers = self._export_blockers()
-        self._set_export_state("blocked" if blockers else "ready")
+        cautions = [] if blockers else self._export_cautions()
+        self._set_export_state(
+            "blocked" if blockers else "caution" if cautions else "ready")
         if blockers:
             self.export_hint.setText("Before export: " + ", ".join(blockers) + ".")
             return
@@ -1915,7 +1989,36 @@ class FlowProfileApp(QMainWindow):
                         + ", " + self._ct_image_count_text())
             else:
                 what = f"{study}, {window}"
-        self.export_hint.setText(f"Ready to export: {what}. {self._export_sources()}.")
+        check = f" Check: {'; '.join(cautions)}." if cautions else ""
+        self.export_hint.setText(
+            f"Ready to export: {what}. {self._export_sources()}.{check}")
+
+    def _export_cautions(self) -> List[str]:
+        """Things an export may go ahead with but the user should look at.
+
+        They used to sit inside a green line that began "Ready to export",
+        the colour and the words that mean go. With any of them the line is
+        amber and ends with what to check.
+        """
+        if self._workflow_name() != "CT" or self._uses_assembly():
+            return []
+        cautions = []
+        if not self._ct_dt_confirmed:
+            cautions.append(
+                f"Temporal Res {self.ct_temporal_res_spin.value():g} ms is the "
+                "program's default, confirm it against your image series "
+                "(click its box and press Enter)"
+            )
+        dt_s = self.ct_temporal_res_spin.value() / 1000.0
+        exact = (self.end_spin.value() - self.start_spin.value()) / dt_s
+        if abs(exact - round(exact)) > 0.05:
+            cautions.append("the window is not a whole number of images")
+        frames, _inhale, _exhale = self._ct_export_inputs()
+        nothing = (not frames if self._ct_method() == "cycle"
+                   else self._ct_inhale_start is None and self._ct_exhale_end is None)
+        if nothing:
+            cautions.append("nothing is marked, so the scan is exported as recorded")
+        return cautions
 
     def _ct_image_count_text(self) -> str:
         """Temporal Res and the image count that follows from it.
@@ -1966,8 +2069,7 @@ class FlowProfileApp(QMainWindow):
         ]
         if phase:
             facts += [
-                ("Mass flow", "from the voltage on the flow channel, scaled by "
-                              "calibration, xenon at 5.761 kg/m3"),
+                ("Mass flow", "voltage scaled by calibration, xenon 5.761 kg/m3"),
                 ("Pressure", "no pressure output for this study type"),
             ]
         else:
@@ -1975,8 +2077,7 @@ class FlowProfileApp(QMainWindow):
             if pressure > 0:
                 facts.append(("Pressure channel", self.pressure_row_spin.currentText()))
             facts += [
-                ("Mass flow", "flow in L/s x 0.001 x 1.2 kg/m3 (air), sign "
-                              "inverted against the plot"),
+                ("Mass flow", "L/s x 0.001 x 1.2 kg/m3 (air), sign inverted"),
                 ("Pressure", "cmH2O x 98.0665 = Pa" if pressure > 0
                  else "no pressure channel chosen"),
             ]
@@ -3094,7 +3195,9 @@ class FlowProfileApp(QMainWindow):
                 self.status_bar.showMessage(
                     "Reorder parts: press 'Pick on plot' first to select images."
                 )
-            elif mode in ("ct_need_step", "ct_landmarks_idle", "ct_cycle_idle"):
+            elif mode == "ct_need_step":
+                self._select_step_at(event.xdata)
+            elif mode in ("ct_landmarks_idle", "ct_cycle_idle"):
                 self.status_bar.showMessage(_BANNERS[mode][1])
             else:
                 self._add_time_marker(event.xdata)
@@ -3103,6 +3206,10 @@ class FlowProfileApp(QMainWindow):
                 self._cancel_part_capture()
             elif mode == "cycle":
                 self._remove_last_cycle_label()
+            elif mode in ("inhale_start", "exhale_end"):
+                # An armed landmark had no way out but placing it.
+                self._ct_landmark_mode = None
+                self.status_bar.showMessage("Landmark not placed.")
             else:
                 self._clear_time_markers()
         self._refresh_banner()
@@ -3133,6 +3240,12 @@ class FlowProfileApp(QMainWindow):
         # nothing, so the visible markers stopped matching Start/End.
         if len(self._time_markers) >= 2:
             self._clear_time_markers()
+        # A window clicked by hand replaces one taken from triggers, so the
+        # band of the trigger range no longer shows what is in force.
+        if self._trigger_markers:
+            _remove_all(self._trigger_markers)
+            self._trigger_markers.clear()
+            self._refresh_top_legend()
 
         # Draw on top subplot
         line_top = self.ax_top.axvline(x=x_time, color="green", linestyle="--", linewidth=1, alpha=0.8)
@@ -3335,8 +3448,12 @@ class FlowProfileApp(QMainWindow):
         self._clear_time_markers()
         _remove_all(self._trigger_markers)
         self._trigger_markers.clear()
-        self._clear_ct_step_markers()
-        self._clear_ct_interval_markers()
+        # A selected step and its image grid are not markers: they are the
+        # scan the window is set to. Removing them left a banner that said a
+        # step was selected over a plot that showed none.
+        if self._ct_selected_step is None:
+            self._clear_ct_step_markers()
+            self._clear_ct_interval_markers()
         self._clear_ct_landmarks()
         self._clear_cycle_labels()  # drop stale cycle frames + artists
         if self.ax_top is not None:
@@ -3473,6 +3590,8 @@ class FlowProfileApp(QMainWindow):
 
     def _mark_inhale_start(self) -> None:
         """Activate click mode to place inhale start landmark."""
+        if self._refuse_before_step():
+            return
         self._claim_click_mode()
         self._ct_landmark_mode = "inhale_start"
         self.status_bar.showMessage("Click on plot to mark INHALE START")
@@ -3480,6 +3599,8 @@ class FlowProfileApp(QMainWindow):
 
     def _mark_exhale_end(self) -> None:
         """Activate click mode to place exhale end landmark."""
+        if self._refuse_before_step():
+            return
         self._claim_click_mode()
         self._ct_landmark_mode = "exhale_end"
         self.status_bar.showMessage("Click on plot to mark EXHALE END")
@@ -3533,10 +3654,15 @@ class FlowProfileApp(QMainWindow):
             start_t = self._ct_detected_start
             n_images = manual_frames
         else:
-            # Auto mode: compute from step boundaries
-            step = self._ct_selected_step
-            start_t = step["start_time"]
-            end_t = step["end_time"]
+            # The grid in force: from Start, as many images as the window
+            # holds, which is exactly what the export cuts. It used to be
+            # drawn from the step edge, so after an applied shift or a typed
+            # Start the plot numbered images the files did not contain.
+            start_t = self.start_spin.value()
+            end_t = self.end_spin.value()
+            if end_t <= start_t:  # no window yet: fall back to the step
+                step = self._ct_selected_step
+                start_t, end_t = step["start_time"], step["end_time"]
             n_images = compute_image_count(end_t - start_t, temporal_res_s)
 
         # A Temporal Res far too small for the step asks for a line per image
@@ -3780,6 +3906,11 @@ class FlowProfileApp(QMainWindow):
 
     def _on_cycle_mode_toggled(self, checked: bool) -> None:
         """Toggle cycle-labeling click mode."""
+        if checked and self._refuse_before_step():
+            self.cycle_mode_btn.blockSignals(True)
+            self.cycle_mode_btn.setChecked(False)
+            self.cycle_mode_btn.blockSignals(False)
+            return
         self._ct_cycle_mode = checked
         if checked:
             # Stop landmark placement AND part capture so clicks don't race.
@@ -4001,6 +4132,13 @@ class FlowProfileApp(QMainWindow):
         self._redraw_ct_intervals_if_active()
         self._refresh_synth_grid_if_active()
         self._update_grid_readout()
+        if self._ct_selected_step is not None and self._ct_interval_markers:
+            # Replaces a line about an earlier state, such as a correction.
+            # Not when the grid was refused: that line says why.
+            self.status_bar.showMessage(
+                f"Temporal Res {dt_ms:g} ms: "
+                f"{self.ct_total_images_spin.value()} images in the window."
+            )
 
     def _redraw_ct_intervals_if_active(self) -> None:
         """Redraw tab 3's fencepost grid after dt changes.
@@ -4171,6 +4309,8 @@ class FlowProfileApp(QMainWindow):
                 "Choose the CT study type and the 'Reorder image parts' "
                 "method first.",
             )
+            return
+        if self._refuse_before_step():
             return
         # Exclusive click mode: a pending landmark must not survive underneath.
         self._ct_landmark_mode = None
