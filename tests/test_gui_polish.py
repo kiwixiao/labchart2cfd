@@ -129,3 +129,158 @@ def test_each_banner_kind_has_its_own_colour():
     assert set(BANNER_COLORS) == {"idle", "active", "blocked"}
     backgrounds = {colors["background"] for colors in BANNER_COLORS.values()}
     assert len(backgrounds) == 3
+
+
+# ------------------------------------------------- native .adicht recordings
+
+def _fake_recording():
+    import numpy as np
+    from labchart2cfd.io.labchart import LabChartData
+
+    t = np.arange(0.0, 10.0, 0.001)
+    return LabChartData(
+        data_cell=[[np.zeros_like(t)], [np.sin(t)]], time_cell=[[t], [t]],
+        num_channels=2, num_blocks=1, titles=["TRIGGER", "FLOW"],
+    )
+
+
+def test_open_dialog_offers_native_recordings(win):
+    assert "*.adicht" in win._OPEN_FILTER
+    assert "*.mat" in win._OPEN_FILTER
+
+
+def test_a_dropped_adicht_file_is_accepted(win, tmp_path):
+    native = tmp_path / "rec.adicht"
+    native.write_bytes(b"")
+
+    assert win._dropped_recording(_mime_for(native)) == native
+
+
+def test_opening_an_adicht_shows_its_channels(win, tmp_path, monkeypatch):
+    """The native file opens like an export: no manual conversion step."""
+    native = tmp_path / "rec.adicht"
+    native.write_bytes(b"")
+    monkeypatch.setattr(
+        "labchart2cfd.gui.app.load_recording", lambda path, notes=None, progress=None: _fake_recording()
+    )
+
+    win.open_recording(native)
+
+    assert win._plot_mode == "overview"
+    assert win.flow_row_spin.itemText(1) == "2: FLOW"
+    assert "rec.adicht" in win.file_label.text()
+
+
+def test_what_the_reader_recomputed_or_left_out_is_shown(win, tmp_path, monkeypatch):
+    """A channel recomputed or left out must be said on screen, not only in a console."""
+    native = tmp_path / "rec.adicht"
+    native.write_bytes(b"")
+
+    def _load(path, notes=None, progress=None):
+        notes.append("LEFT OUT: channel 4 (VOL) carries a calculation.")
+        return _fake_recording()
+
+    monkeypatch.setattr("labchart2cfd.gui.app.load_recording", _load)
+
+    win.open_recording(native)
+
+    assert not win.load_notes.isHidden()
+    assert "LEFT OUT: channel 4 (VOL)" in win.load_notes.text()
+
+
+def test_load_notes_are_cleared_by_the_next_recording(win, tmp_path, monkeypatch, mat_file):
+    native = tmp_path / "rec.adicht"
+    native.write_bytes(b"")
+
+    def _load(path, notes=None, progress=None):
+        notes.append("LEFT OUT: channel 4 (VOL) carries a calculation.")
+        return _fake_recording()
+
+    monkeypatch.setattr("labchart2cfd.gui.app.load_recording", _load)
+    win.open_recording(native)
+    monkeypatch.undo()
+
+    win.open_recording(mat_file)
+
+    assert win.load_notes.isHidden()
+
+
+def test_a_refused_adicht_reports_the_readers_reason(win, tmp_path, monkeypatch):
+    bad = tmp_path / "rec.adicht"
+    bad.write_bytes(b"not a recording " * 100)
+    shown = []
+    monkeypatch.setattr(
+        "labchart2cfd.gui.app.QMessageBox.critical",
+        staticmethod(lambda _parent, _title, text, *a, **k: shown.append(text)),
+    )
+
+    win.open_recording(bad)
+
+    assert win.data is None
+    assert "ADInstruments" in shown[0]
+    assert "Could not open" in win.file_label.text()
+
+
+def test_the_wait_cursor_is_released_after_loading(win, mat_file, tmp_path, monkeypatch):
+    from PyQt5.QtWidgets import QApplication
+
+    win.open_recording(mat_file)
+    assert QApplication.overrideCursor() is None
+
+    bad = tmp_path / "rec.adicht"
+    bad.write_bytes(b"not a recording " * 100)
+    monkeypatch.setattr(
+        "labchart2cfd.gui.app.QMessageBox.critical", staticmethod(lambda *a, **k: None)
+    )
+    win.open_recording(bad)
+    assert QApplication.overrideCursor() is None      # also after a failed load
+
+
+def test_the_controls_are_locked_while_a_recording_loads(win, tmp_path, monkeypatch):
+    """The window keeps processing events during a long decode. A click then
+    must not export the previous recording under the new file's name."""
+    native = tmp_path / "rec.adicht"
+    native.write_bytes(b"")
+    seen = {}
+
+    def _load(path, notes=None, progress=None):
+        seen["sidebar"] = win.sidebar.isEnabled()
+        seen["menus"] = win.menuBar().isEnabled()
+        return _fake_recording()
+
+    monkeypatch.setattr("labchart2cfd.gui.app.load_recording", _load)
+
+    win.open_recording(native)
+
+    assert seen == {"sidebar": False, "menus": False}
+    assert win.sidebar.isEnabled() and win.menuBar().isEnabled()
+
+
+def test_the_controls_are_unlocked_after_a_failed_load(win, tmp_path, monkeypatch):
+    bad = tmp_path / "rec.adicht"
+    bad.write_bytes(b"not a recording " * 100)
+    monkeypatch.setattr(
+        "labchart2cfd.gui.app.QMessageBox.critical", staticmethod(lambda *a, **k: None)
+    )
+
+    win.open_recording(bad)
+
+    assert win.sidebar.isEnabled() and win.menuBar().isEnabled()
+
+
+def test_decoding_progress_reaches_the_status_bar(win, tmp_path, monkeypatch):
+    native = tmp_path / "rec.adicht"
+    native.write_bytes(b"")
+    seen = []
+
+    def _load(path, notes=None, progress=None):
+        progress(3, 10, "channel 2 FLOW, record 1")
+        seen.append(win.status_bar.currentMessage())
+        return _fake_recording()
+
+    monkeypatch.setattr("labchart2cfd.gui.app.load_recording", _load)
+
+    win.open_recording(native)
+
+    assert "3 of 10" in seen[0]
+    assert "channel 2 FLOW, record 1" in seen[0]

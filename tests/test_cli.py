@@ -131,3 +131,80 @@ def test_gui_subcommand_still_exists():
     # subcommand must never be removed.
     result = runner.invoke(cli_main.app, ["gui", "--help"])
     assert result.exit_code == 0
+
+
+# ------------------------------------------------------------ convert-adicht
+
+def test_convert_adicht_is_listed_as_a_command():
+    result = runner.invoke(cli_main.app, ["--help"])
+
+    assert result.exit_code == 0
+    assert "convert-adicht" in result.output
+
+
+def test_convert_adicht_refuses_a_file_that_is_not_a_recording(tmp_path):
+    """Exit code 2 and nothing written: the reader never guesses."""
+    junk = tmp_path / "rec.adicht"
+    junk.write_bytes(b"this is not a LabChart recording " * 100)
+    out_dir = tmp_path / "out"
+
+    result = runner.invoke(
+        cli_main.app, ["convert-adicht", str(junk), "--out", str(out_dir)]
+    )
+
+    assert result.exit_code == 2
+    assert not out_dir.exists() or not any(out_dir.iterdir())
+
+
+def test_convert_adicht_needs_an_output_folder_or_info(tmp_path):
+    junk = tmp_path / "rec.adicht"
+    junk.write_bytes(b"x")
+
+    result = runner.invoke(cli_main.app, ["convert-adicht", str(junk)])
+
+    assert result.exit_code == 1
+    assert "--out" in result.output and "--info" in result.output
+
+
+def test_convert_adicht_reports_a_missing_file(tmp_path):
+    result = runner.invoke(
+        cli_main.app,
+        ["convert-adicht", str(tmp_path / "absent.adicht"), "--out", str(tmp_path / "out")],
+    )
+
+    assert result.exit_code == 1
+    assert "not found" in result.output.lower()
+
+
+def _real_pair():
+    import os
+    from pathlib import Path
+
+    native = os.environ.get("LABCHART2CFD_ADICHT_FILE", "")
+    export = os.environ.get("LABCHART2CFD_ADICHT_MAT", "")
+    if native and export and Path(native).exists() and Path(export).exists():
+        return Path(native), Path(export)
+    return None
+
+
+def test_convert_adicht_writes_what_labchart_exports(tmp_path):
+    """One record of a real recording, converted, equals LabChart's export of it."""
+    import pytest
+    from labchart2cfd.io.labchart import load_labchart_mat
+
+    pair = _real_pair()
+    if pair is None:
+        pytest.skip("needs a real recording: set LABCHART2CFD_ADICHT_FILE and LABCHART2CFD_ADICHT_MAT")
+    native, export = pair
+
+    result = runner.invoke(
+        cli_main.app,
+        ["convert-adicht", str(native), "--out", str(tmp_path), "--record", "1"],
+    )
+
+    assert result.exit_code == 0, result.output
+    converted = load_labchart_mat(tmp_path / (native.stem + ".mat"))
+    reference = load_labchart_mat(export)
+    assert converted.num_channels == reference.num_channels
+    for ch in range(1, reference.num_channels + 1):
+        assert np.array_equal(converted.get_data(ch, 1), reference.get_data(ch, 1)), ch

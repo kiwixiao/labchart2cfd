@@ -55,7 +55,9 @@ class QuickGuideDialog(QDialog):
 
     GUIDE = (
         "<b>1. Recording.</b> Press Open recording and pick a LabChart .mat "
-        "export, or drop the file on the window. Check that Flow, Trigger and "
+        "export or the native .adicht file, or drop the file on the window. "
+        "A native file needs no export from LabChart first; it takes longer "
+        "to open. Check that Flow, Trigger and "
         "Pressure name the right channels. Click a block to open it.<br><br>"
         "<b>2. Study type.</b> Choose MRI, CPAP, Phase contrast or CT. Only "
         "the controls of that type are shown.<br><br>"

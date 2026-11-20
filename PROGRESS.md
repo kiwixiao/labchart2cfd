@@ -8,7 +8,7 @@ Still open from before, neither blocking:
 2. **MATLAB parity on a real subject.** Still unmeasured. The drift-correction fix deliberately diverges from the MATLAB original, which carries the same `abs()` bug, so old outputs for positive-drift recordings will legitimately differ.
 
 ## LAST SESSION
-2026-11-20. GUI redesign on `feature/gui-pro-redesign`, built test first in four units. 239 tests (was 143). Engine untouched: no file under `processing/`, `workflows/` or `io/` changed.
+2026-11-20. GUI redesign on `feature/gui-pro-redesign`, built test first in four units. 265 tests (was 143). Engine untouched: no file under `processing/`, `workflows/` or `io/` changed.
 
 What changed for the user:
 - **Layout.** Controls moved from a tab strip under the plot to a sidebar of numbered sections beside it (1 Recording, 2 Study type, 3 Time window, then 4 Triggers, or for CT 4 CT scan and 5 Build the breath). Subject, output folder and Export are pinned below.
@@ -28,6 +28,13 @@ Behaviour changes worth knowing when testing by hand:
 - The overview kept every Nth sample and showed 4 trigger spikes where 7 steps exist. It uses the same minimum and maximum reduction now.
 - The default rows put Flow on "2: ESOPH PRESS" and Pressure on "4: VOL" for this recording. A warning under the pickers now names the mismatch, and the export asks before going on. It flags and never chooses.
 
+**Native LabChart files.** The `.adicht` format has no public description. It was decoded from real recordings (`io/adicht.py`, layout written in its FORMAT NOTES) and checked against LabChart's own exports:
+- ENT005, against the export the user made by hand for this purpose: all 13 shared variables identical, 461,780,000 samples with zero differing bits, all five channels including the computed VOL. Checked with a script that uses none of the reader's code.
+- 72 recordings that have a LabChart export (LabChart 6.1.2 and 8.1.11 to 8.1.30): 1,140 channel records, 5,829,009,000 samples, zero differing. 1,129 exact (844 recorded, 285 Integral channels recomputed). 11 channel records in 2 recordings carry another LabChart calculation and are left empty and named. CAVEAT: this run used the reader revision just before its last edit. The committed file (SHA-256 `471bff64…`) passes the ENT005 checks; the 72 pair rerun on it is requested and not yet confirmed here.
+- Opening the native file through `load_recording` gives arrays identical to opening the export, for every channel and block, data and time (the acceptance test, run on ENT005).
+- The GUI opens `.adicht` directly (dialog, drop, Ctrl+O) and shows what was recomputed or left out under the file name. `labchart2cfd convert-adicht` writes the `.mat`.
+- Limits: it refuses a layout it was not checked on (unseen format version, records deleted in LabChart, a channel sampled slower than the tick rate) and does not write `rangemin`/`rangemax`. When a new kind of recording appears, export one by hand and run the two real file tests (see README).
+
 Peak memory on that file is about 10 GB and comes from the loader (`io/labchart.py` expands every channel to 64 bit and builds a time array per channel). That is engine code and was not touched.
 
 Two defects were found by looking at screenshots, not by tests: the sidebar clipped its widest controls behind the scroll bar in CT mode, and choosing CT left the CT sections below the fold. Both are fixed and pinned by tests. `scripts/gui_screenshots.py` renders the window offscreen for this kind of check.
@@ -42,8 +49,8 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 | Work item | Stage |
 |---|---|
-| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 239 tests; needs a manual pass on real data, then merge |
-| Read native LabChart `.adicht` files without LabChart | in progress, see SESSION LOG |
+| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 265 tests; needs a manual pass on real data, then merge |
+| Read native LabChart `.adicht` files without LabChart (`io/adicht.py`, `io/recording.py`, GUI open, `convert-adicht` command) | done on `feature/gui-pro-redesign`; equals LabChart's export bit for bit on ENT005 (user's manual export) and on 72 recording pairs; refuses what it was not checked on |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
 | Landmark cut snapped to image start | done, on main |
@@ -62,7 +69,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 ## SESSION LOG
 
-- 2026-11-20: GUI redesign on `feature/gui-pro-redesign` in four tested units (layout, click modes and CT methods, export, polish). 143 to 239 tests. Memory migrated into the project folder. Started decoding the native `.adicht` format for `ENT005`.
+- 2026-11-20: GUI redesign on `feature/gui-pro-redesign` in four tested units (layout, click modes and CT methods, export, polish). 143 to 265 tests. Memory migrated into the project folder. First run on a real recording led to drawing signal envelopes (21.5 s to 0.6 s) and a channel name check. Native `.adicht` reader added and checked bit for bit against LabChart exports; the GUI opens `.adicht` directly.
 - 2026-08-19: full-codebase review + fix batch on `fix/review-findings` (15 commits, 141 tests). Fifteen defects in the fixes themselves were caught by five rounds of verification and fixed, the worst being three failed attempts to auto-detect trigger polarity (now a declared parameter). All four subsystems got an adversarial pass.
 - 2026-08-18: CLI trigger-row bug found by user question, fixed on a feature branch with tests driving the real CLI on a 3-channel file (trigger ch1, decoy ch2, flow ch3). 97 tests. Created this file.
 - 2026-08-17: Confirmed main merged and pushed (`9755710`), workspace clean.

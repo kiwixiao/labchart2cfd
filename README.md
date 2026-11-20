@@ -65,6 +65,33 @@ The left sidebar is read from top to bottom:
 
 Enter the Subject ID and press **Export**. The line above the button says what is still missing, and a panel lists the files after the export. The coloured line above the plot always says what a click on the plot will do.
 
+## Native LabChart files (.adicht)
+
+A native LabChart recording can be used directly, with no manual export from LabChart first.
+
+In the GUI, open or drop the `.adicht` file exactly as you would a `.mat` export. It takes longer to open, because the recording is decoded.
+
+On the command line, convert it to a `.mat` with the same layout as LabChart's own "Export MATLAB":
+
+```bash
+labchart2cfd convert-adicht rec.adicht --info            # look inside, convert nothing
+labchart2cfd convert-adicht rec.adicht --out converted   # whole recording
+labchart2cfd convert-adicht rec.adicht --out converted --channels 1,3,5 --record 2 --start 950 --end 1150
+```
+
+The output folder must not be the recording's own folder. `python -m labchart2cfd.io.adicht` takes the same options.
+
+What to expect:
+
+- The format has no public description. The reader was worked out from real recordings and checked sample for sample against LabChart's own exports of them (LabChart 6.1.2 and 8.1.x). Where it converts, the samples, index tables, titles, units, comments and block times equal the export. The two display range variables (`rangemin`, `rangemax`) are not written.
+- A channel that LabChart computes is not stored in the file. The Integral calculation is recomputed with LabChart's arithmetic. A channel with any other calculation is left empty and named in the output.
+- A file with anything the reader has not been checked on is refused with the reason (exit code 2). It does not guess. Export that file from LabChart by hand.
+- When a new kind of recording comes along (another setup or LabChart version), export one file by hand once and compare:
+
+```bash
+LABCHART2CFD_ADICHT_FILE=rec.adicht LABCHART2CFD_ADICHT_MAT=rec.mat pytest tests/test_recording_loading.py tests/test_cli.py
+```
+
 ## Workflow Types
 
 - **MRI**: Standard OSAMRI processing (drift correction on full signal)

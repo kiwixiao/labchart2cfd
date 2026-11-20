@@ -522,6 +522,73 @@ def detect_steps_cmd(
     console.print(table)
 
 
+@app.command(name="convert-adicht")
+def convert_adicht(
+    input_file: Annotated[
+        Path,
+        typer.Argument(help="Path to a native LabChart recording (.adicht)"),
+    ],
+    out: Annotated[
+        Optional[Path],
+        typer.Option("--out", "-o", help="Output directory (not the recording's own folder)"),
+    ] = None,
+    info: Annotated[
+        bool,
+        typer.Option("--info", help="Print records, channels and comments, and convert nothing"),
+    ] = False,
+    channels: Annotated[
+        Optional[str],
+        typer.Option("--channels", help="Channel numbers to convert, 1-indexed, for example 1,3,5"),
+    ] = None,
+    record: Annotated[
+        Optional[int],
+        typer.Option("--record", help="Convert this record (block) only, 1-indexed"),
+    ] = None,
+    start: Annotated[
+        Optional[float],
+        typer.Option("--start", help="Seconds from the start of --record"),
+    ] = None,
+    end: Annotated[
+        Optional[float],
+        typer.Option("--end", help="Seconds from the start of --record"),
+    ] = None,
+) -> None:
+    """Convert a native LabChart recording to a .mat like LabChart's own export.
+
+    The result has the layout of LabChart's "Export MATLAB" and can be opened
+    by this program or by MATLAB. The recording is opened read only. A file
+    with anything the reader has not been verified on is refused (exit code
+    2), and a computed channel it cannot reproduce is left empty and named.
+
+    Example:
+        labchart2cfd convert-adicht rec.adicht --info
+        labchart2cfd convert-adicht rec.adicht --out converted
+        labchart2cfd convert-adicht rec.adicht --out converted --record 2 --start 950 --end 1150
+    """
+    from labchart2cfd.io import adicht
+
+    if not input_file.exists():
+        console.print(f"[red]Error:[/red] File not found: {input_file}")
+        raise typer.Exit(1)
+    if not info and out is None:
+        console.print("[red]Error:[/red] Give --out <dir> to convert, or --info to look inside.")
+        raise typer.Exit(1)
+
+    # The reader has its own command line. Hand the options over unchanged,
+    # so the two entry points cannot drift apart.
+    argv = [str(input_file)]
+    if out is not None:
+        argv += ["--out", str(out)]
+    if info:
+        argv.append("--info")
+    if channels is not None:
+        argv += ["--channels", channels]
+    for flag, value in (("--record", record), ("--start", start), ("--end", end)):
+        if value is not None:
+            argv += [flag, str(value)]
+    raise typer.Exit(adicht.main(argv))
+
+
 @app.command()
 def version() -> None:
     """Show version information."""

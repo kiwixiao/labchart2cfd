@@ -28,6 +28,7 @@ labchart2cfd process <file.mat> <subject> --start S --end E [--workflow standard
 labchart2cfd validate <file.mat> [--verbose]
 labchart2cfd visualize <file.mat> --row R --column C
 labchart2cfd detect-steps <file.mat>          # CT trigger discovery
+labchart2cfd convert-adicht <file.adicht> --out <dir>   # native LabChart file to a .mat like LabChart's export
 labchart2cfd                                  # bare command launches the PyQt5 GUI
 labchart2cfd gui                              # explicit form (used by the macOS relaunch — keep it)
 
@@ -44,6 +45,8 @@ The package converts LabChart `.mat` exports into Star-CCM+ boundary-condition C
 ### 1. IO layer — `src/labchart2cfd/io/`
 - `labchart.py` ports the MATLAB `LabChart.m` reader. `LabChartData` stores **1-indexed** `[channels][blocks]` cell arrays of (time, data) pairs, mirroring MATLAB conventions (`get_data(row, column)`, `get_time(row, column)`, `is_block_empty`). Row/column arguments throughout the CLI, GUI, and workflows are 1-indexed for this reason — do not silently switch to 0-indexed.
 - `csv_export.py` writes the `{subject}FlowProfile.csv` / `{subject}PressureProfile.csv` Star-CCM+ outputs.
+- `adicht.py` reads native LabChart recordings (`.adicht`). The format has no public description; the layout was decoded from real recordings and is written down in the FORMAT NOTES at the bottom of that file. It was checked against LabChart's own exports bit for bit, and it raises `AdichtFormatError` on anything it was not checked on instead of guessing. Keep that property: never relax one of its checks to make a file open. Real recordings are patient data and are not in the repository, so its two real file tests are skipped unless `LABCHART2CFD_ADICHT_FILE` and `LABCHART2CFD_ADICHT_MAT` name a recording and LabChart's export of it. Run them after any change to this file.
+- `recording.py` is the one entry point for opening a recording: `load_recording(path, notes=None)` picks the reader by extension and returns the same `LabChartData` either way. Native values are rounded to single precision first, as LabChart's export stores them, so both routes give identical numbers. The GUI uses it; the CLI `process` command still reads `.mat` only (`convert-adicht` turns a native file into one).
 
 ### 2. Processing primitives — `src/labchart2cfd/processing/`
 Pure functions over NumPy arrays, each in its own module: `drift_correction`, `resampling`, `smoothing`, `unit_conversion` (includes `AIR_DENSITY_KG_M3`, `CMH2O_TO_PA`), `step_detection` (CT trigger finder), `rearrangement` (cyclic shift to a landmark time + image-index math for 4D CT).
@@ -61,7 +64,7 @@ These are the units under test in `tests/test_processing.py` — many tests exis
 When adding a workflow, update both `workflows/__init__.py` and the `WorkflowType` enum + dispatch in `cli/main.py:process`.
 
 ### 4. Surfaces — `cli/main.py`, `gui/app.py`, `visualization/plots.py`
-- CLI is a single Typer `app` with `process`, `validate`, `visualize`, `detect-steps`, `gui`, `version`. `process` is the dispatcher that instantiates the right workflow; CT also calls `detect_steps` here when `--step-number` is given.
+- CLI is a single Typer `app` with `process`, `validate`, `visualize`, `detect-steps`, `convert-adicht`, `gui`, `version`. `convert-adicht` only hands its options to `io/adicht.py`'s own `main`, so the two entry points cannot drift apart. `process` is the dispatcher that instantiates the right workflow; CT also calls `detect_steps` here when `--step-number` is given.
 - GUI is PyQt5 (`matplotlib.use("QtAgg")`). The `gui` CLI command has a macOS-specific relaunch: on Darwin, it re-execs itself through `open python.app --args ...` guarded by `LABCHART2CFD_GUI=1` to get real keyboard focus. Do not remove that branch — launching the GUI directly on macOS loses keyboard input (see commit `1669bb3`).
 - GUI layout (`gui/app.py`, `FlowProfileApp`): a sidebar of numbered sections beside the plot (1 Recording, 2 Study type, 3 Time window, then 4 Triggers, or for CT 4 CT scan and 5 Build the breath). Subject, output folder and the single Export button are pinned below the sections. `gui/widgets.py` holds the reusable widgets (`ChannelCombo`, `CollapsibleSection`, `VerticalScrollArea`), `gui/dialogs.py` the preview, result and guide dialogs, `gui/theme.py` the colours and style sheet.
 - Three rules hold the GUI together. `_click_mode()` is the single answer to what a plot click means; the click handler dispatches on it and the banner above the plot displays it, so add a new click mode there and in `_BANNERS`, nowhere else. `_ct_export_inputs()` lets only the CT method on screen feed an export. `_export()` is the only exit, and it reports through `_show_export_result()`.

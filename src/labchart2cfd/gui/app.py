@@ -3,7 +3,8 @@
 The window is a sidebar of numbered sections beside a plot. The sections read
 in the order the work is done:
 
-1. Recording: open a LabChart .mat export and name the Flow, Trigger and
+1. Recording: open a LabChart recording (a .mat export, or the native
+   .adicht file directly) and name the Flow, Trigger and
    Pressure channels. An overview shows every channel and block; clicking a
    block opens it.
 2. Study type: MRI, CPAP, phase contrast or CT. Only that type's controls show.
@@ -36,7 +37,7 @@ from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from scipy.signal import find_peaks
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import QEventLoop, Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QComboBox,
@@ -55,7 +56,8 @@ from labchart2cfd.gui.theme import STYLE_SHEET, apply_theme
 from labchart2cfd.gui.widgets import (
     ChannelCombo, CollapsibleSection, VerticalScrollArea, channel_label,
 )
-from labchart2cfd.io.labchart import LabChartData, load_labchart_mat
+from labchart2cfd.io.labchart import LabChartData
+from labchart2cfd.io.recording import RECORDING_SUFFIXES, load_recording
 from labchart2cfd.processing.profile_assembly import ProfilePart, assemble_parts
 from labchart2cfd.processing.rearrangement import (
     compute_image_count,
@@ -130,8 +132,9 @@ _ROLE_COLORS = {"flow": "#1f77b4", "trigger": "#d62728", "pressure": "#2ca02c"}
 # click, and "blocked" means clicks are being swallowed.
 _BANNERS = {
     "empty": ("idle",
-              "Open a LabChart .mat recording to begin: use Open recording "
-              "on the left."),
+              "Open a LabChart recording to begin (.mat export or native "
+              ".adicht): use Open recording on the left, or drop the file "
+              "here."),
     "overview": ("idle",
                  "All blocks of the recording. Click a block to open it."),
     "window": ("idle",
@@ -204,6 +207,9 @@ class FlowProfileApp(QMainWindow):
         # The signal lines of the detail view. Each draws an envelope of its
         # full data and is refreshed whenever the visible range changes.
         self._envelopes: List[EnvelopeLine] = []
+
+        # Remarks from the reader of the open recording (native files only).
+        self._load_notes: List[str] = []
 
         # Export state
         self._outdir_user_set = False   # True once the user picks the folder
@@ -345,13 +351,13 @@ class FlowProfileApp(QMainWindow):
 
     @staticmethod
     def _dropped_recording(mime) -> Optional[Path]:
-        """The first local .mat file in a drag, or None if there is none."""
+        """The first local recording (.mat or .adicht) in a drag, or None."""
         if not mime.hasUrls():
             return None
         for url in mime.urls():
             if url.isLocalFile():
                 path = Path(url.toLocalFile())
-                if path.suffix.lower() == ".mat":
+                if path.suffix.lower() in RECORDING_SUFFIXES:
                     return path
         return None
 
@@ -408,7 +414,7 @@ class FlowProfileApp(QMainWindow):
         self.fig = Figure(figsize=(12, 6), dpi=100, constrained_layout=True)
         # Placeholder text instead of pre-created axes.
         self.fig.text(
-            0.5, 0.5, "Open a LabChart .mat recording to begin",
+            0.5, 0.5, "Open a LabChart recording to begin\n(.mat export or native .adicht)",
             ha="center", va="center", fontsize=14, color="gray",
         )
 
@@ -516,12 +522,21 @@ class FlowProfileApp(QMainWindow):
         self.recording_section = section
 
         open_btn = QPushButton("Open recording...")
-        open_btn.setToolTip("Open a LabChart .mat export and show all its blocks.")
+        open_btn.setToolTip(
+            "Open a LabChart recording and show all its blocks: a .mat "
+            "export, or the native .adicht file directly."
+        )
         open_btn.clicked.connect(self._browse_file)
         section.add_widget(open_btn)
 
         self.file_label = self._hint("No recording open")
         section.add_widget(self.file_label)
+
+        # Remarks from the reader of a native recording, such as a channel
+        # that LabChart computes and that was recomputed or left out.
+        self.load_notes = self._hint("")
+        self.load_notes.hide()
+        section.add_widget(self.load_notes)
 
         # Channels are named from the file once one is open. Rows stay
         # 1-indexed underneath, as everywhere else in this application.
@@ -1179,17 +1194,43 @@ class FlowProfileApp(QMainWindow):
             results_dir = self.mat_filepath.parent / "FlowResults"
         self.outdir_edit.setText(str(results_dir))
 
+    # File types offered by the open dialog. Both kinds are listed together
+    # first, so a native recording shows up without changing the filter.
+    _OPEN_FILTER = (
+        "LabChart recordings (*.mat *.adicht);;"
+        "MATLAB exports (*.mat);;"
+        "Native LabChart files (*.adicht);;"
+        "All files (*.*)"
+    )
+
     def _browse_file(self) -> None:
-        """Open file dialog to select a .mat file."""
+        """Open file dialog to select a recording (.mat export or .adicht)."""
         filepath, _ = QFileDialog.getOpenFileName(
-            self, "Select LabChart .mat file", "",
-            "MAT files (*.mat);;All files (*.*)",
+            self, "Open LabChart recording", "", self._OPEN_FILTER,
         )
         if filepath:
             self.open_recording(filepath)
 
+    def _set_busy(self, busy: bool) -> None:
+        """Lock the window and show a wait cursor during a long load.
+
+        A native recording takes many seconds to decode. Until it is in
+        memory the previous recording still is, so nothing may act on it.
+        """
+        self.centralWidget().setEnabled(not busy)
+        self.menuBar().setEnabled(not busy)
+        if busy:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+        else:
+            QApplication.restoreOverrideCursor()
+
+    def _update_load_notes(self) -> None:
+        """Show what the reader recomputed or left out, under the file name."""
+        self.load_notes.setText("\n".join(self._load_notes))
+        self.load_notes.setVisible(bool(self._load_notes))
+
     def open_recording(self, path) -> None:
-        """Load a LabChart .mat export and show all its channels and blocks.
+        """Load a recording (.mat export or native .adicht) and show its blocks.
 
         One action from the user's side: choosing the file is enough to see
         the recording, with no separate load step.
@@ -1411,9 +1452,9 @@ class FlowProfileApp(QMainWindow):
             self.cycle_count_label.setText("0 frames")
 
     def _load_and_overview(self) -> None:
-        """Load .mat file and show overview grid of all channels x blocks."""
+        """Load the chosen recording and show the grid of all channels x blocks."""
         if self.mat_filepath is None:
-            QMessageBox.warning(self, "No File", "Please select a .mat file first.")
+            QMessageBox.warning(self, "No File", "Open a recording first.")
             return
         if getattr(self, "_loading", False):
             return  # processEvents below can re-dispatch a queued click here
@@ -1425,9 +1466,29 @@ class FlowProfileApp(QMainWindow):
             self.status_bar.showMessage(f"Loading {self.mat_filepath.name}...")
             QApplication.processEvents()
 
+            # A native recording takes many seconds to decode, so say that the
+            # application is busy. Whatever the reader recomputed or left out
+            # comes back as notes and is shown under the file name.
+            notes: List[str] = []
+            self._load_notes = []
+            name = self.mat_filepath.name
+
+            def _show_progress(number: int, total: int, what: str) -> None:
+                self.status_bar.showMessage(
+                    f"Decoding {name}: {number} of {total} ({what})..."
+                )
+                # Keep the window painting, but take no clicks or keys while
+                # the previous recording is still the one in memory.
+                QApplication.processEvents(QEventLoop.ExcludeUserInputEvents)
+
+            self._set_busy(True)
             try:
-                self.data = load_labchart_mat(self.mat_filepath)
+                self.data = load_recording(
+                    self.mat_filepath, notes=notes, progress=_show_progress
+                )
             except Exception as e:
+                self._set_busy(False)
+                self._update_load_notes()
                 # A failed load must not leave the PREVIOUS file's data alive
                 # under the new file's name: the plot would title old data with
                 # the new name and Execute would export it beside the new file.
@@ -1439,6 +1500,9 @@ class FlowProfileApp(QMainWindow):
                 QMessageBox.critical(self, "Load Error", str(e))
                 self.status_bar.showMessage("Error loading file")
                 return
+            self._set_busy(False)
+            self._load_notes = notes
+            self._update_load_notes()
 
             # A different recording invalidates any parts labelled against the
             # previous file's grid.
@@ -2123,7 +2187,7 @@ class FlowProfileApp(QMainWindow):
     def _detect_steps(self) -> None:
         """Detect step triggers in the trigger channel for CT workflow (button handler)."""
         if self.data is None:
-            QMessageBox.warning(self, "No Data", "Please load a .mat file first.")
+            QMessageBox.warning(self, "No Data", "Open a recording first.")
             return
         if self.ax_top is None:
             QMessageBox.warning(
@@ -3081,7 +3145,7 @@ class FlowProfileApp(QMainWindow):
     def _assemble_and_export(self) -> None:
         """Process the window, assemble parts, preview, and export 3 CSVs."""
         if self.data is None:
-            QMessageBox.warning(self, "No Data", "Load a .mat file first.")
+            QMessageBox.warning(self, "No Data", "Open a recording first.")
             return
         if not self._parts:
             QMessageBox.warning(self, "No Parts", "Add at least one part.")
@@ -3209,7 +3273,7 @@ class FlowProfileApp(QMainWindow):
         """Run the processing pipeline in a background thread."""
         # Validate inputs
         if self.data is None:
-            QMessageBox.warning(self, "No Data", "Please load a .mat file first.")
+            QMessageBox.warning(self, "No Data", "Open a recording first.")
             return
 
         subject = self.subject_edit.text().strip()
