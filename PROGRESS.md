@@ -59,7 +59,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 | Work item | Stage |
 |---|---|
-| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 439 tests, two review passes and two usability reviews acted on, checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
+| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 458 tests, two review passes, two usability reviews and a CT retest acted on, checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
 | Read native LabChart `.adicht` files without LabChart (`io/adicht.py`, `io/recording.py`, GUI open, `convert-adicht` command) | done on `feature/gui-pro-redesign`; equals LabChart's export bit for bit on ENT005 (user's manual export) and on 72 recording pairs; refuses what it was not checked on |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
@@ -78,6 +78,8 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 | Windows packaging / CI | not started; see notes on PyInstaller freeze |
 
 ## SESSION LOG
+
+- 2026-11-20: the second usability reviewer retested CT on `947a4a9` and changed its verdict from no to: a first time user who reads the screen now gets a correct CT export through landmarks or reorder parts without the author (not yet for a user who does not read, nor for cycle frames). It found four states where the new green line could be trusted too much, all closed test first (458 tests): the step grid is drawn from the window in force, so it follows an applied shift, a Temporal Res change and a typed Start; a previewed shift or image count holds every CT method back and says what is in force; a Step number that is not the selected step holds the export back. Warnings are amber, not green (window not a whole number of images, nothing marked, Temporal Res still the program's default until entered or confirmed with Enter). No CT click mode arms before a step is selected, a click on a step selects it, a right click cancels an armed landmark, Clear markers keeps the selected step and its grid, leaving the parts method removes its grid. The reviewer's byte comparison against `main` on `ffeee1f`: 11 of 11 identical, with and without comments. Not retested by a reviewer after these fixes. Running the reviewer's harness wrote a settings file into the user's configuration folder (it opens real windows); the file held only a scratch path and was removed. Any harness that opens the window must set `LABCHART2CFD_SETTINGS`.
 
 - 2026-11-20: after the usability reviews: button captions in sentence case throughout; the Open dialog starts in the folder of the last recording and the window reopens at the size it was closed with (`gui/settings.py`, an ini file in the user's configuration folder; channel choices are deliberately not stored). Tests and the two screenshot scripts use their own settings file. One test had written into the real settings file through `monkeypatch.undo()`; the override is now set on `os.environ` and that file was removed. 439 tests. The two real recording tests pass on `947a4a9` (25 passed, none skipped). A retest of CT by the second usability reviewer on `947a4a9` was requested.
 
