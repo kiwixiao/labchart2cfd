@@ -132,6 +132,43 @@ def test_export_does_not_ask_when_nothing_would_be_replaced(win, mat_file, tmp_p
     assert calls == ["execute"]
 
 
+def test_export_is_ignored_while_one_is_running(win, monkeypatch):
+    """The menu item and its shortcut must not start a second export."""
+    calls = []
+    monkeypatch.setattr(win, "_execute_processing", lambda: calls.append("execute"))
+    win.execute_btn.setEnabled(False)        # what a running export does
+
+    win.export_action.trigger()
+
+    assert calls == []
+
+
+def test_overwrite_question_covers_only_files_this_export_writes(
+        win, mat_file, tmp_path, monkeypatch):
+    _ready_mri_export(win, mat_file, tmp_path)
+    win.pressure_row_spin.setValue(0)        # no pressure asked for
+    (tmp_path / "S1PressureProfile.csv").write_text("an earlier export")
+    calls = []
+    monkeypatch.setattr(win, "_execute_processing", lambda: calls.append("execute"))
+
+    win._export()       # no question: this export writes no pressure file
+
+    assert calls == ["execute"]
+
+
+def test_a_stale_pressure_file_is_called_out_after_the_export(qapp, win, mat_file, tmp_path):
+    """An old pressure profile beside a new flow profile looks like a pair."""
+    _ready_mri_export(win, mat_file, tmp_path)
+    win.pressure_row_spin.setValue(0)
+    (tmp_path / "S1PressureProfile.csv").write_text("an earlier export")
+
+    win._export()
+    _wait_for_export(win, qapp)
+
+    warnings = win._last_export_report["warnings"]
+    assert any("older" in w.lower() and "S1PressureProfile.csv" in w for w in warnings)
+
+
 # ------------------------------------------------------------- result report
 
 def test_a_finished_export_lists_the_files_it_wrote(qapp, win, mat_file, tmp_path):

@@ -1068,6 +1068,10 @@ class FlowProfileApp(QMainWindow):
         self.ct_method_section.setVisible(is_ct)
         self.trigger_section.setVisible(not is_ct)
         self._sync_ct_method()
+        # Trigger detection belongs to the study type: pulses for most, scan
+        # steps for CT. Redo it for an open block, or Select Step finds none.
+        if self.data is not None and self._plot_mode == "selected":
+            self._plot_selected()
         if entering_ct:
             # The CT sections open below the fold. Bring them up, as the old
             # window did by jumping to its CT tab. Deferred until the sidebar
@@ -1202,6 +1206,27 @@ class FlowProfileApp(QMainWindow):
         "this block, or this study type has no pressure output."
     )
 
+    def _pressure_warnings(self, requested: bool, note: Optional[str],
+                           pressure_file: Path) -> List[str]:
+        """Warnings for an export that wrote no pressure profile.
+
+        Touches no widget, so the export worker thread may call it.
+        """
+        warnings = []
+        if requested:
+            warnings.append(
+                f"No pressure profile: {note}." if note else self._PRESSURE_MISSING
+            )
+        # A pressure file from an earlier export would sit beside the new
+        # flow profile and read as its partner.
+        if pressure_file.exists():
+            warnings.append(
+                f"An older {pressure_file.name} is still in this folder. This "
+                "export did not write it, so it does not belong to the new "
+                "flow profile."
+            )
+        return warnings
+
     def _uses_assembly(self) -> bool:
         """True when Export assembles ordered parts (CT, parts method)."""
         return self._workflow_name() == "CT" and self._ct_method() == "parts"
@@ -1243,7 +1268,12 @@ class FlowProfileApp(QMainWindow):
         """Every file the chosen export may write."""
         subject = self.subject_edit.text().strip()
         folder = Path(self.outdir_edit.text())
-        names = [f"{subject}FlowProfile.csv", f"{subject}PressureProfile.csv"]
+        names = [f"{subject}FlowProfile.csv"]
+        # Pressure is written only when a pressure channel is chosen, and
+        # never for phase contrast, which has no pressure output.
+        if (self.pressure_row_spin.value() > 0
+                and self._workflow_name() != "phase-contrast"):
+            names.append(f"{subject}PressureProfile.csv")
         if self._uses_assembly():
             names.append(f"{subject}ImageReorderMap.csv")
         else:
@@ -1270,6 +1300,11 @@ class FlowProfileApp(QMainWindow):
         This is the one exit. Execute on one tab and Assemble & Export on
         another used to be two, and which one applied was the user's problem.
         """
+        # The button is disabled while an export runs, but the menu item and
+        # its shortcut also land here.
+        if not self.execute_btn.isEnabled():
+            self.status_bar.showMessage("An export is already running.")
+            return
         # Ask about replacing files only when the inputs are complete. If
         # something is missing, the export itself says exactly what.
         if not self._export_blockers() and not self._confirm_overwrite(
@@ -3047,10 +3082,10 @@ class FlowProfileApp(QMainWindow):
         if len(order) > 120:
             order = order[:117] + "..."
         warnings = []
-        if include_pressure and asm.pressure is None:
-            note = result.metadata.get("pressure_note")
-            warnings.append(
-                f"No pressure profile: {note}." if note else self._PRESSURE_MISSING
+        if asm.pressure is None:
+            warnings = self._pressure_warnings(
+                include_pressure, result.metadata.get("pressure_note"),
+                output_dir / f"{subject}PressureProfile.csv",
             )
         self._show_export_result({
             "folder": output_dir,
@@ -3403,10 +3438,10 @@ class FlowProfileApp(QMainWindow):
                 # panel. Pressure asked for but absent is always a warning
                 # there, with the specific reason when the workflow gave one.
                 warnings = []
-                if include_pressure and result.pressure is None:
-                    warnings.append(
-                        f"No pressure profile: {pressure_note}." if pressure_note
-                        else self._PRESSURE_MISSING
+                if result.pressure is None:
+                    warnings = self._pressure_warnings(
+                        include_pressure, pressure_note,
+                        output_dir / f"{subject}PressureProfile.csv",
                     )
                 files = [flow_file]
                 if pressure_file:

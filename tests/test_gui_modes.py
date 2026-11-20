@@ -135,6 +135,18 @@ def test_reorder_parts_method_is_what_turns_manual_mode_on(win):
     assert not win._synth_mode
 
 
+def test_choosing_ct_with_a_block_open_looks_for_scan_steps(win, mat_file):
+    """Steps are found when a block is plotted. Choosing CT afterwards used to
+    leave none, and Select Step then asked for a detection first."""
+    open_block(win, mat_file)                # opened as MRI: pulse detection
+    assert win._ct_steps == []
+
+    win.workflow_combo.setCurrentText("CT")
+
+    assert len(win._ct_steps) == 1           # the 2 s to 5 s step
+    assert win._plot_mode == "selected"
+
+
 def test_selecting_a_step_seeds_the_parts_image_count_once(win, mat_file):
     """Manual mode is now on before a step exists, so the seed that used to
     happen on ticking the switch has to happen when the step is selected."""

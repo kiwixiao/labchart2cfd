@@ -8,7 +8,7 @@ Still open from before, neither blocking:
 2. **MATLAB parity on a real subject.** Still unmeasured. The drift-correction fix deliberately diverges from the MATLAB original, which carries the same `abs()` bug, so old outputs for positive-drift recordings will legitimately differ.
 
 ## LAST SESSION
-2026-11-20. GUI redesign on `feature/gui-pro-redesign`, built test first in four units. 211 tests (was 143). Engine untouched: no file under `processing/`, `workflows/` or `io/` changed.
+2026-11-20. GUI redesign on `feature/gui-pro-redesign`, built test first in four units. 215 tests (was 143). Engine untouched: no file under `processing/`, `workflows/` or `io/` changed.
 
 What changed for the user:
 - **Layout.** Controls moved from a tab strip under the plot to a sidebar of numbered sections beside it (1 Recording, 2 Study type, 3 Time window, then 4 Triggers, or for CT 4 CT scan and 5 Build the breath). Subject, output folder and Export are pinned below.
@@ -35,7 +35,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 | Work item | Stage |
 |---|---|
-| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 211 tests; needs a manual pass on real data, then merge |
+| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 215 tests; needs a manual pass on real data, then merge |
 | Read native LabChart `.adicht` files without LabChart | in progress, see SESSION LOG |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
@@ -54,7 +54,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 ## SESSION LOG
 
-- 2026-11-20: GUI redesign on `feature/gui-pro-redesign` in four tested units (layout, click modes and CT methods, export, polish). 143 to 211 tests. Memory migrated into the project folder. Started decoding the native `.adicht` format for `ENT005`.
+- 2026-11-20: GUI redesign on `feature/gui-pro-redesign` in four tested units (layout, click modes and CT methods, export, polish). 143 to 215 tests. Memory migrated into the project folder. Started decoding the native `.adicht` format for `ENT005`.
 - 2026-08-19: full-codebase review + fix batch on `fix/review-findings` (15 commits, 141 tests). Fifteen defects in the fixes themselves were caught by five rounds of verification and fixed, the worst being three failed attempts to auto-detect trigger polarity (now a declared parameter). All four subsystems got an adversarial pass.
 - 2026-08-18: CLI trigger-row bug found by user question, fixed on a feature branch with tests driving the real CLI on a 3-channel file (trigger ch1, decoy ch2, flow ch3). 97 tests. Created this file.
 - 2026-08-17: Confirmed main merged and pushed (`9755710`), workspace clean.
