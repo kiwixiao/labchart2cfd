@@ -34,8 +34,8 @@ from typing import Optional, List, Tuple
 import numpy as np
 import matplotlib
 matplotlib.use("QtAgg")
+from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
-from matplotlib.lines import Line2D
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from scipy.signal import find_peaks
 
@@ -213,13 +213,23 @@ class FlowProfileApp(QMainWindow):
 
         # Remarks from the reader of the open recording.
         self._load_notes: List[str] = []
-        # Lines and texts of the LabChart comments drawn on the detail view,
-        # and the texts alone, in time order, for keeping them apart.
+        # The LabChart comments of the open block and what is drawn for them:
+        # one set of lines per plot, and a label for each comment that has
+        # been in view (by its position in the list), made on demand.
+        self._comments_drawn: list = []
         self._comment_artists: list = []
-        self._comment_labels: list = []
+        self._comment_labels: dict = {}
+        self._comment_layout_key = None
+        # True while more comments are in view than can be labelled readably.
+        self._comment_labels_withheld = False
+        # Whole block range of the channel behind each y scale, read once.
+        self._y_reference: dict = {}
         # (flow row, trigger row, block) the current view was drawn from, so a
         # picker change can tell whether anything on the plot changed.
         self._shown_selection: Optional[Tuple[int, int, int]] = None
+        # The study type the window is laid out for, to go back to when a
+        # change is declined.
+        self._workflow_index_shown = 0
         # The CT method whose marks are on the plot. Only one method's marks
         # exist at a time, so the plot always shows what will be exported.
         self._active_ct_method = "parts"
@@ -338,11 +348,11 @@ class FlowProfileApp(QMainWindow):
         view_menu = self.menuBar().addMenu("&View")
         self.overview_action = QAction("&All blocks", self)
         self.overview_action.setShortcut(QKeySequence("Ctrl+1"))
-        self.overview_action.triggered.connect(lambda: self._go_to_overview())
+        self.overview_action.triggered.connect(lambda: self._user_show_overview())
         view_menu.addAction(self.overview_action)
         self.detail_action = QAction("&Selected block", self)
         self.detail_action.setShortcut(QKeySequence("Ctrl+2"))
-        self.detail_action.triggered.connect(lambda: self._plot_selected())
+        self.detail_action.triggered.connect(lambda: self._user_show_block())
         view_menu.addAction(self.detail_action)
         self.zoom_action = QAction("&Zoom to window", self)
         self.zoom_action.setShortcut(QKeySequence("Ctrl+0"))
@@ -478,6 +488,7 @@ class FlowProfileApp(QMainWindow):
     # Scale change of one button press, and of one wheel notch.
     _Y_BUTTON_FACTOR = 0.5
     _Y_WHEEL_FACTOR = 0.8
+    _Y_WHEEL_MAX_STEP = 20
 
     def _build_y_scale_controls(self, row: QHBoxLayout) -> None:
         """Zoom in, zoom out and fit for the flow and the trigger scale.
@@ -553,11 +564,37 @@ class FlowProfileApp(QMainWindow):
         if anchor is None:
             anchor = (lo + hi) / 2
         new = (anchor + (lo - anchor) * factor, anchor + (hi - anchor) * factor)
-        if not np.all(np.isfinite(new)) or new[1] <= new[0]:
-            return  # zoomed past what a float can tell apart
+        # Kept within a wide band around the signal's own range. Far outside
+        # it the axis can no longer be ticked and drawing fails.
+        reference = self._y_reference_span(which)
+        span = new[1] - new[0]
+        if (not np.all(np.isfinite(new))
+                or not reference / self._Y_SPAN_BAND <= span <= reference * self._Y_SPAN_BAND):
+            self.status_bar.showMessage(
+                f"The {which} scale cannot be "
+                f"{'enlarged' if factor < 1 else 'widened'} further."
+            )
+            return
         for ax in axes:
             ax.set_ylim(*new)
         self.canvas.draw_idle()
+
+    # How far a scale may leave the signal's own range, as a factor each way.
+    _Y_SPAN_BAND = 1e6
+
+    def _y_reference_span(self, which: str) -> float:
+        """The range of the channel behind a scale over the whole block.
+
+        Read once per drawn block: on a real recording it is a pass over 92
+        million samples.
+        """
+        if which not in self._y_reference:
+            row = (self.trigger_row_spin.value() if which == "trigger"
+                   else self.flow_row_spin.value())
+            limits = self._channel_y_limits(row, self.col_spin.value(), -np.inf, np.inf)
+            span = (limits[1] - limits[0]) if limits is not None else 0.0
+            self._y_reference[which] = span if span > 0 else 1.0
+        return self._y_reference[which]
 
     def _fit_y(self, which: str) -> None:
         """Flow: fit to the flow in view. Trigger: the whole block.
@@ -605,7 +642,9 @@ class FlowProfileApp(QMainWindow):
                 return
             anchor = scale_ax.transData.inverted().transform((event.x, event.y))[1]
             # One notch up enlarges the signal, as zooming in does elsewhere.
-            self._scale_y(which, self._Y_WHEEL_FACTOR ** event.step, anchor)
+            # A device can report a burst as one huge step; that is capped.
+            step = max(-self._Y_WHEEL_MAX_STEP, min(event.step, self._Y_WHEEL_MAX_STEP))
+            self._scale_y(which, self._Y_WHEEL_FACTOR ** step, anchor)
             return
 
     # ------------------------------------------------------------------
@@ -751,11 +790,11 @@ class FlowProfileApp(QMainWindow):
         view_row = QHBoxLayout()
         self.overview_btn = QPushButton("All blocks")
         self.overview_btn.setToolTip("Show every channel and block of the recording.")
-        self.overview_btn.clicked.connect(self._go_to_overview)
+        self.overview_btn.clicked.connect(lambda: self._user_show_overview())
         view_row.addWidget(self.overview_btn)
         self.detail_btn = QPushButton("Selected block")
         self.detail_btn.setToolTip("Show the chosen block in detail.")
-        self.detail_btn.clicked.connect(self._plot_selected)
+        self.detail_btn.clicked.connect(lambda: self._user_show_block())
         view_row.addWidget(self.detail_btn)
         section.add_layout(view_row)
         return section
@@ -873,7 +912,8 @@ class FlowProfileApp(QMainWindow):
             "Use this step: sets Start/End to it, draws the image grid and "
             "zooms the plot to it."
         )
-        select_step_btn.clicked.connect(self._select_ct_step)
+        select_step_btn.clicked.connect(lambda: self._user_select_step())
+        self.select_step_btn = select_step_btn
         step_row = QHBoxLayout()
         step_row.addWidget(self.ct_step_spin, 1)
         step_row.addWidget(select_step_btn)
@@ -1222,6 +1262,8 @@ class FlowProfileApp(QMainWindow):
         self.subject_edit.textChanged.connect(lambda _t: self._update_export_hint())
         self.start_spin.valueChanged.connect(lambda _v: self._update_export_hint())
         self.end_spin.valueChanged.connect(lambda _v: self._update_export_hint())
+        self.ct_temporal_res_spin.valueChanged.connect(
+            lambda _v: self._update_export_hint())
         self.start_spin.valueChanged.connect(lambda _v: self._update_window_readout())
         self.end_spin.valueChanged.connect(lambda _v: self._update_window_readout())
 
@@ -1272,6 +1314,15 @@ class FlowProfileApp(QMainWindow):
 
     def _on_workflow_changed(self) -> None:
         """Show only the sections that belong to the chosen study type."""
+        index = self.workflow_combo.currentIndex()
+        if (index != self._workflow_index_shown and self._plot_mode == "selected"
+                and not self._ask_before_dropping(
+                    "Changing the study type redraws the plot and")):
+            self.workflow_combo.blockSignals(True)
+            self.workflow_combo.setCurrentIndex(self._workflow_index_shown)
+            self.workflow_combo.blockSignals(False)
+            return
+        self._workflow_index_shown = index
         is_ct = self._workflow_name() == "CT"
         self.study_hint.setText(
             self.workflow_combo.itemData(
@@ -1446,7 +1497,12 @@ class FlowProfileApp(QMainWindow):
         One action from the user's side: choosing the file is enough to see
         the recording, with no separate load step.
         """
-        self.mat_filepath = Path(path)
+        path = Path(path)
+        if self.data is not None:
+            another = path != getattr(self, "_loaded_filepath", None)
+            if not self._ask_before_dropping("Opening a recording", include_parts=another):
+                return
+        self.mat_filepath = path
         self.file_label.setText(self.mat_filepath.name)
         self.file_label.setToolTip(str(self.mat_filepath))
         # A new recording goes back to the default folder beside it.
@@ -1519,6 +1575,17 @@ class FlowProfileApp(QMainWindow):
                 blockers.append("add at least one part")
         elif self.end_spin.value() <= self.start_spin.value():
             blockers.append("set Start before End")
+        elif self._workflow_name() == "CT":
+            # The grid is not drawn for such a count, so the screen would
+            # show one number of images and the files hold another.
+            dt_ms = self.ct_temporal_res_spin.value()
+            window = self.end_spin.value() - self.start_spin.value()
+            images = int(round(window / (dt_ms / 1000.0))) if dt_ms > 0 else 0
+            if images > self._MAX_GRID_IMAGES:
+                blockers.append(
+                    f"raise Temporal Res ({dt_ms:g} ms gives {images} images in "
+                    f"this window, the limit is {self._MAX_GRID_IMAGES})"
+                )
         return blockers
 
     def _ct_export_description(self, study: str, window: str) -> str:
@@ -1666,7 +1733,11 @@ class FlowProfileApp(QMainWindow):
         self._ct_interval_markers = []
         self._ct_landmark_artists = []
         self._comment_artists = []
-        self._comment_labels = []
+        self._comment_labels = {}
+        self._comments_drawn = []
+        self._comment_layout_key = None
+        self._comment_labels_withheld = False
+        self._y_reference = {}
         self._trigger_times = np.array([])
         self._trigger_count = 0
         self._ct_steps = []
@@ -1863,6 +1934,39 @@ class FlowProfileApp(QMainWindow):
             marks.append(f"{n} part{'s' if n != 1 else ''}")
         return marks
 
+    def _ask_before_dropping(self, what: str, include_parts: bool = False) -> bool:
+        """Ask before an action removes marks the user placed. True to go on.
+
+        One rule for every control: landmarks, cycle labels and parts are
+        never removed without a question. Only the Clear buttons, whose
+        whole purpose is to remove them, do not ask. Before this rule the
+        pickers asked while All blocks, Selected block, Select Step, the
+        study type and opening a recording dropped the same marks silently.
+        """
+        at_risk = self._marks_at_risk(include_parts)
+        if not at_risk:
+            return True
+        return QMessageBox.question(
+            self, "Remove Markers?",
+            f"{what} removes:\n\n  " + "\n  ".join(at_risk) + "\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) == QMessageBox.Yes
+
+    def _user_show_overview(self) -> None:
+        """All blocks, from the button or the menu."""
+        if self._ask_before_dropping("Showing all blocks"):
+            self._go_to_overview()
+
+    def _user_show_block(self) -> None:
+        """Selected block, from the button or the menu."""
+        if self._ask_before_dropping("Redrawing the block"):
+            self._plot_selected()
+
+    def _user_select_step(self) -> None:
+        """Select Step, from the button."""
+        if self._ask_before_dropping("Selecting a step redraws its image grid and"):
+            self._select_ct_step()
+
     def _on_selection_changed(self, *_args) -> None:
         """Redraw the current view after the user changes a channel or block.
 
@@ -1884,15 +1988,12 @@ class FlowProfileApp(QMainWindow):
             return  # the same entry again, or only Pressure changed
         was_detail = self._plot_mode == "selected"
         block_changed = old is not None and new[2] != old[2]
-        if was_detail and old is not None:
+        if old is not None:
             # Parts name images of one scan, so they go with the block only.
-            at_risk = self._marks_at_risk(include_parts=block_changed)
-            if at_risk and QMessageBox.question(
-                self, "Remove Markers?",
-                "Changing the channel or block redraws the plot and removes:"
-                "\n\n  " + "\n  ".join(at_risk) + "\n\nContinue?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            ) != QMessageBox.Yes:
+            # They outlive the detail view, so this holds on the overview too.
+            if not self._ask_before_dropping(
+                    "Changing the channel or block redraws the plot and",
+                    include_parts=block_changed):
                 self.flow_row_spin.setValue(old[0])
                 self.trigger_row_spin.setValue(old[1])
                 self.col_spin.setValue(old[2])
@@ -1934,6 +2035,15 @@ class FlowProfileApp(QMainWindow):
                 "change the Flow channel on the left."
             )
             return
+        if col != self.col_spin.value():
+            # The parts list names images of the block it was built on.
+            # Followed to another block, it cut that block by the wrong
+            # image ranges on export.
+            if not self._ask_before_dropping("Opening another block", include_parts=True):
+                return
+            if self._parts:
+                self._parts = []
+                self._refresh_parts_list()
         self.col_spin.setValue(col)
         self._plot_selected()
 
@@ -2012,6 +2122,9 @@ class FlowProfileApp(QMainWindow):
                     ax.set_ylabel(
                         row_label, rotation=0, ha="right", va="center",
                         fontsize=8, color=color if role else "0.25",
+                        # A channel title is drawn as typed, never as a
+                        # formula: a dollar sign pair raises while drawing.
+                        parse_math=False,
                     )
                 ax.tick_params(labelsize=6)
                 # Only show axis labels on edges
@@ -2074,6 +2187,23 @@ class FlowProfileApp(QMainWindow):
             self.status_bar.showMessage("Block is empty")
             return
 
+        try:
+            self._draw_detail(flow_row, trigger_row, col)
+        except Exception as error:  # noqa: BLE001 (any failure ends the same way)
+            # A view drawn half way takes no clicks and sits under a banner
+            # that describes something else. Go back to a state that is whole.
+            traceback.print_exc()
+            self._reset_plot_state()
+            self._show_overview()
+            QMessageBox.critical(
+                self, "Could Not Draw Block",
+                f"Block {col} could not be drawn ({type(error).__name__}: "
+                f"{error}).\n\nAll blocks are shown instead.",
+            )
+
+    def _draw_detail(self, flow_row: int, trigger_row: int, col: int) -> None:
+        """Build the detail view of one block. ``_plot_selected`` checks the
+        choice first and recovers if this fails."""
         # Clean up previous state (safe to call before fig.clear)
         self._reset_plot_state()
 
@@ -2146,7 +2276,10 @@ class FlowProfileApp(QMainWindow):
             title_parts.append(f"Trigger: {self._channel_text(trigger_row)}")
         # Padded so the marker times and image numbers drawn along the top
         # edge of the axes sit under the title instead of across it.
-        self.ax_top.set_title(" | ".join(title_parts) + trigger_info, pad=16)
+        # File name and channel titles are drawn as typed, never as a formula.
+        self.ax_top.set_title(
+            " | ".join(title_parts) + trigger_info, pad=16, parse_math=False
+        )
         self.ax_top.grid(True, alpha=0.3)
         self._refresh_top_legend()
 
@@ -2178,6 +2311,8 @@ class FlowProfileApp(QMainWindow):
             f" | {n_comments} comment{'s' if n_comments != 1 else ''}"
             if n_comments else ""
         )
+        if self._comment_labels_withheld:
+            comment_info += " (zoom in to read them)"
         self.status_bar.showMessage(
             f"Block {col}, {self._channel_text(flow_row)}: {len(time)} samples, "
             f"{time[-1]:.2f}s{trigger_info}{comment_info}"
@@ -2205,72 +2340,105 @@ class FlowProfileApp(QMainWindow):
 
     def _draw_comments(self) -> int:
         """Draw the open block's comments, as LabChart does: a dashed line at
-        each time, with the text along it. Returns how many were drawn.
+        each time, with the text along it. Returns how many there are.
 
-        The lines are added as plain artists in axes height coordinates, so
-        they never change a scale or the range of the time axis.
+        The lines of one plot are a single collection in axes height
+        coordinates, added without touching the data limits, so they never
+        change a scale or the range of the time axis and stay cheap however
+        many there are. The labels are made by ``_layout_comment_labels``.
         """
         self._comment_artists = []
-        self._comment_labels = []
-        comments = self.data.comments_in(self.col_spin.value())
+        self._comment_labels = {}
+        self._comment_layout_key = None
+        self._comments_drawn = self.data.comments_in(self.col_spin.value())
+        if not self._comments_drawn:
+            return 0
         visible = self.comments_action.isChecked()
-        for comment in comments:
-            for ax in (self.ax_top, self.ax_bottom):
-                line = Line2D(
-                    [comment.time, comment.time], [0, 1],
-                    transform=ax.get_xaxis_transform(),
-                    color=self._COMMENT_COLOR, linestyle=(0, (4, 3)),
-                    linewidth=0.8, alpha=0.9, visible=visible,
-                )
-                ax.add_artist(line)
-                self._comment_artists.append(line)
-            # Along the line from the bottom edge. The top edge carries the
-            # marker times and the image numbers. Drawn on the topmost axes
-            # with a pale backing, so the signals do not run through it.
-            host = self.ax_top_trig if self.ax_top_trig is not None else self.ax_top
-            text = host.text(
-                comment.time, 0.04, self._comment_label(comment),
-                transform=host.get_xaxis_transform(),
-                rotation=90, ha="right", va="bottom", fontsize=8,
-                color=self._COMMENT_COLOR, clip_on=True, visible=visible,
-                zorder=5,
-                bbox=dict(facecolor="white", edgecolor="none", alpha=0.8, pad=1.5),
+        segments = [[(c.time, 0.0), (c.time, 1.0)] for c in self._comments_drawn]
+        for ax in (self.ax_top, self.ax_bottom):
+            lines = LineCollection(
+                segments, transform=ax.get_xaxis_transform(),
+                colors=self._COMMENT_COLOR, linestyles=[(0, (4, 3))],
+                linewidths=0.8, alpha=0.9, visible=visible,
             )
-            text.set_in_layout(False)
-            self._comment_artists.append(text)
-            self._comment_labels.append(text)
-        return len(comments)
+            ax.add_collection(lines, autolim=False)
+            self._comment_artists.append(lines)
+        return len(self._comments_drawn)
 
     # Where a comment label starts, as a fraction of the axes height, and the
     # room kept between two labels, in pixels.
     _COMMENT_LABEL_BASE = 0.04
     _COMMENT_LABEL_GAP_PX = 4.0
+    # With more comments than this in view no label could be read. Only the
+    # lines are drawn then, and the labels appear on zooming in.
+    _COMMENT_LABELS_MAX = 60
+
+    def _comment_text_artist(self, index: int):
+        """The label of one comment, made the first time it comes into view."""
+        label = self._comment_labels.get(index)
+        if label is None:
+            comment = self._comments_drawn[index]
+            # On the topmost axes with a pale backing, so the signals do not
+            # run through it. Along the line from the bottom edge: the top
+            # edge carries the marker times and the image numbers.
+            host = self.ax_top_trig if self.ax_top_trig is not None else self.ax_top
+            label = host.text(
+                comment.time, self._COMMENT_LABEL_BASE, self._comment_label(comment),
+                transform=host.get_xaxis_transform(),
+                rotation=90, ha="right", va="bottom", fontsize=8,
+                color=self._COMMENT_COLOR, clip_on=True, zorder=5,
+                # As typed. A dollar sign pair would be read as a formula,
+                # and a broken one raises while drawing.
+                parse_math=False,
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.8, pad=1.5),
+            )
+            label.set_in_layout(False)
+            self._comment_labels[index] = label
+            self._comment_artists.append(label)
+        return label
 
     def _layout_comment_labels(self) -> None:
-        """Keep the labels of comments that are close in time apart.
+        """Show the labels of the comments in view, and keep them apart.
 
         Every label starts at the bottom edge. One that would print over a
         neighbour at the current zoom is moved up to the first free height,
         and comes back down once zooming in separates them. On a real
         recording two comments 13 s apart in a 2300 s block were unreadable.
         """
-        labels = self._comment_labels
-        if not labels:
+        if not self._comments_drawn or self.ax_top is None:
             return
-        host = labels[0].axes
-        box = host.bbox
+        box = self.ax_top.bbox
         if box.height <= 0:
             return
+        shown = self.comments_action.isChecked()
+        x_lo, x_hi = self.ax_top.get_xlim()
+        # Three linked axes report every change of the view, one after the
+        # other, and the labels sit on the last to be updated. Do the work
+        # once per state: the key holds the view of both.
+        host = self.ax_top_trig if self.ax_top_trig is not None else self.ax_top
+        key = (x_lo, x_hi, host.get_xlim(), tuple(box.bounds), shown)
+        if key == self._comment_layout_key:
+            return
+        self._comment_layout_key = key
+
+        in_view = [i for i, c in enumerate(self._comments_drawn) if x_lo <= c.time <= x_hi]
+        self._comment_labels_withheld = shown and len(in_view) > self._COMMENT_LABELS_MAX
+        readable = shown and not self._comment_labels_withheld
+        wanted = set(in_view) if readable else set()
+        for index, label in self._comment_labels.items():
+            if index not in wanted:
+                label.set_visible(False)  # out of view, hidden, or too many
+        if not wanted:
+            return
+
         renderer = self.canvas.get_renderer()
         base_px = box.y0 + self._COMMENT_LABEL_BASE * box.height
         gap = self._COMMENT_LABEL_GAP_PX
-        x_lo, x_hi = host.get_xlim()
         placed = []  # (right edge, bottom, top) in pixels, in time order
-        for label in labels:
-            time = label.get_position()[0]
+        for index in in_view:
+            label = self._comment_text_artist(index)
+            label.set_visible(True)
             label.set_y(self._COMMENT_LABEL_BASE)
-            if not x_lo <= time <= x_hi:
-                continue  # out of view: clipped, and in nobody's way
             extent = label.get_window_extent(renderer)
             # The labels in reach sideways, nearest first. All labels are
             # one line of the same font, so all are equally wide.
@@ -2293,6 +2461,8 @@ class FlowProfileApp(QMainWindow):
         """Show or hide the comments (View menu)."""
         for artist in self._comment_artists:
             artist.set_visible(visible)
+        # Which labels are shown is the layout's decision (view, count).
+        self._layout_comment_labels()
         self.canvas.draw_idle()
 
     def _update_comments_action(self) -> None:
@@ -2551,6 +2721,13 @@ class FlowProfileApp(QMainWindow):
             return None
         lo = float(np.min(y[first:stop]))
         hi = float(np.max(y[first:stop]))
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            # A NaN or an infinite sample. The range of the others is what
+            # can be shown; an axis cannot take a limit that is not a number.
+            finite = y[first:stop][np.isfinite(y[first:stop])]
+            if finite.size == 0:
+                return None
+            lo, hi = float(finite.min()), float(finite.max())
         pad = (hi - lo) * self._ZOOM_Y_MARGIN
         if pad == 0:  # flat signal: keep the view from collapsing to a line
             pad = abs(hi) * self._ZOOM_Y_MARGIN or 1.0

@@ -221,9 +221,6 @@ def _extract_comments(mat, num_channels, num_blocks, notes):
     """
     if "com" not in mat:
         return []
-    com = np.asarray(mat["com"], dtype=float)
-    if com.size == 0:
-        return []
 
     def _dropped(reason):
         # type: (str) -> List[Comment]
@@ -233,6 +230,21 @@ def _extract_comments(mat, num_channels, num_blocks, notes):
             )
         return []
 
+    def _whole(value):
+        # type: (float) -> Optional[int]
+        """The value as an integer, or None if it is not a whole number."""
+        if not np.isfinite(value) or value != np.floor(value):
+            return None
+        return int(value)
+
+    # Nothing below may raise. A NaN here once stopped the whole recording
+    # from opening over its comments.
+    try:
+        com = np.asarray(mat["com"], dtype=float)
+    except (TypeError, ValueError):
+        return _dropped("the comment table does not hold numbers")
+    if com.size == 0:
+        return []
     if com.ndim != 2 or com.shape[1] < 5:
         return _dropped(
             "the comment table has an unexpected shape {}".format(com.shape)
@@ -245,21 +257,27 @@ def _extract_comments(mat, num_channels, num_blocks, notes):
     texts = _text_rows(mat["comtext"])
 
     comments = []
-    for channel, block, tick, _kind, text_row in com[:, :5]:
-        channel, block, text_row = int(channel), int(block), int(text_row)
-        if not 1 <= block <= min(num_blocks, tickrate.size):
-            return _dropped("a comment names block {} of {}".format(block, num_blocks))
+    for raw_channel, raw_block, tick, _kind, raw_text_row in com[:, :5]:
+        block = _whole(raw_block)
+        if block is None or not 1 <= block <= min(num_blocks, tickrate.size):
+            return _dropped(
+                "a comment names block {} of {}".format(raw_block, num_blocks)
+            )
         rate = tickrate[block - 1]
         if not np.isfinite(rate) or rate <= 0:
             return _dropped("block {} has tick rate {}".format(block, rate))
-        if channel != -1 and not 1 <= channel <= num_channels:
+        channel = _whole(raw_channel)
+        if channel is None or (channel != -1 and not 1 <= channel <= num_channels):
             return _dropped(
-                "a comment names channel {} of {}".format(channel, num_channels)
+                "a comment names channel {} of {}".format(raw_channel, num_channels)
             )
-        if not 1 <= text_row <= len(texts):
+        text_row = _whole(raw_text_row)
+        if text_row is None or not 1 <= text_row <= len(texts):
             return _dropped(
-                "a comment points at text {} of {}".format(text_row, len(texts))
+                "a comment points at text {} of {}".format(raw_text_row, len(texts))
             )
+        if not np.isfinite(tick):
+            return _dropped("a comment has the position {} in its block".format(tick))
         comments.append(Comment(
             block=block,
             channel=None if channel == -1 else channel,

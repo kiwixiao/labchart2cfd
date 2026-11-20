@@ -200,8 +200,9 @@ def _comment_texts(win):
 
 
 def _comment_times(win):
-    return sorted({float(a.get_xdata()[0]) for a in win._comment_artists
-                   if not isinstance(a, Text)})
+    """Where the comment lines are drawn (one collection of lines per plot)."""
+    return sorted({float(segment[0][0]) for a in win._comment_artists
+                   if not isinstance(a, Text) for segment in a.get_segments()})
 
 
 def test_the_comments_of_the_open_block_are_drawn(win, commented):

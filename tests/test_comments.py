@@ -133,3 +133,30 @@ def test_comments_of_a_native_file_use_the_same_numbering(monkeypatch, tmp_path)
         Comment(block=1, channel=2, time=0.2, text="on flow"),
         Comment(block=2, channel=None, time=1.0, text="second record"),
     ]
+
+
+# ------------------------------------ a broken table never stops the recording
+
+@pytest.mark.parametrize("com, reason", [
+    (np.array([[-1.0, np.nan, 2000, 1, 1]]), "block"),
+    (np.array([[np.nan, 1, 2000, 1, 1]]), "channel"),
+    (np.array([[-1.0, 1, 2000, 1, np.nan]]), "text"),
+    (np.array([[-1.0, 1, np.nan, 1, 1]]), "position"),
+    (np.array([[-1.0, 1, np.inf, 1, 1]]), "position"),
+    (np.array([[-1.0, 1.7, 2000, 1, 1]]), "block"),
+    (np.array([[2.5, 1, 2000, 1, 1]]), "channel"),
+    (np.array(["not a table"]), "table"),
+])
+def test_a_comment_table_with_bad_values_never_stops_the_recording(
+        mat_file, tmp_path, com, reason):
+    """A NaN in the table raised inside the loader, so the whole recording
+    failed to open over its comments."""
+    path = _with(mat_file, tmp_path, com=com, comtext=_COMTEXT,
+                 tickrate=np.full((1, 3), 1000.0))
+    notes = []
+
+    data = load_labchart_mat(path, notes=notes)
+
+    assert data.num_channels == 4 and not data.is_block_empty(2, 1)
+    assert data.comments == []
+    assert len(notes) == 1 and reason in notes[0].lower()
