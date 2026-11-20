@@ -954,6 +954,12 @@ class FlowProfileApp(QMainWindow):
         section = CollapsibleSection("4   CT scan")
         self.ct_scan_section = section
 
+        # What a tooltip says is not on screen. A new user does not hover.
+        section.add_widget(self._hint(
+            "The scan shows as a step on the trigger channel. Select it to "
+            "set Start and End to the scan."
+        ))
+
         detect_steps_btn = QPushButton("Detect Steps")
         detect_steps_btn.setToolTip(
             "Find the scan steps in the Trigger channel. This also runs when "
@@ -993,7 +999,7 @@ class FlowProfileApp(QMainWindow):
         self.ct_total_images_spin.setValue(1)
         self.ct_total_images_spin.setToolTip(
             "Images in the selected step. Computed from the step when it is "
-            "selected; edit it before Apply Correction to override."
+            "selected; edit it before Apply shift and image count to override."
         )
 
         # Bidirectional: the detected step edge can sit either side of the true
@@ -1015,18 +1021,29 @@ class FlowProfileApp(QMainWindow):
         form = self._form()
         form.addRow("Step #", step_row)
         form.addRow("Temporal Res (ms)", self.ct_temporal_res_spin)
-        form.addRow("Total Images", self.ct_total_images_spin)
+        form.addRow("Images in step", self.ct_total_images_spin)
         form.addRow("Start Shift (ms)", self.ct_shift_spin)
+        # In the form, under its box, so it reads as the same setting.
+        form.addRow("", self.ct_shift_slider)
         section.add_layout(form)
-        section.add_widget(self.ct_shift_slider)
+        section.add_widget(self._hint(
+            "Temporal Res is the time one image covers. Images in step is "
+            "counted from the step. If the step edge is not where the first "
+            "image starts, Start Shift moves the scan window earlier "
+            "(negative) or later; the slider does the same."
+        ))
 
-        apply_correction_btn = QPushButton("Apply Correction")
+        apply_correction_btn = QPushButton("Apply shift and image count")
         apply_correction_btn.setToolTip(
             "Set Start to the detected step start plus the Start Shift, and "
             "End to Start plus Total Images times Temporal Res."
         )
         apply_correction_btn.clicked.connect(self._apply_ct_correction)
         section.add_widget(apply_correction_btn)
+        section.add_widget(self._hint(
+            "Sets Start to the step start plus the shift, and End to Start "
+            "plus Images in step times Temporal Res."
+        ))
         return section
 
     def _build_ct_method_section(self) -> QWidget:
@@ -1111,7 +1128,7 @@ class FlowProfileApp(QMainWindow):
         window_offset_row.addWidget(apply_win_offset_btn)
 
         form = self._form()
-        form.addRow("Images", self.synth_images_spin)
+        form.addRow("Images in grid", self.synth_images_spin)
         form.addRow("Grid offset (ms)", self.synth_grid_offset_spin)
         form.addRow("Window offset (ms)", window_offset_row)
         layout.addLayout(form)
@@ -1130,6 +1147,13 @@ class FlowProfileApp(QMainWindow):
         self.synth_dt_warn_label = self._hint("")
         layout.addWidget(self.synth_dt_warn_label)
 
+        layout.addWidget(self._hint(
+            "On the plot, the grey numbers above the plot are this grid: the "
+            "images that are cut into parts and exported. The blue numbers "
+            "inside the plot are the images counted in the scan step "
+            "(section 4). They match until you change Images in grid or "
+            "Grid offset."
+        ))
         layout.addWidget(self._hint(
             "An image is the slice between two grid lines. Set From and To "
             "(or use Pick on Plot), then Add Part. The order of the list is "
@@ -1150,7 +1174,7 @@ class FlowProfileApp(QMainWindow):
 
         pick_row = QHBoxLayout()
         self.pick_part_btn = QPushButton("Pick on Plot")
-        self.pick_part_btn.setToolTip("Click two frames on the plot to fill From/To.")
+        self.pick_part_btn.setToolTip("Click two images on the plot to fill From and To.")
         self.pick_part_btn.clicked.connect(self._arm_add_part)
         pick_row.addWidget(self.pick_part_btn)
         add_part_btn = QPushButton("Add Part")
@@ -3854,7 +3878,7 @@ class FlowProfileApp(QMainWindow):
             return
         self._capturing_part = True
         self._part_click_buffer = []
-        self.capture_hint.setText("Click the START frame on the plot...")
+        self.capture_hint.setText("Click the first image of the range on the plot.")
         self.status_bar.showMessage("Click the first image of the range (right click cancels).")
         self._refresh_banner()
 
@@ -3898,7 +3922,7 @@ class FlowProfileApp(QMainWindow):
         if len(self._part_click_buffer) == 1:
             self.part_from_spin.setValue(img)
             self._draw_capture_marker(img)
-            self.capture_hint.setText(f"START = image {img} — click END frame")
+            self.capture_hint.setText(f"First image: {img}. Now click the last image.")
             self.status_bar.showMessage(f"First image: {img}. Now click the last image of the range.")
             return
         a, b = sorted(self._part_click_buffer)
@@ -3908,8 +3932,8 @@ class FlowProfileApp(QMainWindow):
         # a == b is a legal single-image part, same as typing From = To.
         self.part_from_spin.setValue(a)
         self.part_to_spin.setValue(b)
-        self.capture_hint.setText(f"range {a}..{b} ready — click 'Add Part'")
-        self.status_bar.showMessage(f"Range {a}-{b} set. Click 'Add Part' to add it.")
+        self.capture_hint.setText(f"Images {a} to {b} chosen. Press Add Part.")
+        self.status_bar.showMessage(f"Images {a} to {b} chosen. Press Add Part to add them.")
 
     def _draw_parts_overlay(self) -> None:
         """Shade each part's span on the top plot with its order number."""
