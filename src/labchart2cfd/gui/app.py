@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import (
     QScrollArea, QSplitter, QStackedWidget, QFormLayout,
 )
 
+from labchart2cfd.gui.dialogs import AssemblyPreviewDialog, ExportResultDialog
 from labchart2cfd.gui.widgets import (
     ChannelCombo, CollapsibleSection, VerticalScrollArea, channel_label,
 )
@@ -148,30 +149,6 @@ class ModeAwareToolbar(NavigationToolbar2QT):
         self.mode_changed.emit()
 
 
-class AssemblyPreviewDialog(QDialog):
-    """Popup showing the assembled synthetic flow profile."""
-
-    def __init__(self, time, flow, n_images, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Synthetic Profile Preview")
-        self.resize(640, 420)
-        layout = QVBoxLayout(self)
-        fig = Figure(figsize=(6, 3.5))
-        canvas = FigureCanvasQTAgg(fig)
-        ax = fig.add_subplot(111)
-        ax.plot(time, flow, "b-", linewidth=0.8)
-        ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
-        ax.set_xlabel("Synthetic time (s)")
-        ax.set_ylabel("Mass flow (kg/s)")
-        ax.set_title(f"Assembled profile: {len(flow)} samples, {n_images} images")
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        layout.addWidget(canvas)
-        close_btn = QPushButton("Close")
-        close_btn.clicked.connect(self.accept)
-        layout.addWidget(close_btn)
-
-
 class FlowProfileApp(QMainWindow):
     """Main GUI application for flow profile processing."""
 
@@ -181,6 +158,8 @@ class FlowProfileApp(QMainWindow):
     # emission from a foreign thread is queued to the GUI thread correctly.
     _processing_done = pyqtSignal(str)
     _processing_failed = pyqtSignal(str)
+    # Carries the report dict of a finished export (files, summary, warnings).
+    _processing_report = pyqtSignal(object)
 
     def __init__(self) -> None:
         super().__init__()
@@ -195,6 +174,11 @@ class FlowProfileApp(QMainWindow):
         # Overview tiles by (row, column), both 1-indexed, so a click on a
         # tile can be traced back to the block it shows.
         self._overview_axes: dict = {}
+
+        # Export state
+        self._outdir_user_set = False   # True once the user picks the folder
+        self._last_export_report: Optional[dict] = None
+        self._result_dialog: Optional[ExportResultDialog] = None
 
         # Axes references (set during _plot_selected)
         self.ax_top = None
@@ -272,6 +256,7 @@ class FlowProfileApp(QMainWindow):
         # Worker-completion signals land on the GUI thread here.
         self._processing_done.connect(self._on_processing_done)
         self._processing_failed.connect(self._on_processing_failed)
+        self._processing_report.connect(self._show_export_result)
 
     # ------------------------------------------------------------------
     # Layout helpers
@@ -369,6 +354,10 @@ class FlowProfileApp(QMainWindow):
         """Make the banner describe the current click mode."""
         kind, text = _BANNERS[self._click_mode()]
         self.mode_banner.setText(text)
+        # Every view change passes through here, and whether a recording is
+        # loaded is one of the things the Export line reports.
+        if hasattr(self, "export_hint"):
+            self._update_export_hint()
         if self.mode_banner.property("kind") != kind:
             self.mode_banner.setProperty("kind", kind)
             # A changed dynamic property only restyles after a repolish.
@@ -781,13 +770,9 @@ class FlowProfileApp(QMainWindow):
             actions.addWidget(_b, position // 3, position % 3)
         layout.addLayout(actions)
 
-        export_row = QHBoxLayout()
-        assemble_btn = QPushButton("Assemble && Export")
-        assemble_btn.clicked.connect(self._assemble_and_export)
-        export_row.addWidget(assemble_btn)
-        self.synth_status_label = QLabel("no parts")
-        export_row.addWidget(self.synth_status_label, 1)
-        layout.addLayout(export_row)
+        # The Export button below the sections assembles and exports these.
+        self.synth_status_label = self._hint("no parts")
+        layout.addWidget(self.synth_status_label)
         return page
 
     def _build_landmarks_page(self) -> QWidget:
@@ -864,6 +849,9 @@ class FlowProfileApp(QMainWindow):
         self.subject_edit.textChanged.connect(self._update_outdir)
 
         self.outdir_edit = QLineEdit(str(Path.cwd()))
+        # textEdited fires for typing only, never for setText, so the folder
+        # counts as hand picked exactly when the user typed it.
+        self.outdir_edit.textEdited.connect(self._mark_outdir_user_set)
         outdir_browse_btn = QPushButton("...")
         outdir_browse_btn.setFixedWidth(32)
         outdir_browse_btn.setToolTip("Choose the output folder.")
@@ -877,9 +865,13 @@ class FlowProfileApp(QMainWindow):
         form.addRow("Output folder", outdir_row)
         layout.addLayout(form)
 
+        # Says what is still missing, or what exactly will be exported.
+        self.export_hint = self._hint("")
+        layout.addWidget(self.export_hint)
+
         self.execute_btn = QPushButton("Export")
         self.execute_btn.setObjectName("primaryButton")
-        self.execute_btn.clicked.connect(self._execute_processing)
+        self.execute_btn.clicked.connect(lambda: self._export())
         layout.addWidget(self.execute_btn)
         return footer
 
@@ -912,6 +904,11 @@ class FlowProfileApp(QMainWindow):
         # on every keystroke, which would lurch the view while typing.
         self.start_spin.editingFinished.connect(self._zoom_to_window)
         self.end_spin.editingFinished.connect(self._zoom_to_window)
+
+        # The line above Export tracks everything it depends on.
+        self.subject_edit.textChanged.connect(lambda _t: self._update_export_hint())
+        self.start_spin.valueChanged.connect(lambda _v: self._update_export_hint())
+        self.end_spin.valueChanged.connect(lambda _v: self._update_export_hint())
 
     def _on_processing_done(self, msg: str) -> None:
         """GUI-thread completion handler for the Execute worker."""
@@ -976,6 +973,7 @@ class FlowProfileApp(QMainWindow):
             self._ct_landmark_mode = None
         self.synth_enable_chk.setChecked(method == "parts")
         self._refresh_banner()
+        self._update_export_hint()
 
     def _ct_export_inputs(self):
         """(cycle frames, inhale start, exhale end) of the chosen CT method.
@@ -1017,8 +1015,12 @@ class FlowProfileApp(QMainWindow):
         self._sync_ct_method()
 
     def _update_outdir(self, *_args) -> None:
-        """Recompute output dir based on current mat file and subject."""
-        if self.mat_filepath is None:
+        """Recompute output dir based on current mat file and subject.
+
+        Leaves a folder the user picked by hand alone. Typing the Subject ID
+        used to replace it with the default next to the recording.
+        """
+        if self.mat_filepath is None or self._outdir_user_set:
             return
         subject = self.subject_edit.text().strip()
         if subject:
@@ -1045,6 +1047,8 @@ class FlowProfileApp(QMainWindow):
         self.mat_filepath = Path(path)
         self.file_label.setText(self.mat_filepath.name)
         self.file_label.setToolTip(str(self.mat_filepath))
+        # A new recording goes back to the default folder beside it.
+        self._outdir_user_set = False
         self._update_outdir()
         self._load_and_overview()
         if self.data is None:  # the load failed and has already said why
@@ -1054,7 +1058,117 @@ class FlowProfileApp(QMainWindow):
         """Open directory dialog to select output directory."""
         dirpath = QFileDialog.getExistingDirectory(self, "Select Output Directory")
         if dirpath:
-            self.outdir_edit.setText(dirpath)
+            self._set_output_dir(dirpath)
+
+    def _set_output_dir(self, path) -> None:
+        """Use a folder the user chose; it then stays put until a new recording."""
+        self.outdir_edit.setText(str(path))
+        self._outdir_user_set = True
+
+    def _mark_outdir_user_set(self, *_args) -> None:
+        self._outdir_user_set = True
+
+    # ------------------------------------------------------------------
+    # Export
+    # ------------------------------------------------------------------
+
+    _PRESSURE_MISSING = (
+        "No pressure profile was produced: the pressure channel is empty in "
+        "this block, or this study type has no pressure output."
+    )
+
+    def _uses_assembly(self) -> bool:
+        """True when Export assembles ordered parts (CT, parts method)."""
+        return self._workflow_name() == "CT" and self._ct_method() == "parts"
+
+    def _export_blockers(self) -> List[str]:
+        """What is still missing before an export can run, in plain words."""
+        blockers = []
+        if self.data is None:
+            blockers.append("open a recording")
+        if not self.subject_edit.text().strip():
+            blockers.append("enter a Subject ID")
+        if self._uses_assembly():
+            if not self._parts:
+                blockers.append("add at least one part")
+        elif self.end_spin.value() <= self.start_spin.value():
+            blockers.append("set Start before End")
+        return blockers
+
+    def _update_export_hint(self) -> None:
+        """State what is missing, or exactly what Export will write."""
+        blockers = self._export_blockers()
+        if blockers:
+            self.export_hint.setText("Before export: " + ", ".join(blockers) + ".")
+            return
+        study = self.workflow_combo.currentText()
+        if self._uses_assembly():
+            n = len(self._parts)
+            what = f"{study}, reorder parts method, {n} part{'s' if n != 1 else ''}"
+        else:
+            window = f"{self.start_spin.value():.3f} s to {self.end_spin.value():.3f} s"
+            if self._workflow_name() == "CT":
+                method = {"landmarks": "landmarks", "cycle": "cycle frames"}[self._ct_method()]
+                what = f"{study}, {method} method, {window}"
+            else:
+                what = f"{study}, {window}"
+        self.export_hint.setText(f"Ready to export: {what}.")
+
+    def _export_targets(self) -> List[Path]:
+        """Every file the chosen export may write."""
+        subject = self.subject_edit.text().strip()
+        folder = Path(self.outdir_edit.text())
+        names = [f"{subject}FlowProfile.csv", f"{subject}PressureProfile.csv"]
+        if self._uses_assembly():
+            names.append(f"{subject}ImageReorderMap.csv")
+        else:
+            names += [f"{subject}_trigger_info.txt", f"{subject}_sanity_check.png"]
+        return [folder / name for name in names]
+
+    def _confirm_overwrite(self, targets: List[Path]) -> bool:
+        """Ask before replacing files of an earlier export. True means go on."""
+        existing = [path for path in targets if path.exists()]
+        if not existing:
+            return True
+        answer = QMessageBox.question(
+            self, "Replace Existing Files?",
+            f"{existing[0].parent} already holds:\n\n  "
+            + "\n  ".join(path.name for path in existing)
+            + "\n\nReplace them with this export?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        return answer == QMessageBox.Yes
+
+    def _export(self) -> None:
+        """Run the export that belongs to the chosen study type and CT method.
+
+        This is the one exit. Execute on one tab and Assemble & Export on
+        another used to be two, and which one applied was the user's problem.
+        """
+        # Ask about replacing files only when the inputs are complete. If
+        # something is missing, the export itself says exactly what.
+        if not self._export_blockers() and not self._confirm_overwrite(
+            self._export_targets()
+        ):
+            self.status_bar.showMessage("Export cancelled. No file was changed.")
+            return
+        if self._uses_assembly():
+            self._assemble_and_export()
+        else:
+            self._execute_processing()
+
+    def _show_export_result(self, report: dict) -> None:
+        """Keep the report of a finished export and show it in a panel.
+
+        Shown without blocking, so the main window stays usable while the
+        panel is open.
+        """
+        self._last_export_report = report
+        if self._result_dialog is not None:
+            self._result_dialog.close()
+            self._result_dialog.deleteLater()
+        self._result_dialog = ExportResultDialog(report, parent=self)
+        self._result_dialog.show()
 
     def _disconnect_click(self) -> None:
         """Disconnect canvas click callback if connected."""
@@ -2641,6 +2755,7 @@ class FlowProfileApp(QMainWindow):
             )
         n = len(self._parts)
         self.synth_status_label.setText("no parts" if n == 0 else f"{n} part{'s' if n != 1 else ''}")
+        self._update_export_hint()
 
     def _selected_part_row(self) -> int:
         return self.parts_list.currentRow()
@@ -2777,22 +2892,28 @@ class FlowProfileApp(QMainWindow):
             QMessageBox.critical(self, "Assembly Failed", str(exc))
             return
 
-        # Preview
-        AssemblyPreviewDialog(asm.time, asm.flow, len(asm.reorder_map), parent=self).exec_()
+        # Preview. Nothing is written unless Export is pressed there; the
+        # preview used to have only Close and the export ran regardless.
+        preview = AssemblyPreviewDialog(
+            asm.time, asm.flow, len(asm.reorder_map), parent=self
+        )
+        if preview.exec_() != QDialog.Accepted:
+            self.status_bar.showMessage("Export cancelled. No file was written.")
+            return
 
         # Export
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
             flow_file = output_dir / f"{subject}FlowProfile.csv"
             export_flow_csv(flow_file, asm.time, asm.flow)
-            written = [flow_file.name]
+            written = [flow_file]
             if asm.pressure is not None:
                 pfile = output_dir / f"{subject}PressureProfile.csv"
                 export_pressure_csv(pfile, asm.time, asm.pressure)
-                written.append(pfile.name)
+                written.append(pfile)
             map_file = output_dir / f"{subject}ImageReorderMap.csv"
             export_reorder_map_csv(map_file, asm.reorder_map)
-            written.append(map_file.name)
+            written.append(map_file)
         except Exception as exc:
             QMessageBox.critical(self, "Export Failed", str(exc))
             return
@@ -2800,12 +2921,25 @@ class FlowProfileApp(QMainWindow):
         order = ",".join(str(m[1]) for m in asm.reorder_map)
         if len(order) > 120:
             order = order[:117] + "..."
-        QMessageBox.information(
-            self, "Exported",
-            f"Wrote to {output_dir}:\n  " + "\n  ".join(written)
-            + f"\n\nAssembled {len(asm.flow)} samples, {len(asm.reorder_map)} images."
-            + f"\nReorder (original image order):\n{order}",
-        )
+        warnings = []
+        if include_pressure and asm.pressure is None:
+            note = result.metadata.get("pressure_note")
+            warnings.append(
+                f"No pressure profile: {note}." if note else self._PRESSURE_MISSING
+            )
+        self._show_export_result({
+            "folder": output_dir,
+            "files": written,
+            "summary": [
+                ("Samples", str(len(asm.flow))),
+                ("Images", str(len(asm.reorder_map))),
+                ("Image order (original numbers)", order),
+                ("Time", "starts at 0 in the profile; the reorder map keeps "
+                         "recording time"),
+            ],
+            "warnings": warnings,
+            "plot": None,
+        })
         self.status_bar.showMessage(f"Exported synthetic profile + reorder map for {subject}.")
 
     def _execute_processing(self) -> None:
@@ -3139,6 +3273,33 @@ class FlowProfileApp(QMainWindow):
                 pressure_note = result.metadata.get("pressure_note")
                 if include_pressure and result.pressure is None and pressure_note:
                     msg += f" | WARNING: {pressure_note}"
+
+                # The same outcome as a structured report, for the result
+                # panel. Pressure asked for but absent is always a warning
+                # there, with the specific reason when the workflow gave one.
+                warnings = []
+                if include_pressure and result.pressure is None:
+                    warnings.append(
+                        f"No pressure profile: {pressure_note}." if pressure_note
+                        else self._PRESSURE_MISSING
+                    )
+                files = [flow_file]
+                if pressure_file:
+                    files.append(pressure_file)
+                files += [trigger_file, plot_file]
+                self._processing_report.emit({
+                    "folder": output_dir,
+                    "files": files,
+                    "summary": [
+                        ("Duration", f"{result.time[-1]:.2f} s"),
+                        ("Sample rate", f"{result.sample_rate:.0f} Hz"),
+                        ("Samples", str(len(result.time))),
+                        ("Drift error", f"{result.drift_error:.6f}"),
+                        ("Time", "starts at 0, as STAR-CCM+ expects"),
+                    ],
+                    "warnings": warnings,
+                    "plot": plot_file,
+                })
 
                 self._processing_done.emit(msg)
 
