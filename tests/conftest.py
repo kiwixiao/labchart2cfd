@@ -9,10 +9,22 @@ from scipy.io import savemat
 
 
 @pytest.fixture(autouse=True)
-def _own_settings_file(tmp_path, monkeypatch):
+def _own_settings_file(tmp_path):
     """Each test gets its own settings file, so no test sees what another
-    (or the real application) saved: a last folder, a window size."""
-    monkeypatch.setenv("LABCHART2CFD_SETTINGS", str(tmp_path / "settings.ini"))
+    (or the real application) saved: a last folder, a window size.
+
+    Set on os.environ directly, not through monkeypatch. A test that calls
+    monkeypatch.undo() would take the override away with its own patches,
+    and its window then wrote into the user's real settings file.
+    """
+    name = "LABCHART2CFD_SETTINGS"
+    previous = os.environ.get(name)
+    os.environ[name] = str(tmp_path / "settings.ini")
+    yield
+    if previous is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = previous
 
 
 @pytest.fixture(scope="session")
