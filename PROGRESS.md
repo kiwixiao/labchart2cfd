@@ -1,7 +1,7 @@
 # PROGRESS
 
 ## NEXT STEP
-Building has stopped at the user's word (2026-11-20, `78863f0`). The user tries `feature/gui-pro-redesign` by hand on ENT005 and then merges it (the user merges). Relaunch `labchart2cfd` first: a window opened before 15:26 runs older code. Still wanted: one real MRI recording driven by hand.
+Building has stopped at the user's word (2026-11-20, `78863f0`). Asked directly how the window feels, the user answered: done for now, not final. They will use it on real recordings and come back with a list if something bothers them. Do not start further review rounds or changes on this branch until they do. The user tries `feature/gui-pro-redesign` by hand on ENT005 and then merges it (the user merges). Relaunch `labchart2cfd` first: a window opened before 15:26 runs older code. Still wanted: one real MRI recording driven by hand.
 
 Left open on purpose, from the third retest (`c44adee`), all narrow: a half image window draws an image the file only half holds (amber); Temporal Res is cautioned, not blocked; `Mark triggers` replaces a hand window without asking; the trigger info file reports trigger numbers for a hand window. One test logs matplotlib's constrained layout notice. No reviewer has retested since `c44adee`.
 
