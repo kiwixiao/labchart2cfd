@@ -354,3 +354,63 @@ def test_labels_of_comments_far_apart_all_sit_at_the_bottom(win, commented):
     open_block(win, commented)
 
     assert len({round(b.y0) for b in _label_boxes(win)}) == 1
+
+
+# ------------------------------------------------ step labels that would collide
+
+def _recording_with_steps(mat_file, tmp_path, steps):
+    """The fixture recording with the given (start, end) trigger steps in block 1."""
+    mat = {k: v for k, v in loadmat(str(mat_file)).items() if not k.startswith("__")}
+    data = mat["data"].ravel().copy()
+    t = np.arange(0.0, 10.0, 0.001)
+    trigger = np.zeros_like(t)
+    for start, end in steps:
+        trigger[(t >= start) & (t < end)] = 5.0
+    first = int(mat["datastart"][0, 0]) - 1        # channel 1, block 1
+    data[first:first + t.size] = trigger
+    mat["data"] = data
+    path = tmp_path / "steps.mat"
+    savemat(str(path), mat)
+    return path
+
+
+def _step_labels(win):
+    return [a.get_text() for _step, a in win._ct_step_labels if a.get_visible()]
+
+
+# Steps shorter than 0.5 s are not detected, so in a 10 s block they cannot
+# be crowded at full view. Zooming out stands in for a long recording.
+_FOUR_STEPS = [(1.0, 2.0), (5.0, 5.6), (5.7, 6.3), (6.4, 7.0)]
+
+
+def test_steps_too_close_to_label_apart_share_one_label(win, mat_file, tmp_path):
+    """Three scan steps within 8 s of a 2300 s recording had their labels
+    printed on one spot. They are named together until zooming separates them."""
+    win.workflow_combo.setCurrentText("CT")
+    open_block(win, _recording_with_steps(mat_file, tmp_path, _FOUR_STEPS))
+    assert _step_labels(win) == ["Step 1", "Step 2", "Step 3", "Step 4"]
+
+    win.ax_top.set_xlim(-20.0, 30.0)
+
+    assert _step_labels(win) == ["Step 1", "Steps 2 to 4"]
+
+
+def test_the_shared_label_splits_when_zooming_separates_the_steps(
+        win, mat_file, tmp_path):
+    win.workflow_combo.setCurrentText("CT")
+    open_block(win, _recording_with_steps(mat_file, tmp_path, _FOUR_STEPS))
+    win.ax_top.set_xlim(-20.0, 30.0)
+
+    win.ax_top.set_xlim(4.5, 7.5)
+
+    assert _step_labels(win) == ["Step 1", "Step 2", "Step 3", "Step 4"]
+
+
+def test_a_shared_label_sits_between_its_steps(win, mat_file, tmp_path):
+    win.workflow_combo.setCurrentText("CT")
+    open_block(win, _recording_with_steps(mat_file, tmp_path, _FOUR_STEPS))
+
+    win.ax_top.set_xlim(-20.0, 30.0)
+
+    shared = [a for _step, a in win._ct_step_labels if a.get_visible()][-1]
+    assert shared.get_position()[0] == pytest.approx((5.3 + 6.7) / 2)

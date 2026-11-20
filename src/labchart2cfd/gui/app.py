@@ -253,6 +253,9 @@ class FlowProfileApp(QMainWindow):
         self._ct_steps: list = []  # detected step triggers
         self._ct_selected_step: Optional[dict] = None  # currently selected step
         self._ct_step_markers: list = []  # artists for step span visualization
+        # (step, label) for each detected step, in time order, so labels that
+        # would print over each other can be merged at the current zoom.
+        self._ct_step_labels: list = []
         self._ct_landmark_mode: Optional[str] = None  # "inhale_start" or "exhale_end"
         self._ct_inhale_start: Optional[float] = None
         self._ct_exhale_end: Optional[float] = None
@@ -461,9 +464,7 @@ class FlowProfileApp(QMainWindow):
 
         # Over the numbers of a y axis, the wheel stretches that axis.
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
-        # Comment labels are kept apart in pixels, which a resize changes.
-        self.canvas.mpl_connect(
-            "resize_event", lambda _event: self._layout_comment_labels())
+        self.canvas.mpl_connect("resize_event", self._on_canvas_resized)
 
         layout.addWidget(self.mode_banner)
         layout.addLayout(tools)
@@ -1661,6 +1662,7 @@ class FlowProfileApp(QMainWindow):
         self._time_markers = []
         self._trigger_markers = []
         self._ct_step_markers = []
+        self._ct_step_labels = []
         self._ct_interval_markers = []
         self._ct_landmark_artists = []
         self._comment_artists = []
@@ -1947,8 +1949,9 @@ class FlowProfileApp(QMainWindow):
         x_lo, x_hi = ax.get_xlim()
         for envelope in self._envelopes:
             envelope.update(x_lo, x_hi)
-        # Which comment labels crowd each other depends on the zoom.
+        # Which labels crowd each other depends on the zoom.
         self._layout_comment_labels()
+        self._layout_step_labels()
 
     def _show_overview(self) -> None:
         """Draw the channels-x-blocks overview grid for the loaded file."""
@@ -2386,6 +2389,53 @@ class FlowProfileApp(QMainWindow):
                 fontsize=7, color="orange", ha="center", va="bottom",
             )
             self._ct_step_markers.append(ann)
+            self._ct_step_labels.append((step, ann))
+        self._layout_step_labels()
+
+    def _on_canvas_resized(self, _event) -> None:
+        """Labels are kept apart in pixels, which a resize changes."""
+        if self._plot_mode != "selected":
+            return
+        self._layout_comment_labels()
+        self._layout_step_labels()
+
+    # Steps whose middles are closer than this on screen share one label.
+    _STEP_LABEL_MIN_PX = 50.0
+
+    def _layout_step_labels(self) -> None:
+        """Name steps together while they are too close to label apart.
+
+        Three scan steps within 8 s of a 2300 s recording had "Step 5",
+        "Step 6" and "Step 7" printed on one spot. Such a run is labelled
+        once, "Steps 5 to 7", between its steps, and each step gets its own
+        label back when zooming in separates them.
+        """
+        labels = self._ct_step_labels
+        if not labels or self.ax_top is None:
+            return
+        middles = [(s["start_time"] + s["end_time"]) / 2 for s, _ann in labels]
+        pixels = [self.ax_top.transData.transform((m, 0.0))[0] for m in middles]
+        runs = [[0]]
+        for i in range(1, len(labels)):
+            if pixels[i] - pixels[i - 1] < self._STEP_LABEL_MIN_PX:
+                runs[-1].append(i)
+            else:
+                runs.append([i])
+        for run in runs:
+            first, last = run[0], run[-1]
+            for i in run[1:]:
+                labels[i][1].set_visible(False)
+            ann = labels[first][1]
+            if first == last:
+                text = f"Step {labels[first][0]['index']}"
+            else:
+                text = (f"Steps {labels[first][0]['index']} to "
+                        f"{labels[last][0]['index']}")
+            where = ((middles[first] + middles[last]) / 2, 1.0)
+            ann.set_text(text)
+            ann.xy = where
+            ann.set_position(where)
+            ann.set_visible(True)
 
     def _on_click(self, event) -> None:
         """Handle mouse click on the canvas for data picker."""
@@ -2671,6 +2721,7 @@ class FlowProfileApp(QMainWindow):
         """Remove step trigger visualization markers."""
         _remove_all(self._ct_step_markers)
         self._ct_step_markers.clear()
+        self._ct_step_labels = []
 
     def _select_ct_step(self) -> None:
         """Select a specific step trigger, draw interval lines, prepare for landmarks."""
