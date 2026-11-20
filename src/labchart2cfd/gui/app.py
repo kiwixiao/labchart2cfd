@@ -97,6 +97,56 @@ _CT_METHODS = (
 # Line colours for the role a channel plays, used on the overview.
 _ROLE_COLORS = {"flow": "#1f77b4", "trigger": "#d62728", "pressure": "#2ca02c"}
 
+# What a click on the plot does in each click mode: (kind, text for the banner).
+# "idle" is the resting state, "active" means a tool is armed and waiting for a
+# click, and "blocked" means clicks are being swallowed.
+_BANNERS = {
+    "empty": ("idle",
+              "Open a LabChart .mat recording to begin: use Open recording "
+              "on the left."),
+    "overview": ("idle",
+                 "All blocks of the recording. Click a block to open it."),
+    "window": ("idle",
+               "Click the plot to set Start, then click again to set End. "
+               "Right click clears the markers."),
+    "toolbar": ("blocked",
+                "The zoom or pan tool is on, so clicks on the plot are "
+                "ignored. Turn the tool off in the toolbar to place markers."),
+    "inhale_start": ("active", "Click the plot where inhale starts."),
+    "exhale_end": ("active", "Click the plot where exhale ends."),
+    "cycle": ("active",
+              "Labelling cycle frames: click frames in breathing order. "
+              "Right click removes the last label."),
+    "parts_idle": ("idle",
+                   "Reorder parts: plain clicks do nothing here, so the image "
+                   "grid cannot move by accident. Press Pick on Plot to "
+                   "choose images."),
+    "part_first": ("active",
+                   "Picking a part: click the first image of the range. "
+                   "Right click cancels."),
+    "part_second": ("active",
+                    "Picking a part: now click the last image of the range. "
+                    "Right click cancels."),
+}
+
+
+class ModeAwareToolbar(NavigationToolbar2QT):
+    """Navigation toolbar that announces when its zoom or pan tool toggles.
+
+    While either tool is on it owns every click on the plot. The window needs
+    to hear about the change to tell the user why markers stopped working.
+    """
+
+    mode_changed = pyqtSignal()
+
+    def pan(self, *args) -> None:
+        super().pan(*args)
+        self.mode_changed.emit()
+
+    def zoom(self, *args) -> None:
+        super().zoom(*args)
+        self.mode_changed.emit()
+
 
 class AssemblyPreviewDialog(QDialog):
     """Popup showing the assembled synthetic flow profile."""
@@ -217,6 +267,7 @@ class FlowProfileApp(QMainWindow):
         self._connect_live_updates()
         # Show only the sections that belong to the current study type.
         self._on_workflow_changed()
+        self._refresh_banner()
 
         # Worker-completion signals land on the GUI thread here.
         self._processing_done.connect(self._on_processing_done)
@@ -273,11 +324,56 @@ class FlowProfileApp(QMainWindow):
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
         # Matplotlib navigation toolbar (zoom, pan, home, save).
-        self.toolbar = NavigationToolbar2QT(self.canvas, panel)
+        self.toolbar = ModeAwareToolbar(self.canvas, panel)
+        self.toolbar.mode_changed.connect(self._refresh_banner)
 
+        # One line that always says what a click on the plot will do. The
+        # click modes are otherwise invisible state.
+        self.mode_banner = QLabel()
+        self.mode_banner.setObjectName("modeBanner")
+        self.mode_banner.setWordWrap(True)
+        self.mode_banner.setProperty("kind", "idle")
+
+        layout.addWidget(self.mode_banner)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas, 1)
         return panel
+
+    # ------------------------------------------------------------------
+    # Click modes
+    # ------------------------------------------------------------------
+
+    def _click_mode(self) -> str:
+        """The one thing a click on the plot means right now (a _BANNERS key).
+
+        Both the click handler and the banner read this, so what the banner
+        promises and what a click does cannot drift apart.
+        """
+        if self._plot_mode == "empty":
+            return "empty"
+        if self.toolbar.mode:
+            return "toolbar"
+        if self._plot_mode == "overview":
+            return "overview"
+        if self._capturing_part:
+            return "part_second" if self._part_click_buffer else "part_first"
+        if self._ct_cycle_mode:
+            return "cycle"
+        if self._ct_landmark_mode is not None:
+            return self._ct_landmark_mode
+        if self._synth_mode:
+            return "parts_idle"
+        return "window"
+
+    def _refresh_banner(self) -> None:
+        """Make the banner describe the current click mode."""
+        kind, text = _BANNERS[self._click_mode()]
+        self.mode_banner.setText(text)
+        if self.mode_banner.property("kind") != kind:
+            self.mode_banner.setProperty("kind", kind)
+            # A changed dynamic property only restyles after a repolish.
+            self.mode_banner.style().unpolish(self.mode_banner)
+            self.mode_banner.style().polish(self.mode_banner)
 
     def _build_sidebar(self) -> QWidget:
         """Numbered sections in the order the work is done, Export pinned below."""
@@ -862,8 +958,48 @@ class FlowProfileApp(QMainWindow):
         self.ct_scan_section.setVisible(is_ct)
         self.ct_method_section.setVisible(is_ct)
         self.trigger_section.setVisible(not is_ct)
-        if not is_ct and self.synth_enable_chk.isChecked():
-            self.synth_enable_chk.setChecked(False)
+        self._sync_ct_method()
+
+    def _sync_ct_method(self) -> None:
+        """Arm exactly the chosen CT method and disarm the other two.
+
+        Manual mode used to have its own enable switch on another tab. It is
+        now on while CT with the parts method is chosen, and off otherwise.
+        Leaving a method also disarms its click mode, so a click can never
+        land in a method that is no longer on screen.
+        """
+        is_ct = self._workflow_name() == "CT"
+        method = self._ct_method() if is_ct else None
+        if method != "cycle" and self.cycle_mode_btn.isChecked():
+            self.cycle_mode_btn.setChecked(False)
+        if method != "landmarks":
+            self._ct_landmark_mode = None
+        self.synth_enable_chk.setChecked(method == "parts")
+        self._refresh_banner()
+
+    def _ct_export_inputs(self):
+        """(cycle frames, inhale start, exhale end) of the chosen CT method.
+
+        Only the method on screen feeds the export. Cycle labels used to
+        override landmarks whenever any existed, even ones left over from
+        before the user changed method.
+        """
+        method = self._ct_method()
+        if method == "cycle":
+            return list(self._ct_cycle_frames), None, None
+        if method == "landmarks":
+            return [], self._ct_inhale_start, self._ct_exhale_end
+        return [], None, None
+
+    def _seed_synth_image_count(self) -> None:
+        """Start the parts image count from the selected step, once.
+
+        Only while it still holds its initial 1. After that the count is the
+        user's own and nothing rewrites it.
+        """
+        if (self.synth_images_spin.value() <= 1
+                and self.ct_total_images_spin.value() > 1):
+            self.synth_images_spin.setValue(self.ct_total_images_spin.value())
 
     def _on_ct_method_changed(self) -> None:
         """Bring the chosen CT method's controls on screen, and only those."""
@@ -878,6 +1014,7 @@ class FlowProfileApp(QMainWindow):
             policy = QSizePolicy.Preferred if i == index else QSizePolicy.Ignored
             self.ct_method_stack.widget(i).setSizePolicy(QSizePolicy.Preferred, policy)
         self.ct_method_stack.adjustSize()
+        self._sync_ct_method()
 
     def _update_outdir(self, *_args) -> None:
         """Recompute output dir based on current mat file and subject."""
@@ -992,6 +1129,7 @@ class FlowProfileApp(QMainWindow):
                 self._plot_mode = "empty"
                 self.fig.clear()
                 self.canvas.draw_idle()
+                self._refresh_banner()
                 QMessageBox.critical(self, "Load Error", str(e))
                 self.status_bar.showMessage("Error loading file")
                 return
@@ -1157,6 +1295,7 @@ class FlowProfileApp(QMainWindow):
         self.status_bar.showMessage(
             f"Overview: {nch} channels x {nbl} blocks | Click a block to open it"
         )
+        self._refresh_banner()
 
     def _plot_selected(self) -> None:
         """Plot a specific block in detail (flow + trigger top, flow-only bottom)."""
@@ -1269,9 +1408,10 @@ class FlowProfileApp(QMainWindow):
         self._click_cid = self.canvas.mpl_connect("button_press_event", self._on_click)
 
         self.status_bar.showMessage(
-            f"Flow [{flow_row}, {col}]: {len(time)} samples, {time[-1]:.2f}s{trigger_info} | "
-            f"Left-click bottom plot to mark time, right-click to clear"
+            f"Block {col}, {self._channel_text(flow_row)}: {len(time)} samples, "
+            f"{time[-1]:.2f}s{trigger_info}"
         )
+        self._refresh_banner()
 
     def _refresh_top_legend(self) -> None:
         """Combine handles from ax_top and ax_top_trig into one legend."""
@@ -1368,34 +1508,37 @@ class FlowProfileApp(QMainWindow):
         valid_axes = (self.ax_top, self.ax_bottom, self.ax_top_trig)
         if event.inaxes not in valid_axes or event.inaxes is None:
             return
-        # Ignore clicks when toolbar is in zoom/pan mode
-        if self.toolbar.mode:
+        # The same answer the banner shows, so the two cannot disagree.
+        mode = self._click_mode()
+        if mode == "toolbar":  # zoom or pan owns the click
             return
+        picking_part = mode in ("part_first", "part_second")
 
         if event.button == 1:  # Left click
-            if self._capturing_part:
+            if picking_part:
                 self._capture_part_click(event.xdata)
-            elif self._ct_cycle_mode:
+            elif mode == "cycle":
                 self._add_cycle_label(event.xdata)
-            elif self._ct_landmark_mode is not None:
+            elif mode in ("inhale_start", "exhale_end"):
                 self._add_ct_landmark(event.xdata)
-            elif self._synth_mode:
+            elif mode == "parts_idle":
                 # Full-manual mode: ignore unarmed clicks. Time markers would
                 # overwrite Start/End, and the image grid is computed live from
                 # those, so a stray click would silently redefine the grid and
                 # invalidate parts already added.
                 self.status_bar.showMessage(
-                    "Full-manual mode: click 'Pick on Plot' first to select frames."
+                    "Reorder parts: press 'Pick on Plot' first to select frames."
                 )
             else:
                 self._add_time_marker(event.xdata)
         elif event.button == 3:  # Right click
-            if self._capturing_part:
+            if picking_part:
                 self._cancel_part_capture()
-            elif self._ct_cycle_mode:
+            elif mode == "cycle":
                 self._remove_last_cycle_label()
             else:
                 self._clear_time_markers()
+        self._refresh_banner()
 
     def _add_time_marker(self, x_time: float) -> None:
         """Add a vertical time marker on both top and bottom plots."""
@@ -1689,6 +1832,9 @@ class FlowProfileApp(QMainWindow):
 
         # Draw temporal resolution interval lines within the step
         self._draw_ct_intervals()
+        # The step's image count is known now, so the parts grid can start
+        # from it (only while its own count is still unset).
+        self._seed_synth_image_count()
 
         # Bring the step into view so a short scan inside a long recording is
         # actually readable.
@@ -1722,12 +1868,14 @@ class FlowProfileApp(QMainWindow):
         self._claim_click_mode()
         self._ct_landmark_mode = "inhale_start"
         self.status_bar.showMessage("Click on plot to mark INHALE START")
+        self._refresh_banner()
 
     def _mark_exhale_end(self) -> None:
         """Activate click mode to place exhale end landmark."""
         self._claim_click_mode()
         self._ct_landmark_mode = "exhale_end"
         self.status_bar.showMessage("Click on plot to mark EXHALE END")
+        self._refresh_banner()
 
     def _draw_ct_intervals(self, update_total_images_field: bool = True) -> None:
         """Draw temporal resolution interval lines within the step window.
@@ -1913,6 +2061,7 @@ class FlowProfileApp(QMainWindow):
         self.ct_inhale_label.setText("--")
         self.ct_exhale_label.setText("--")
         self.canvas.draw_idle()
+        self._refresh_banner()
 
     def _landmark_snap_text(self, x_time: float) -> str:
         """Describe where the cut will actually land, or '' if not knowable.
@@ -2017,6 +2166,7 @@ class FlowProfileApp(QMainWindow):
             )
         else:
             self.status_bar.showMessage("Cycle label mode off.")
+        self._refresh_banner()
 
     def _cycle_start_time_dt(self) -> Optional[tuple]:
         """Return (start_t, dt, total_imgs) matching what _draw_ct_intervals uses.
@@ -2133,18 +2283,17 @@ class FlowProfileApp(QMainWindow):
             if self._ct_cycle_mode and hasattr(self, "cycle_mode_btn"):
                 self.cycle_mode_btn.setChecked(False)
             self._ct_landmark_mode = None
-            # Seed the image count from the step the first time only, as a
-            # starting point. After that it is yours and nothing rewrites it.
-            if self.synth_images_spin.value() <= 1 and self.ct_total_images_spin.value() > 1:
-                self.synth_images_spin.setValue(self.ct_total_images_spin.value())
-            self._draw_synth_grid()
+            self._seed_synth_image_count()
+            # Quiet: the mode now comes on with the method, often before any
+            # block is open, and that is not an error worth a dialog.
+            self._draw_synth_grid(quiet=True)
             self.status_bar.showMessage(
-                "FULL MANUAL: set Start/End + Temporal Res, then 'Add Part' and "
-                "click two image frames per part."
+                "Reorder parts: select a step, set the image count, then "
+                "add parts in breathing order."
             )
         else:
             self._cancel_part_capture()
-            self.status_bar.showMessage("Full-manual mode off.")
+        self._refresh_banner()
 
     def _synth_grid(self):
         """Return (origin, dt, n_images) for the manual grid, or None.
@@ -2393,8 +2542,9 @@ class FlowProfileApp(QMainWindow):
             return
         self._capturing_part = True
         self._part_click_buffer = []
-        self.capture_hint.setText("Click the START frame on the plot…")
+        self.capture_hint.setText("Click the START frame on the plot...")
         self.status_bar.showMessage("Click the START frame on the plot (right-click cancels).")
+        self._refresh_banner()
 
     def _cancel_part_capture(self) -> None:
         self._capturing_part = False
@@ -2402,6 +2552,8 @@ class FlowProfileApp(QMainWindow):
         self._clear_capture_marker()
         if hasattr(self, "capture_hint"):
             self.capture_hint.setText("")
+        if hasattr(self, "mode_banner"):
+            self._refresh_banner()
 
     def _draw_capture_marker(self, img: int) -> None:
         self._clear_capture_marker()
@@ -2707,12 +2859,16 @@ class FlowProfileApp(QMainWindow):
             )
             return
 
+        # Only the CT method on screen feeds the export. Cycle frames are
+        # original image indices in click order (empty for the other methods).
+        ct_cycle_frames, ct_inhale_start, ct_exhale_end = self._ct_export_inputs()
+
         # Cycle labels were snapped against the drawn fencepost grid, which is
         # anchored at detected_start + shift. The export windows at Start Time.
         # If those disagree (shift previewed but Apply Correction not clicked,
         # or Start typed by hand), every chunk would be taken from the wrong
         # place, so refuse rather than export silently shifted data.
-        if self._ct_cycle_frames and self._ct_detected_start is not None:
+        if ct_cycle_frames and self._ct_detected_start is not None:
             grid_anchor = (
                 self._ct_detected_start + self.ct_shift_spin.value() / 1000.0
             )
@@ -2736,12 +2892,7 @@ class FlowProfileApp(QMainWindow):
         trigger_total = self._trigger_count
 
         # Capture CT-specific state
-        ct_inhale_start = self._ct_inhale_start
-        ct_exhale_end = self._ct_exhale_end
-        ct_selected_step = self._ct_selected_step
         ct_temporal_res_ms = float(self.ct_temporal_res_spin.value())
-        # Cycle-labeling: ordered original image indices (empty → landmark path)
-        ct_cycle_frames = list(self._ct_cycle_frames)
         # Manual "Total Images" the user set in the GUI (may be smaller than
         # the workflow's auto-computed fencepost count for the raw step window).
         ct_total_images_manual = int(self.ct_total_images_spin.value())
