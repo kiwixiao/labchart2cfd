@@ -1989,7 +1989,8 @@ class FlowProfileApp(QMainWindow):
                         + ", " + self._ct_image_count_text())
             else:
                 what = f"{study}, {window}"
-        check = f" Check: {'; '.join(cautions)}." if cautions else ""
+        said = [text for text in cautions if text]
+        check = f" Check: {'; '.join(said)}." if said else ""
         self.export_hint.setText(
             f"Ready to export: {what}. {self._export_sources()}.{check}")
 
@@ -1998,26 +1999,26 @@ class FlowProfileApp(QMainWindow):
 
         They used to sit inside a green line that began "Ready to export",
         the colour and the words that mean go. With any of them the line is
-        amber and ends with what to check.
+        amber. An empty entry turns the line amber without adding words,
+        for a fact the line already states.
         """
         if self._workflow_name() != "CT" or self._uses_assembly():
             return []
         cautions = []
         if not self._ct_dt_confirmed:
             cautions.append(
-                f"Temporal Res {self.ct_temporal_res_spin.value():g} ms is the "
-                "program's default, confirm it against your image series "
-                "(click its box and press Enter)"
+                "Temporal Res is still the program's default. Enter yours, or "
+                "confirm it with Enter in its box"
             )
         dt_s = self.ct_temporal_res_spin.value() / 1000.0
         exact = (self.end_spin.value() - self.start_spin.value()) / dt_s
         if abs(exact - round(exact)) > 0.05:
-            cautions.append("the window is not a whole number of images")
+            cautions.append("")  # the line gives the length in images
         frames, _inhale, _exhale = self._ct_export_inputs()
         nothing = (not frames if self._ct_method() == "cycle"
                    else self._ct_inhale_start is None and self._ct_exhale_end is None)
         if nothing:
-            cautions.append("nothing is marked, so the scan is exported as recorded")
+            cautions.append("")  # the line says the window is exported as recorded
         return cautions
 
     def _ct_image_count_text(self) -> str:

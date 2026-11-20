@@ -96,6 +96,8 @@ def main() -> None:
     # The window saves its size on closing. Keep that out of the user's own
     # settings: this run is not a session of theirs.
     os.environ["LABCHART2CFD_SETTINGS"] = str(out / "settings.ini")
+    # Start from the default window every run, not from what the last run saved.
+    (out / "settings.ini").unlink(missing_ok=True)
 
     app = QApplication.instance() or QApplication([])
     apply_theme(app)

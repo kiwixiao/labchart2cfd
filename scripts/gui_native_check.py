@@ -27,6 +27,8 @@ out.mkdir(parents=True, exist_ok=True)
 # The window saves its size on closing, and this walk shrinks it to the
 # minimum. Keep that out of the user's own settings.
 os.environ["LABCHART2CFD_SETTINGS"] = str(out / "settings.ini")
+# Start from the default window every run, not from what the last run saved.
+(out / "settings.ini").unlink(missing_ok=True)
 
 from PyQt5.QtWidgets import (QAbstractButton, QApplication, QComboBox, QLabel,
                              QLineEdit, QMessageBox)
