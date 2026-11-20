@@ -1,0 +1,163 @@
+"""Reusable widgets for the labchart2cfd GUI.
+
+Kept apart from ``app.py`` so each widget can be tested on its own, without
+building the whole main window.
+"""
+
+from typing import Sequence
+
+from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtWidgets import (
+    QComboBox, QFrame, QLayout, QScrollArea, QSizePolicy, QToolButton,
+    QVBoxLayout, QWidget,
+)
+
+
+def channel_label(index: int, title: str, noun: str = "Channel") -> str:
+    """Text for one channel or block entry.
+
+    A blank title falls back to "<noun> <index>", so every entry still names
+    its own 1-indexed position and none is mistaken for a neighbour.
+    """
+    title = (title or "").strip()
+    return f"{index}: {title}" if title else f"{noun} {index}"
+
+
+class ChannelCombo(QComboBox):
+    """Dropdown that picks a 1-indexed channel (or block) by name.
+
+    It answers ``value()`` and ``setValue()`` like the QSpinBox it replaces, so
+    the handlers that read a row number did not have to change. With
+    ``allow_none`` the first entry is "None" and reports 0, the value that has
+    always meant "no trigger" or "no pressure" in this application.
+    """
+
+    # Entries offered before a recording is loaded. The old spin boxes allowed
+    # rows 1 to 20 at that stage, and callers set a row before loading.
+    DEFAULT_COUNT = 20
+    NONE_TEXT = "None"
+
+    def __init__(self, noun: str = "Channel", allow_none: bool = False,
+                 parent=None) -> None:
+        super().__init__(parent)
+        self._noun = noun
+        self._allow_none = allow_none
+        self.set_items([""] * self.DEFAULT_COUNT)
+
+    def minimum(self) -> int:
+        return 0 if self._allow_none else 1
+
+    def maximum(self) -> int:
+        return self.count() - (1 if self._allow_none else 0)
+
+    def value(self) -> int:
+        data = self.currentData()
+        return int(data) if data is not None else self.minimum()
+
+    def setValue(self, value: int) -> None:  # noqa: N802 (QSpinBox spelling)
+        """Select a row, clamped into the rows on offer as a spin box would."""
+        value = max(self.minimum(), min(int(value), self.maximum()))
+        index = self.findData(value)
+        if index >= 0:
+            self.setCurrentIndex(index)
+
+    def set_items(self, titles: Sequence[str]) -> None:
+        """Offer one entry per title, keeping the current row when it survives.
+
+        A current row past the new last entry moves to the last entry, the
+        same clamp the spin boxes applied when a file had fewer channels.
+        """
+        previous = self.value() if self.count() else None
+        self.blockSignals(True)
+        try:
+            self.clear()
+            if self._allow_none:
+                self.addItem(self.NONE_TEXT, 0)
+            for index, title in enumerate(titles, start=1):
+                self.addItem(channel_label(index, title, self._noun), index)
+        finally:
+            self.blockSignals(False)
+        if previous is not None:
+            self.setValue(previous)
+
+
+class VerticalScrollArea(QScrollArea):
+    """A scroll area that scrolls up and down only.
+
+    With the horizontal bar off, content wider than the viewport is simply cut
+    off at the right edge. This area therefore keeps itself at least as wide
+    as its content needs, plus room for the vertical scroll bar.
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWidgetResizable(True)
+        self.setFrameShape(QFrame.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+    def setWidget(self, widget: QWidget) -> None:  # noqa: N802 (Qt spelling)
+        super().setWidget(widget)
+        widget.installEventFilter(self)
+        self._fit_width_to_content()
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt spelling)
+        # The content's needs change when sections appear, fold or restyle.
+        if watched is self.widget() and event.type() in (
+            QEvent.LayoutRequest, QEvent.Resize, QEvent.Polish,
+        ):
+            self._fit_width_to_content()
+        return super().eventFilter(watched, event)
+
+    def _fit_width_to_content(self) -> None:
+        content = self.widget()
+        if content is None:
+            return
+        needed = (content.minimumSizeHint().width()
+                  + self.verticalScrollBar().sizeHint().width())
+        if needed != self.minimumWidth():
+            self.setMinimumWidth(needed)
+
+
+class CollapsibleSection(QWidget):
+    """A titled sidebar section whose body folds away when its header is clicked."""
+
+    def __init__(self, title: str, parent=None) -> None:
+        super().__init__(parent)
+        self.header = QToolButton(self)
+        self.header.setObjectName("sectionHeader")
+        self.header.setText(title)
+        self.header.setCheckable(True)
+        self.header.setChecked(True)
+        self.header.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.header.setArrowType(Qt.DownArrow)
+        self.header.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+        self.body = QWidget(self)
+        self.body.setObjectName("sectionBody")
+        self.body_layout = QVBoxLayout(self.body)
+        self.body_layout.setContentsMargins(10, 6, 10, 10)
+        self.body_layout.setSpacing(6)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        outer.addWidget(self.header)
+        outer.addWidget(self.body)
+
+        self.header.toggled.connect(self._on_toggled)
+
+    def _on_toggled(self, expanded: bool) -> None:
+        self.body.setVisible(expanded)
+        self.header.setArrowType(Qt.DownArrow if expanded else Qt.RightArrow)
+
+    def is_expanded(self) -> bool:
+        return self.header.isChecked()
+
+    def set_expanded(self, expanded: bool) -> None:
+        self.header.setChecked(expanded)
+
+    def add_widget(self, widget: QWidget) -> None:
+        self.body_layout.addWidget(widget)
+
+    def add_layout(self, layout: QLayout) -> None:
+        self.body_layout.addLayout(layout)

@@ -1,0 +1,239 @@
+"""Tests for the main window layout and its guided flow.
+
+Qt runs offscreen so no window appears. These pin what the user sees and does:
+the controls live in a sidebar beside the plot, a recording opens in one
+action, channels are picked by name, and only the controls that belong to the
+chosen study type are on screen.
+"""
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import numpy as np
+import pytest
+from PyQt5.QtCore import Qt
+from PyQt5.QtWidgets import QApplication, QSplitter
+from scipy.io import savemat
+
+from labchart2cfd.gui.app import FlowProfileApp
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def no_modal_dialogs(monkeypatch):
+    """A modal dialog would hang the run, so any unexpected one fails loudly."""
+    def _refuse(kind):
+        def _raise(*args, **_kwargs):
+            text = " | ".join(str(a) for a in args[1:3])
+            raise AssertionError(f"unexpected {kind} dialog: {text}")
+        return staticmethod(_raise)
+
+    for kind in ("warning", "critical", "information", "question"):
+        monkeypatch.setattr(f"labchart2cfd.gui.app.QMessageBox.{kind}", _refuse(kind))
+
+
+@pytest.fixture
+def win(qapp):
+    w = FlowProfileApp()
+    yield w
+    w.close()
+
+
+@pytest.fixture
+def mat_file(tmp_path):
+    """A 4 channel, 3 block LabChart export.
+
+    Channel 3 has a blank title. Block 3 holds only the spare channel, so the
+    flow channel is empty there.
+    """
+    fs = 1000.0
+    t = np.arange(0.0, 10.0, 1 / fs)
+    trigger = np.zeros_like(t)
+    trigger[(t >= 2.0) & (t < 5.0)] = 5.0
+    flow = np.sin(2 * np.pi * 0.5 * t)
+    spare = np.full_like(t, 0.1)
+    pressure = 2.0 * np.cos(2 * np.pi * 0.5 * t)
+    grid = [
+        [trigger, trigger, None],
+        [flow, 0.5 * flow, None],
+        [None, spare, spare],
+        [pressure, pressure, None],
+    ]
+
+    chunks = []
+    start = np.full((4, 3), -1.0)
+    end = np.full((4, 3), -1.0)
+    position = 1  # LabChart indices are 1-based and inclusive
+    for ch, row in enumerate(grid):
+        for bl, signal in enumerate(row):
+            if signal is None:
+                continue
+            chunks.append(signal)
+            start[ch, bl] = position
+            end[ch, bl] = position + len(signal) - 1
+            position += len(signal)
+
+    path = tmp_path / "rec.mat"
+    savemat(str(path), {
+        "data": np.concatenate(chunks),
+        "datastart": start,
+        "dataend": end,
+        "samplerate": np.full((4, 3), fs),
+        "titles": np.array(["Trigger ", "Flow    ", "        ", "Pressure"]),
+    })
+    return path
+
+
+class _Event:
+    """Minimal stand-in for a matplotlib MouseEvent."""
+
+    def __init__(self, inaxes, xdata=0.0, button=1):
+        self.inaxes = inaxes
+        self.xdata = xdata
+        self.button = button
+
+
+def _choose_ct_method(win, key):
+    win.ct_method_combo.setCurrentIndex(win.ct_method_combo.findData(key))
+
+
+# ------------------------------------------------------------------- layout
+
+def test_controls_sit_in_a_sidebar_beside_the_plot(win):
+    """The plot keeps the full window height; controls no longer sit under it."""
+    splitter = win.centralWidget()
+
+    assert isinstance(splitter, QSplitter)
+    assert splitter.orientation() == Qt.Horizontal
+    assert splitter.widget(0).isAncestorOf(win.flow_row_spin)
+    assert splitter.widget(0).isAncestorOf(win.execute_btn)
+    assert splitter.widget(1).isAncestorOf(win.canvas)
+
+
+def test_no_sidebar_control_is_clipped_behind_the_scroll_bar(win, qapp):
+    """The CT sections are the widest. They must still fit the sidebar."""
+    win.show()
+    win.workflow_combo.setCurrentText("CT")
+    qapp.processEvents()
+
+    content = win.sidebar_scroll.widget()
+
+    assert win.sidebar_scroll.viewport().width() >= content.minimumSizeHint().width()
+
+
+def test_only_one_image_interval_box_is_shown(win):
+    """Two mirrored Temporal Res boxes showed one quantity twice."""
+    assert win.synth_dt_spin.isHidden()
+    assert not win.ct_temporal_res_spin.isHidden()
+
+    win.ct_temporal_res_spin.setValue(150.0)
+
+    assert win.synth_dt_spin.value() == pytest.approx(150.0)  # still mirrored
+
+
+# ------------------------------------------------------- opening a recording
+
+def test_opening_a_recording_loads_it_and_shows_the_overview(win, mat_file):
+    """One action replaces Browse, then Load Overview."""
+    win.open_recording(mat_file)
+
+    assert win.data is not None
+    assert win._plot_mode == "overview"
+    assert mat_file.name in win.file_label.text()
+
+
+def test_channel_pickers_show_the_names_from_the_file(win, mat_file):
+    win.open_recording(mat_file)
+
+    flow = [win.flow_row_spin.itemText(i) for i in range(win.flow_row_spin.count())]
+    assert flow == ["1: Trigger", "2: Flow", "Channel 3", "4: Pressure"]
+    assert win.trigger_row_spin.itemText(0) == "None"
+    assert win.col_spin.count() == 3
+
+
+def test_clicking_an_overview_tile_opens_that_block(win, mat_file):
+    win.open_recording(mat_file)
+
+    win._on_overview_click(_Event(win._overview_axes[(2, 1)]))
+
+    assert win._plot_mode == "selected"
+    assert win.col_spin.value() == 1
+
+
+def test_clicking_a_block_without_flow_data_stays_on_the_overview(win, mat_file):
+    win.open_recording(mat_file)
+
+    win._on_overview_click(_Event(win._overview_axes[(3, 3)]))
+
+    assert win._plot_mode == "overview"
+    assert "empty" in win.status_bar.currentMessage().lower()
+
+
+def test_changing_the_block_dropdown_refreshes_the_detail_view(win, mat_file):
+    """No separate Plot Selected click is needed after changing a picker."""
+    win.open_recording(mat_file)
+    win._on_overview_click(_Event(win._overview_axes[(2, 1)]))
+
+    win.col_spin.setValue(2)
+    win.col_spin.activated.emit(win.col_spin.currentIndex())
+
+    assert win._plot_mode == "selected"
+    assert "block 2" in win.ax_top.get_title().lower()
+
+
+def test_changing_a_channel_on_the_overview_keeps_the_overview(win, mat_file):
+    win.open_recording(mat_file)
+
+    win.flow_row_spin.setValue(4)
+    win.flow_row_spin.activated.emit(win.flow_row_spin.currentIndex())
+
+    assert win._plot_mode == "overview"
+
+
+# ---------------------------------------------------------------- study type
+
+def test_ct_sections_appear_only_for_ct(win):
+    assert win.ct_scan_section.isHidden()
+    assert win.ct_method_section.isHidden()
+    assert not win.trigger_section.isHidden()
+
+    win.workflow_combo.setCurrentText("CT")
+
+    assert not win.ct_scan_section.isHidden()
+    assert not win.ct_method_section.isHidden()
+    assert win.trigger_section.isHidden()
+
+    win.workflow_combo.setCurrentText("MRI")
+
+    assert win.ct_scan_section.isHidden()
+    assert not win.trigger_section.isHidden()
+
+
+@pytest.mark.parametrize("shown, engine", [
+    ("MRI", "MRI"),
+    ("CPAP", "cpap"),
+    ("Phase contrast (xenon)", "phase-contrast"),
+    ("CT", "CT"),
+])
+def test_study_type_maps_to_the_engine_workflow(win, shown, engine):
+    win.workflow_combo.setCurrentText(shown)
+
+    assert win._workflow_name() == engine
+
+
+# ----------------------------------------------------------------- CT method
+
+def test_ct_method_chooser_shows_one_method_at_a_time(win):
+    """Three ways to pick images used to share the screen across two tabs."""
+    win.workflow_combo.setCurrentText("CT")
+    assert win.ct_method_stack.currentWidget() is win.parts_page
+
+    _choose_ct_method(win, "landmarks")
+    assert win.ct_method_stack.currentWidget() is win.landmarks_page
+
+    _choose_ct_method(win, "cycle")
+    assert win.ct_method_stack.currentWidget() is win.cycle_page

@@ -30,9 +30,12 @@ from PyQt5.QtWidgets import (
     QSpinBox, QDoubleSpinBox, QSlider, QFileDialog, QMessageBox,
     QStatusBar, QGridLayout, QSizePolicy, QFrame,
     QCheckBox, QListWidget, QListWidgetItem, QInputDialog, QDialog,
-    QTabWidget, QScrollArea,
+    QScrollArea, QSplitter, QStackedWidget, QFormLayout,
 )
 
+from labchart2cfd.gui.widgets import (
+    ChannelCombo, CollapsibleSection, VerticalScrollArea, channel_label,
+)
 from labchart2cfd.io.labchart import LabChartData, load_labchart_mat
 from labchart2cfd.processing.profile_assembly import ProfilePart, assemble_parts
 from labchart2cfd.processing.rearrangement import (
@@ -59,6 +62,40 @@ def _remove_all(artists) -> None:
     """Detach every artist in an iterable, skipping any already detached."""
     for artist in artists:
         _safe_remove(artist)
+
+
+# Study types: (name shown, workflow name the handlers branch on, description).
+# The second item is what `_workflow_name()` returns, and its spellings are the
+# ones the processing code has always compared against.
+_STUDY_TYPES = (
+    ("MRI", "MRI",
+     "Standard MRI study. Drift is corrected on the whole signal, then the "
+     "window is cut out."),
+    ("CPAP", "cpap",
+     "CPAP study. Drift is corrected inside the chosen window."),
+    ("Phase contrast (xenon)", "phase-contrast",
+     "Xenon phase contrast study. Uses xenon density and voltage calibration."),
+    ("CT", "CT",
+     "4D CT study. The trigger channel marks the scan, and the images are "
+     "placed on a time grid across it."),
+)
+
+# CT methods: (name shown, key, description). One method is on screen at a time.
+_CT_METHODS = (
+    ("Reorder image parts", "parts",
+     "Pick ranges of images and put them in breathing order. Exports the "
+     "profile and an image reorder map."),
+    ("Inhale and exhale landmarks", "landmarks",
+     "Mark where inhale starts and exhale ends. The profile is rotated to "
+     "start at the inhale image when needed, and the trigger info file lists "
+     "the images from inhale to exhale."),
+    ("Label cycle frames", "cycle",
+     "Click frames in breathing order. Runs of consecutive frames are cut out "
+     "and joined in the order you clicked."),
+)
+
+# Line colours for the role a channel plays, used on the overview.
+_ROLE_COLORS = {"flow": "#1f77b4", "trigger": "#d62728", "pressure": "#2ca02c"}
 
 
 class AssemblyPreviewDialog(QDialog):
@@ -98,13 +135,16 @@ class FlowProfileApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("CFD Flow Profile Processor")
-        self.resize(1200, 800)
+        self.resize(1400, 860)
         self.setMinimumSize(900, 600)
 
         # State
         self.data: Optional[LabChartData] = None
         self.mat_filepath: Optional[Path] = None
         self._plot_mode = "empty"  # "empty", "overview", "selected"
+        # Overview tiles by (row, column), both 1-indexed, so a click on a
+        # tile can be traced back to the block it shows.
+        self._overview_axes: dict = {}
 
         # Axes references (set during _plot_selected)
         self.ax_top = None
@@ -152,278 +192,314 @@ class FlowProfileApp(QMainWindow):
 
         self._build_ui()
 
-    def _build_ui(self) -> None:
-        """Build the complete UI layout."""
-        central = QWidget()
-        self.setCentralWidget(central)
-        main_layout = QVBoxLayout(central)
-        main_layout.setContentsMargins(5, 5, 5, 5)
+    # Width the sidebar opens at. The splitter lets the user drag it wider.
+    SIDEBAR_WIDTH = 380
 
-        # --- Plot area (takes remaining space) ---
-        plot_group = QGroupBox("Flow & Trigger Signals")
-        plot_layout = QVBoxLayout(plot_group)
+    def _build_ui(self) -> None:
+        """Build the window: guided controls on the left, the plot on the right."""
+        # Created first, because handlers post to it while the rest is built.
+        self.status_bar = QStatusBar()
+        self.status_bar.showMessage("Ready")
+        self.setStatusBar(self.status_bar)
+
+        plot_panel = self._build_plot_panel()
+        sidebar = self._build_sidebar()
+
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        splitter.addWidget(sidebar)
+        splitter.addWidget(plot_panel)
+        splitter.setStretchFactor(0, 0)  # extra width goes to the plot
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([self.SIDEBAR_WIDTH, 10 * self.SIDEBAR_WIDTH])
+        self.setCentralWidget(splitter)
+
+        self._connect_live_updates()
+        # Show only the sections that belong to the current study type.
+        self._on_workflow_changed()
+
+        # Worker-completion signals land on the GUI thread here.
+        self._processing_done.connect(self._on_processing_done)
+        self._processing_failed.connect(self._on_processing_failed)
+
+    # ------------------------------------------------------------------
+    # Layout helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _form() -> QFormLayout:
+        """A label-and-field form whose fields fill the sidebar width."""
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        return form
+
+    @staticmethod
+    def _hint(text: str) -> QLabel:
+        """A wrapped explanatory line, styled quieter than a control label."""
+        label = QLabel(text)
+        label.setObjectName("hintLabel")
+        label.setWordWrap(True)
+        return label
+
+    @staticmethod
+    def _readout(text: str) -> QLabel:
+        """A framed read-only value, such as a count or a marked time."""
+        label = QLabel(text)
+        label.setObjectName("readout")
+        label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
+        label.setAlignment(Qt.AlignCenter)
+        label.setMinimumWidth(70)
+        return label
+
+    def _build_plot_panel(self) -> QWidget:
+        """The matplotlib canvas with its navigation toolbar."""
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(4)
 
         self.fig = Figure(figsize=(12, 6), dpi=100, constrained_layout=True)
-        # Show placeholder text instead of pre-created axes
+        # Placeholder text instead of pre-created axes.
         self.fig.text(
-            0.5, 0.5, "Load a .mat file and click 'Load Overview' to begin",
+            0.5, 0.5, "Open a LabChart .mat recording to begin",
             ha="center", va="center", fontsize=14, color="gray",
         )
 
         self.canvas = FigureCanvasQTAgg(self.fig)
         self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        # Matplotlib navigation toolbar (zoom, pan, home, save)
-        self.toolbar = NavigationToolbar2QT(self.canvas, plot_group)
+        # Matplotlib navigation toolbar (zoom, pan, home, save).
+        self.toolbar = NavigationToolbar2QT(self.canvas, panel)
 
-        plot_layout.addWidget(self.toolbar)
-        plot_layout.addWidget(self.canvas)
-        main_layout.addWidget(plot_group, stretch=1)
+        layout.addWidget(self.toolbar)
+        layout.addWidget(self.canvas, 1)
+        return panel
 
-        # --- Controls area: tabbed + scrollable + height-capped so the plot
-        # always dominates and panels never overlap/clip. ---
-        self.tabs = QTabWidget()
-        self.tabs.setMaximumHeight(370)
-        self._tab_data_w = QWidget()
-        self._tab_data_layout = QVBoxLayout(self._tab_data_w)
-        self._tab_trig_w = QWidget()
-        self._tab_trig_layout = QVBoxLayout(self._tab_trig_w)
-        self._tab_ctstep_w = QWidget()
-        self._tab_ctstep_layout = QVBoxLayout(self._tab_ctstep_w)
-        self._tab_synth_w = QWidget()
-        self._tab_synth_layout = QVBoxLayout(self._tab_synth_w)
+    def _build_sidebar(self) -> QWidget:
+        """Numbered sections in the order the work is done, Export pinned below."""
+        self.sidebar = QWidget()
+        self.sidebar.setObjectName("sidebar")
+        outer = QVBoxLayout(self.sidebar)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
 
-        # -- Data Source group --
-        file_group = QGroupBox("Data Source")
-        file_grid = QGridLayout(file_group)
+        sections = QWidget()
+        sections_layout = QVBoxLayout(sections)
+        sections_layout.setContentsMargins(8, 8, 8, 8)
+        sections_layout.setSpacing(8)
+        for section in (
+            self._build_recording_section(),
+            self._build_study_section(),
+            self._build_window_section(),
+            self._build_trigger_section(),
+            self._build_ct_scan_section(),
+            self._build_ct_method_section(),
+        ):
+            sections_layout.addWidget(section)
+        sections_layout.addStretch(1)
 
-        # Row 0: file path + browse
-        file_grid.addWidget(QLabel("File:"), 0, 0)
-        self.file_label = QLabel("No file selected")
-        self.file_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        file_grid.addWidget(self.file_label, 0, 1)
-        browse_btn = QPushButton("Browse...")
-        browse_btn.clicked.connect(self._browse_file)
-        file_grid.addWidget(browse_btn, 0, 2)
-        file_grid.setColumnStretch(1, 1)
+        # Keeps itself wide enough for the widest section, so no control is
+        # clipped behind the scroll bar.
+        scroll = VerticalScrollArea()
+        scroll.setWidget(sections)
+        self.sidebar_scroll = scroll
 
-        # Row 1: channel assignment (flow/trigger/pressure rows) + column
-        file_grid.addWidget(QLabel("Channels:"), 1, 0)
-        spin_widget = QWidget()
-        spin_hlayout = QHBoxLayout(spin_widget)
-        spin_hlayout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll, 1)
+        # Outside the scroll area, so Export is always reachable.
+        outer.addWidget(self._build_export_footer(), 0)
+        return self.sidebar
 
-        spin_hlayout.addWidget(QLabel("Flow Row:"))
-        self.flow_row_spin = QSpinBox()
-        self.flow_row_spin.setRange(1, 20)
+    # ------------------------------------------------------------------
+    # Sidebar sections
+    # ------------------------------------------------------------------
+
+    def _build_recording_section(self) -> QWidget:
+        """Open a file and say which channel plays which role."""
+        section = CollapsibleSection("1   Recording")
+        self.recording_section = section
+
+        open_btn = QPushButton("Open recording...")
+        open_btn.setToolTip("Open a LabChart .mat export and show all its blocks.")
+        open_btn.clicked.connect(self._browse_file)
+        section.add_widget(open_btn)
+
+        self.file_label = self._hint("No recording open")
+        section.add_widget(self.file_label)
+
+        # Channels are named from the file once one is open. Rows stay
+        # 1-indexed underneath, as everywhere else in this application.
+        self.flow_row_spin = ChannelCombo("Channel")
         self.flow_row_spin.setValue(2)
-        self.flow_row_spin.setFixedWidth(55)
-        spin_hlayout.addWidget(self.flow_row_spin)
-
-        spin_hlayout.addWidget(QLabel("  Trigger Row:"))
-        self.trigger_row_spin = QSpinBox()
-        self.trigger_row_spin.setRange(0, 20)  # 0 = no trigger
+        self.trigger_row_spin = ChannelCombo("Channel", allow_none=True)
         self.trigger_row_spin.setValue(1)
-        self.trigger_row_spin.setSpecialValueText("none")
-        self.trigger_row_spin.setFixedWidth(65)
-        spin_hlayout.addWidget(self.trigger_row_spin)
-
-        spin_hlayout.addWidget(QLabel("  Pressure Row:"))
-        self.pressure_row_spin = QSpinBox()
-        self.pressure_row_spin.setRange(0, 20)  # 0 = no pressure export
+        self.pressure_row_spin = ChannelCombo("Channel", allow_none=True)
         self.pressure_row_spin.setValue(4)
-        self.pressure_row_spin.setSpecialValueText("none")
-        self.pressure_row_spin.setFixedWidth(65)
-        spin_hlayout.addWidget(self.pressure_row_spin)
-
-        spin_hlayout.addWidget(QLabel("  Column:"))
-        self.col_spin = QSpinBox()
-        self.col_spin.setRange(1, 20)
+        self.col_spin = ChannelCombo("Block")
         self.col_spin.setValue(3)
-        self.col_spin.setFixedWidth(55)
-        spin_hlayout.addWidget(self.col_spin)
 
-        load_overview_btn = QPushButton("Load Overview")
-        load_overview_btn.clicked.connect(self._load_and_overview)
-        spin_hlayout.addSpacing(15)
-        spin_hlayout.addWidget(load_overview_btn)
+        form = self._form()
+        form.addRow("Flow", self.flow_row_spin)
+        form.addRow("Trigger", self.trigger_row_spin)
+        form.addRow("Pressure", self.pressure_row_spin)
+        form.addRow("Block", self.col_spin)
+        section.add_layout(form)
 
-        plot_selected_btn = QPushButton("Plot Selected")
-        plot_selected_btn.clicked.connect(self._plot_selected)
-        spin_hlayout.addSpacing(5)
-        spin_hlayout.addWidget(plot_selected_btn)
+        # `activated` fires for a choice the user makes, never for setValue,
+        # so restoring a value in code does not redraw the plot.
+        for picker in (self.flow_row_spin, self.trigger_row_spin,
+                       self.pressure_row_spin, self.col_spin):
+            picker.activated.connect(self._on_selection_changed)
 
-        spin_hlayout.addStretch()
-        file_grid.addWidget(spin_widget, 1, 1, 1, 2)
+        view_row = QHBoxLayout()
+        self.overview_btn = QPushButton("All blocks")
+        self.overview_btn.setToolTip("Show every channel and block of the recording.")
+        self.overview_btn.clicked.connect(self._go_to_overview)
+        view_row.addWidget(self.overview_btn)
+        self.detail_btn = QPushButton("Selected block")
+        self.detail_btn.setToolTip("Show the chosen block in detail.")
+        self.detail_btn.clicked.connect(self._plot_selected)
+        view_row.addWidget(self.detail_btn)
+        section.add_layout(view_row)
+        return section
 
-        self._tab_data_layout.addWidget(file_group)
+    def _build_study_section(self) -> QWidget:
+        """Choose the study type, which decides the processing and the sections."""
+        section = CollapsibleSection("2   Study type")
+        self.study_section = section
 
-        # -- Trigger Info group --
-        trigger_group = QGroupBox("Trigger Info")
-        trigger_hlayout = QHBoxLayout(trigger_group)
+        self.workflow_combo = QComboBox()
+        for index, (shown, engine, tip) in enumerate(_STUDY_TYPES):
+            self.workflow_combo.addItem(shown, engine)
+            self.workflow_combo.setItemData(index, tip, Qt.ToolTipRole)
+        section.add_widget(self.workflow_combo)
 
-        trigger_hlayout.addWidget(QLabel("Total Triggers:"))
-        self.total_triggers_label = QLabel("--")
-        self.total_triggers_label.setFixedWidth(50)
-        self.total_triggers_label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
-        self.total_triggers_label.setAlignment(Qt.AlignCenter)
-        trigger_hlayout.addWidget(self.total_triggers_label)
-        trigger_hlayout.addSpacing(15)
+        self.study_hint = self._hint(_STUDY_TYPES[0][2])
+        section.add_widget(self.study_hint)
 
-        trigger_hlayout.addWidget(QLabel("Start Trigger #:"))
-        self.start_trigger_spin = QSpinBox()
-        self.start_trigger_spin.setRange(1, 1)
-        self.start_trigger_spin.setValue(1)
-        self.start_trigger_spin.setFixedWidth(60)
-        trigger_hlayout.addWidget(self.start_trigger_spin)
-        trigger_hlayout.addSpacing(15)
+        self.workflow_combo.currentIndexChanged.connect(
+            lambda _index: self._on_workflow_changed()
+        )
+        return section
 
-        trigger_hlayout.addWidget(QLabel("# Triggers:"))
-        self.num_triggers_spin = QSpinBox()
-        self.num_triggers_spin.setRange(1, 1)
-        self.num_triggers_spin.setValue(1)
-        self.num_triggers_spin.setFixedWidth(60)
-        trigger_hlayout.addWidget(self.num_triggers_spin)
-        trigger_hlayout.addSpacing(15)
+    def _build_window_section(self) -> QWidget:
+        """The Start and End times that bound the processed signal."""
+        section = CollapsibleSection("3   Time window")
+        self.window_section = section
 
-        mark_triggers_btn = QPushButton("Mark Triggers")
-        mark_triggers_btn.clicked.connect(self._mark_trigger_range)
-        trigger_hlayout.addWidget(mark_triggers_btn)
-
-        clear_markers_btn = QPushButton("Clear Markers")
-        clear_markers_btn.clicked.connect(self._clear_all_markers)
-        trigger_hlayout.addWidget(clear_markers_btn)
-        trigger_hlayout.addStretch()
-
-        self._tab_trig_layout.addWidget(trigger_group)
-
-        # -- Processing group --
-        proc_group = QGroupBox("Processing")
-        proc_grid = QGridLayout(proc_group)
-
-        # Row 0: start/end time + subject ID
-        proc_grid.addWidget(QLabel("Start Time (s):"), 0, 0)
         self.start_spin = QDoubleSpinBox()
         self.start_spin.setRange(0, 99999)
         self.start_spin.setDecimals(3)
         self.start_spin.setSingleStep(0.001)
         self.start_spin.setValue(0.0)
-        self.start_spin.setFixedWidth(100)
-        proc_grid.addWidget(self.start_spin, 0, 1)
 
-        proc_grid.addWidget(QLabel("End Time (s):"), 0, 2)
         self.end_spin = QDoubleSpinBox()
         self.end_spin.setRange(0, 99999)
         self.end_spin.setDecimals(3)
         self.end_spin.setSingleStep(0.001)
         self.end_spin.setValue(0.0)
-        self.end_spin.setFixedWidth(100)
-        proc_grid.addWidget(self.end_spin, 0, 3)
 
-        proc_grid.addWidget(QLabel("Subject ID:"), 0, 4)
-        self.subject_edit = QLineEdit()
-        self.subject_edit.setFixedWidth(120)
-        self.subject_edit.textChanged.connect(self._update_outdir)
-        proc_grid.addWidget(self.subject_edit, 0, 5)
+        form = self._form()
+        form.addRow("Start (s)", self.start_spin)
+        form.addRow("End (s)", self.end_spin)
+        section.add_layout(form)
 
-        zoom_btn = QPushButton("Zoom to Window")
+        row = QHBoxLayout()
+        zoom_btn = QPushButton("Zoom to window")
         zoom_btn.setToolTip(
             "Fit the plot to Start/End with a small margin. Happens "
             "automatically on step select and when you commit Start/End."
         )
         zoom_btn.clicked.connect(lambda: self._zoom_to_window())
-        proc_grid.addWidget(zoom_btn, 0, 6)
+        row.addWidget(zoom_btn)
+        clear_markers_btn = QPushButton("Clear markers")
+        clear_markers_btn.setToolTip(
+            "Remove every marker drawn on the plot: time markers, trigger "
+            "ranges, CT landmarks and cycle labels."
+        )
+        clear_markers_btn.clicked.connect(self._clear_all_markers)
+        row.addWidget(clear_markers_btn)
+        section.add_layout(row)
+        return section
 
-        # Row 1: workflow + output dir + execute
-        proc_grid.addWidget(QLabel("Workflow:"), 1, 0)
-        self.workflow_combo = QComboBox()
-        self.workflow_combo.addItems(["MRI", "cpap", "phase-contrast", "CT"])
-        self.workflow_combo.setFixedWidth(120)
-        self.workflow_combo.currentTextChanged.connect(self._on_workflow_changed)
-        proc_grid.addWidget(self.workflow_combo, 1, 1)
+    def _build_trigger_section(self) -> QWidget:
+        """Pulse triggers for 4D image registration (every study type but CT)."""
+        section = CollapsibleSection("4   Triggers")
+        self.trigger_section = section
 
-        proc_grid.addWidget(QLabel("Output Dir:"), 1, 2)
-        self.outdir_edit = QLineEdit(str(Path.cwd()))
-        proc_grid.addWidget(self.outdir_edit, 1, 3, 1, 2)
-        proc_grid.setColumnStretch(3, 1)
+        self.total_triggers_label = self._readout("--")
 
-        outdir_browse_btn = QPushButton("...")
-        outdir_browse_btn.setFixedWidth(30)
-        outdir_browse_btn.clicked.connect(self._browse_outdir)
-        proc_grid.addWidget(outdir_browse_btn, 1, 5)
+        self.start_trigger_spin = QSpinBox()
+        self.start_trigger_spin.setRange(1, 1)
+        self.start_trigger_spin.setValue(1)
 
-        self.execute_btn = QPushButton("Execute")
-        self.execute_btn.clicked.connect(self._execute_processing)
-        proc_grid.addWidget(self.execute_btn, 1, 6)
+        self.num_triggers_spin = QSpinBox()
+        self.num_triggers_spin.setRange(1, 1)
+        self.num_triggers_spin.setValue(1)
 
-        self._tab_data_layout.addWidget(proc_group)
+        form = self._form()
+        form.addRow("Triggers found", self.total_triggers_label)
+        form.addRow("Start at trigger", self.start_trigger_spin)
+        form.addRow("Number of triggers", self.num_triggers_spin)
+        section.add_layout(form)
 
-        # -- CT-specific controls (hidden by default) --
-        self.ct_group = QGroupBox("CT Step Trigger Controls")
-        ct_grid = QGridLayout(self.ct_group)
+        mark_triggers_btn = QPushButton("Mark triggers")
+        mark_triggers_btn.setToolTip(
+            "Shade the chosen trigger range and set Start/End to it."
+        )
+        mark_triggers_btn.clicked.connect(self._mark_trigger_range)
+        section.add_widget(mark_triggers_btn)
+        return section
 
-        # Row 0: Detect Steps + Step selection + Temporal Res + Total Images
+    def _build_ct_scan_section(self) -> QWidget:
+        """Find the scan step in the trigger channel and lay the image grid on it."""
+        section = CollapsibleSection("4   CT scan")
+        self.ct_scan_section = section
+
         detect_steps_btn = QPushButton("Detect Steps")
+        detect_steps_btn.setToolTip(
+            "Find the scan steps in the Trigger channel. This also runs when "
+            "a block is opened."
+        )
         detect_steps_btn.clicked.connect(self._detect_steps)
-        ct_grid.addWidget(detect_steps_btn, 0, 0)
+        section.add_widget(detect_steps_btn)
 
-        ct_grid.addWidget(QLabel("Step #:"), 0, 1)
         self.ct_step_spin = QSpinBox()
         self.ct_step_spin.setRange(1, 1)
         self.ct_step_spin.setValue(1)
-        self.ct_step_spin.setFixedWidth(60)
-        ct_grid.addWidget(self.ct_step_spin, 0, 2)
-
         select_step_btn = QPushButton("Select Step")
+        select_step_btn.setToolTip(
+            "Use this step: sets Start/End to it, draws the image grid and "
+            "zooms the plot to it."
+        )
         select_step_btn.clicked.connect(self._select_ct_step)
-        ct_grid.addWidget(select_step_btn, 0, 3)
+        step_row = QHBoxLayout()
+        step_row.addWidget(self.ct_step_spin, 1)
+        step_row.addWidget(select_step_btn)
 
-        ct_grid.addWidget(QLabel("Temporal Res (ms):"), 0, 4)
-        # Same type, range and precision as the tab-4 dt box. As an int
-        # spinbox this silently truncated any fractional dt mirrored from
-        # tab 4, leaving the CT export and the synthetic grid on different dt.
+        # Same type, range and precision as the grid's own dt box, which this
+        # one mirrors. As an int spinbox it silently truncated any fractional
+        # dt, leaving the CT export and the synthetic grid on different dt.
         self.ct_temporal_res_spin = QDoubleSpinBox()
         self.ct_temporal_res_spin.setRange(0.01, 10000.0)
         self.ct_temporal_res_spin.setDecimals(2)
         self.ct_temporal_res_spin.setSingleStep(10)
         self.ct_temporal_res_spin.setValue(200.0)
-        self.ct_temporal_res_spin.setFixedWidth(80)
-        ct_grid.addWidget(self.ct_temporal_res_spin, 0, 5)
+        self.ct_temporal_res_spin.setToolTip(
+            "Time one image covers, taken from the reconstructed image series."
+        )
 
-        ct_grid.addWidget(QLabel("Total Images:"), 0, 6)
         self.ct_total_images_spin = QSpinBox()
         self.ct_total_images_spin.setRange(1, 500)
         self.ct_total_images_spin.setValue(1)
-        self.ct_total_images_spin.setFixedWidth(60)
-        ct_grid.addWidget(self.ct_total_images_spin, 0, 7)
+        self.ct_total_images_spin.setToolTip(
+            "Images in the selected step. Computed from the step when it is "
+            "selected; edit it before Apply Correction to override."
+        )
 
-        # Row 1: Landmark buttons + time displays
-        mark_inhale_btn = QPushButton("Mark Inhale Start")
-        mark_inhale_btn.clicked.connect(self._mark_inhale_start)
-        ct_grid.addWidget(mark_inhale_btn, 1, 0)
-
-        self.ct_inhale_label = QLabel("--")
-        self.ct_inhale_label.setFixedWidth(100)
-        self.ct_inhale_label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
-        self.ct_inhale_label.setAlignment(Qt.AlignCenter)
-        ct_grid.addWidget(self.ct_inhale_label, 1, 1, 1, 2)
-
-        mark_exhale_btn = QPushButton("Mark Exhale End")
-        mark_exhale_btn.clicked.connect(self._mark_exhale_end)
-        ct_grid.addWidget(mark_exhale_btn, 1, 3)
-
-        self.ct_exhale_label = QLabel("--")
-        self.ct_exhale_label.setFixedWidth(100)
-        self.ct_exhale_label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
-        self.ct_exhale_label.setAlignment(Qt.AlignCenter)
-        ct_grid.addWidget(self.ct_exhale_label, 1, 4, 1, 2)
-
-        clear_landmarks_btn = QPushButton("Clear Landmarks")
-        clear_landmarks_btn.clicked.connect(self._clear_ct_landmarks)
-        ct_grid.addWidget(clear_landmarks_btn, 1, 6, 1, 2)
-
-        # Row 2: Start Shift (manual correction) + Apply button
-        ct_grid.addWidget(QLabel("Start Shift (ms):"), 2, 0)
         # Bidirectional: the detected step edge can sit either side of the true
         # first image, so the correction has to move the window earlier as well
         # as later. Positive-only meant a late-detected edge was uncorrectable.
@@ -431,185 +507,288 @@ class FlowProfileApp(QMainWindow):
         self.ct_shift_spin.setRange(-2000, 2000)
         self.ct_shift_spin.setSingleStep(10)
         self.ct_shift_spin.setValue(0)
-        self.ct_shift_spin.setFixedWidth(80)
         self.ct_shift_spin.editingFinished.connect(self._on_shift_entry_changed)
-        ct_grid.addWidget(self.ct_shift_spin, 2, 1)
 
         self.ct_shift_slider = QSlider(Qt.Horizontal)
         self.ct_shift_slider.setRange(-2000, 2000)
         self.ct_shift_slider.setSingleStep(10)
         self.ct_shift_slider.setPageStep(10)
         self.ct_shift_slider.setValue(0)
-        self.ct_shift_slider.setMinimumWidth(200)
         self.ct_shift_slider.valueChanged.connect(self._on_shift_slider_changed)
-        ct_grid.addWidget(self.ct_shift_slider, 2, 2, 1, 4)
+
+        form = self._form()
+        form.addRow("Step #", step_row)
+        form.addRow("Temporal Res (ms)", self.ct_temporal_res_spin)
+        form.addRow("Total Images", self.ct_total_images_spin)
+        form.addRow("Start Shift (ms)", self.ct_shift_spin)
+        section.add_layout(form)
+        section.add_widget(self.ct_shift_slider)
 
         apply_correction_btn = QPushButton("Apply Correction")
+        apply_correction_btn.setToolTip(
+            "Set Start to the detected step start plus the Start Shift, and "
+            "End to Start plus Total Images times Temporal Res."
+        )
         apply_correction_btn.clicked.connect(self._apply_ct_correction)
-        ct_grid.addWidget(apply_correction_btn, 2, 6, 1, 2)
+        section.add_widget(apply_correction_btn)
+        return section
 
-        # Row 3: Cycle frame labeling (alternative to inhale/exhale trim)
-        ct_grid.addWidget(QLabel("Cycle:"), 3, 0)
-        self.cycle_mode_btn = QPushButton("Label Cycle Frames")
-        self.cycle_mode_btn.setCheckable(True)
-        self.cycle_mode_btn.setToolTip(
-            "Toggle: click fenceposts in order to build a breathing cycle. "
-            "Right-click removes the most recent label. Overrides inhale/exhale trim on export."
+    def _build_ct_method_section(self) -> QWidget:
+        """Choose how the breath is built from the images; show that method only."""
+        section = CollapsibleSection("5   Build the breath")
+        self.ct_method_section = section
+
+        self.ct_method_combo = QComboBox()
+        for index, (shown, key, tip) in enumerate(_CT_METHODS):
+            self.ct_method_combo.addItem(shown, key)
+            self.ct_method_combo.setItemData(index, tip, Qt.ToolTipRole)
+        section.add_widget(self.ct_method_combo)
+
+        self.ct_method_hint = self._hint(_CT_METHODS[0][2])
+        section.add_widget(self.ct_method_hint)
+
+        self.ct_method_stack = QStackedWidget()
+        self.parts_page = self._build_parts_page()
+        self.landmarks_page = self._build_landmarks_page()
+        self.cycle_page = self._build_cycle_page()
+        for page in (self.parts_page, self.landmarks_page, self.cycle_page):
+            self.ct_method_stack.addWidget(page)
+        section.add_widget(self.ct_method_stack)
+
+        self.ct_method_combo.currentIndexChanged.connect(
+            lambda _index: self._on_ct_method_changed()
         )
-        self.cycle_mode_btn.toggled.connect(self._on_cycle_mode_toggled)
-        ct_grid.addWidget(self.cycle_mode_btn, 3, 1, 1, 2)
+        return section
 
-        self.cycle_count_label = QLabel("0 frames")
-        self.cycle_count_label.setFixedWidth(100)
-        self.cycle_count_label.setFrameStyle(QFrame.Panel | QFrame.Sunken)
-        self.cycle_count_label.setAlignment(Qt.AlignCenter)
-        ct_grid.addWidget(self.cycle_count_label, 3, 3)
+    def _build_parts_page(self) -> QWidget:
+        """Full manual method: ordered ranges of images assembled into a breath."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
 
-        clear_cycle_btn = QPushButton("Clear Cycle Labels")
-        clear_cycle_btn.clicked.connect(self._clear_cycle_labels)
-        ct_grid.addWidget(clear_cycle_btn, 3, 4, 1, 2)
-
-        self.cycle_seq_label = QLabel("seq: —")
-        self.cycle_seq_label.setToolTip("Original image indices in click order")
-        ct_grid.addWidget(self.cycle_seq_label, 3, 6, 1, 2)
-
-        self._tab_ctstep_layout.addWidget(self.ct_group)
-
-        # ---- Full-manual synthetic-profile controls (shown with CT) ----
-        self.synth_group = QGroupBox("Synthetic Profile (Full Manual)")
-        synth_layout = QVBoxLayout(self.synth_group)
-
-        srow1 = QHBoxLayout()
-        self.synth_enable_chk = QCheckBox("Enable full-manual mode")
-        self.synth_enable_chk.setToolTip(
-            "Use Start/End (above) as the window and Temporal Res for the image "
-            "grid; click image frames to build ordered parts; assemble a "
-            "synthetic breathing profile + image reorder map."
-        )
+        # Manual mode is on exactly while this method is the chosen one, so the
+        # switch itself is not shown. It stays a checkbox because its toggled
+        # signal is what enters and leaves the mode.
+        self.synth_enable_chk = QCheckBox("Enable full-manual mode", page)
         self.synth_enable_chk.toggled.connect(self._on_synth_mode_toggled)
-        srow1.addWidget(self.synth_enable_chk)
-        show_grid_btn = QPushButton("Show Image Grid")
-        # Explicit lambda: clicked() would otherwise pass its checked flag as
-        # the `quiet` argument.
-        show_grid_btn.clicked.connect(lambda: self._draw_synth_grid(quiet=False))
-        srow1.addWidget(show_grid_btn)
-        self.synth_grid_label = QLabel("images: —")
-        srow1.addWidget(self.synth_grid_label)
-        srow1.addStretch(1)
-        synth_layout.addLayout(srow1)
+        self.synth_enable_chk.hide()
 
-        # Grid definition: dt and image count are two views of one grid, so
-        # editing either recomputes the other. Offsets slide the window and
-        # the grid independently.
-        srow_grid = QHBoxLayout()
-        srow_grid.addWidget(QLabel("Temporal Res (ms):"))
-        # Double, because a dt derived from an image count is rarely a whole ms.
-        self.synth_dt_spin = QDoubleSpinBox()
+        # Mirror of the Temporal Res box in the CT scan section. Both feed the
+        # same grid, so only that one is shown. Double, because a dt derived
+        # from an image count is rarely a whole millisecond.
+        self.synth_dt_spin = QDoubleSpinBox(page)
         self.synth_dt_spin.setRange(0.01, 10000.0)
         self.synth_dt_spin.setDecimals(2)
         self.synth_dt_spin.setValue(float(self.ct_temporal_res_spin.value()))
-        self.synth_dt_spin.setFixedWidth(80)
-        self.synth_dt_spin.setToolTip(
-            "Seconds per image (one image owns exactly this much signal). "
-            "Editing this recomputes the image count."
-        )
-        srow_grid.addWidget(self.synth_dt_spin)
+        self.synth_dt_spin.hide()
 
-        srow_grid.addWidget(QLabel("  Images:"))
         self.synth_images_spin = QSpinBox()
         self.synth_images_spin.setRange(1, 5000)
         self.synth_images_spin.setValue(1)
-        self.synth_images_spin.setFixedWidth(70)
         self.synth_images_spin.setToolTip(
-            "Number of images in the window (ground truth from your "
-            "reconstructed series). Editing this recomputes Temporal Res."
+            "Number of images in the grid (ground truth from your "
+            "reconstructed series). Temporal Res is left as typed."
         )
-        srow_grid.addWidget(self.synth_images_spin)
 
-        srow_grid.addWidget(QLabel("  Window offset (ms):"))
-        self.synth_window_offset_spin = QSpinBox()
-        self.synth_window_offset_spin.setRange(-600000, 600000)
-        self.synth_window_offset_spin.setValue(0)
-        self.synth_window_offset_spin.setFixedWidth(80)
-        self.synth_window_offset_spin.setToolTip(
-            "Slides Start and End together, moving the whole processed range."
-        )
-        srow_grid.addWidget(self.synth_window_offset_spin)
-        apply_win_offset_btn = QPushButton("Apply")
-        apply_win_offset_btn.setToolTip("Shift Start/End by the window offset.")
-        apply_win_offset_btn.clicked.connect(self._apply_window_offset)
-        srow_grid.addWidget(apply_win_offset_btn)
-
-        srow_grid.addWidget(QLabel("  Grid offset (ms):"))
         self.synth_grid_offset_spin = QSpinBox()
         # Negative allowed: the detected step edge can sit after the true first
         # image, so the grid has to be shiftable in both directions.
         self.synth_grid_offset_spin.setRange(-600000, 600000)
         self.synth_grid_offset_spin.setValue(0)
-        self.synth_grid_offset_spin.setFixedWidth(80)
         self.synth_grid_offset_spin.setToolTip(
             "Slides the whole grid earlier (negative) or later (positive) "
             "without changing Start/End. This moves the exported range."
         )
-        srow_grid.addWidget(self.synth_grid_offset_spin)
-        srow_grid.addStretch(1)
-        synth_layout.addLayout(srow_grid)
 
-        self.synth_dt_warn_label = QLabel("")
-        self.synth_dt_warn_label.setStyleSheet("color: #b00;")
-        synth_layout.addWidget(self.synth_dt_warn_label)
-
-        help_lbl = QLabel(
-            "① Enable full-manual mode   ② set From/To (or 'Pick on Plot')   "
-            "③ Add Part   ④ repeat → Assemble && Export       "
-            "An image is the slice between two grid lines; From=To selects one image."
+        self.synth_window_offset_spin = QSpinBox()
+        self.synth_window_offset_spin.setRange(-600000, 600000)
+        self.synth_window_offset_spin.setValue(0)
+        self.synth_window_offset_spin.setToolTip(
+            "Slides Start and End together, moving the whole processed range."
         )
-        help_lbl.setWordWrap(True)
-        help_lbl.setStyleSheet("color: #555;")
-        synth_layout.addWidget(help_lbl)
+        apply_win_offset_btn = QPushButton("Apply")
+        apply_win_offset_btn.setToolTip("Shift Start/End by the window offset.")
+        apply_win_offset_btn.clicked.connect(self._apply_window_offset)
+        window_offset_row = QHBoxLayout()
+        window_offset_row.addWidget(self.synth_window_offset_spin, 1)
+        window_offset_row.addWidget(apply_win_offset_btn)
 
-        # Range entry: explicit begin/end image numbers
-        srow_range = QHBoxLayout()
-        srow_range.addWidget(QLabel("From image:"))
+        form = self._form()
+        form.addRow("Images", self.synth_images_spin)
+        form.addRow("Grid offset (ms)", self.synth_grid_offset_spin)
+        form.addRow("Window offset (ms)", window_offset_row)
+        layout.addLayout(form)
+
+        grid_row = QHBoxLayout()
+        self.synth_grid_label = QLabel("images: none")
+        grid_row.addWidget(self.synth_grid_label, 1)
+        show_grid_btn = QPushButton("Show Image Grid")
+        # Explicit lambda: clicked() would otherwise pass its checked flag as
+        # the `quiet` argument.
+        show_grid_btn.clicked.connect(lambda: self._draw_synth_grid(quiet=False))
+        grid_row.addWidget(show_grid_btn)
+        layout.addLayout(grid_row)
+
+        # States the span the grid covers, which is the range that is exported.
+        self.synth_dt_warn_label = self._hint("")
+        layout.addWidget(self.synth_dt_warn_label)
+
+        layout.addWidget(self._hint(
+            "An image is the slice between two grid lines. Set From and To "
+            "(or use Pick on Plot), then Add Part. The order of the list is "
+            "the order of the breath. From equal to To selects one image."
+        ))
+
+        # Range entry: explicit begin/end image numbers.
         self.part_from_spin = QSpinBox()
         self.part_from_spin.setRange(1, 1)
-        self.part_from_spin.setFixedWidth(70)
-        srow_range.addWidget(self.part_from_spin)
-        srow_range.addWidget(QLabel("To image:"))
         self.part_to_spin = QSpinBox()
         self.part_to_spin.setRange(1, 1)
-        self.part_to_spin.setFixedWidth(70)
-        srow_range.addWidget(self.part_to_spin)
-        add_part_btn = QPushButton("Add Part")
-        add_part_btn.setToolTip("Add a part covering From..To images, in assembly order.")
-        add_part_btn.clicked.connect(self._add_part_from_spins)
-        srow_range.addWidget(add_part_btn)
+        range_row = QHBoxLayout()
+        range_row.addWidget(QLabel("From"))
+        range_row.addWidget(self.part_from_spin, 1)
+        range_row.addWidget(QLabel("To"))
+        range_row.addWidget(self.part_to_spin, 1)
+        layout.addLayout(range_row)
+
+        pick_row = QHBoxLayout()
         self.pick_part_btn = QPushButton("Pick on Plot")
         self.pick_part_btn.setToolTip("Click two frames on the plot to fill From/To.")
         self.pick_part_btn.clicked.connect(self._arm_add_part)
-        srow_range.addWidget(self.pick_part_btn)
+        pick_row.addWidget(self.pick_part_btn)
+        add_part_btn = QPushButton("Add Part")
+        add_part_btn.setToolTip("Add a part covering From..To images, in assembly order.")
+        add_part_btn.clicked.connect(self._add_part_from_spins)
+        pick_row.addWidget(add_part_btn)
+        layout.addLayout(pick_row)
+
         self.capture_hint = QLabel("")
-        self.capture_hint.setStyleSheet("color: #c00; font-weight: bold;")
-        srow_range.addWidget(self.capture_hint)
-        srow_range.addStretch(1)
-        synth_layout.addLayout(srow_range)
+        self.capture_hint.setObjectName("captureHint")
+        self.capture_hint.setWordWrap(True)
+        layout.addWidget(self.capture_hint)
 
         self.parts_list = QListWidget()
-        self.parts_list.setMaximumHeight(88)
-        synth_layout.addWidget(self.parts_list)
+        self.parts_list.setMinimumHeight(88)
+        self.parts_list.setMaximumHeight(140)
+        layout.addWidget(self.parts_list)
 
-        srow_actions = QHBoxLayout()
-        for _text, _slot in [
+        actions = QGridLayout()
+        actions.setSpacing(4)
+        for position, (_text, _slot) in enumerate([
             ("Move Up", self._move_part_up), ("Move Down", self._move_part_down),
             ("Edit Label", self._edit_part_label), ("Delete", self._delete_part),
             ("Clear Parts", self._clear_parts), ("Clear All", self._clear_synth_all),
-        ]:
+        ]):
             _b = QPushButton(_text)
             _b.clicked.connect(_slot)
-            srow_actions.addWidget(_b)
-        srow_actions.addStretch(1)
-        synth_layout.addLayout(srow_actions)
+            actions.addWidget(_b, position // 3, position % 3)
+        layout.addLayout(actions)
 
+        export_row = QHBoxLayout()
+        assemble_btn = QPushButton("Assemble && Export")
+        assemble_btn.clicked.connect(self._assemble_and_export)
+        export_row.addWidget(assemble_btn)
+        self.synth_status_label = QLabel("no parts")
+        export_row.addWidget(self.synth_status_label, 1)
+        layout.addLayout(export_row)
+        return page
+
+    def _build_landmarks_page(self) -> QWidget:
+        """Landmark method: mark where inhale starts and where exhale ends."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        mark_inhale_btn = QPushButton("Mark Inhale Start")
+        mark_inhale_btn.setToolTip("Then click the plot where inhale starts.")
+        mark_inhale_btn.clicked.connect(self._mark_inhale_start)
+        self.ct_inhale_label = self._readout("--")
+        inhale_row = QHBoxLayout()
+        inhale_row.addWidget(mark_inhale_btn, 1)
+        inhale_row.addWidget(self.ct_inhale_label, 1)
+        layout.addLayout(inhale_row)
+
+        mark_exhale_btn = QPushButton("Mark Exhale End")
+        mark_exhale_btn.setToolTip("Then click the plot where exhale ends.")
+        mark_exhale_btn.clicked.connect(self._mark_exhale_end)
+        self.ct_exhale_label = self._readout("--")
+        exhale_row = QHBoxLayout()
+        exhale_row.addWidget(mark_exhale_btn, 1)
+        exhale_row.addWidget(self.ct_exhale_label, 1)
+        layout.addLayout(exhale_row)
+
+        clear_landmarks_btn = QPushButton("Clear Landmarks")
+        clear_landmarks_btn.clicked.connect(self._clear_ct_landmarks)
+        layout.addWidget(clear_landmarks_btn)
+        layout.addStretch(1)
+        return page
+
+    def _build_cycle_page(self) -> QWidget:
+        """Cycle method: click frames in breathing order to build one cycle."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self.cycle_mode_btn = QPushButton("Label Cycle Frames")
+        self.cycle_mode_btn.setCheckable(True)
+        self.cycle_mode_btn.setToolTip(
+            "Toggle: click fenceposts in order to build a breathing cycle. "
+            "Right-click removes the most recent label."
+        )
+        self.cycle_mode_btn.toggled.connect(self._on_cycle_mode_toggled)
+        self.cycle_count_label = self._readout("0 frames")
+        label_row = QHBoxLayout()
+        label_row.addWidget(self.cycle_mode_btn, 1)
+        label_row.addWidget(self.cycle_count_label, 1)
+        layout.addLayout(label_row)
+
+        self.cycle_seq_label = self._hint("seq: none")
+        self.cycle_seq_label.setToolTip("Original image indices in click order")
+        layout.addWidget(self.cycle_seq_label)
+
+        clear_cycle_btn = QPushButton("Clear Cycle Labels")
+        clear_cycle_btn.clicked.connect(self._clear_cycle_labels)
+        layout.addWidget(clear_cycle_btn)
+        layout.addStretch(1)
+        return page
+
+    def _build_export_footer(self) -> QWidget:
+        """Subject, output folder and the Export button, always on screen."""
+        footer = QFrame()
+        footer.setObjectName("exportFooter")
+        layout = QVBoxLayout(footer)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        self.subject_edit = QLineEdit()
+        self.subject_edit.setPlaceholderText("for example OSAMRI029")
+        self.subject_edit.textChanged.connect(self._update_outdir)
+
+        self.outdir_edit = QLineEdit(str(Path.cwd()))
+        outdir_browse_btn = QPushButton("...")
+        outdir_browse_btn.setFixedWidth(32)
+        outdir_browse_btn.setToolTip("Choose the output folder.")
+        outdir_browse_btn.clicked.connect(self._browse_outdir)
+        outdir_row = QHBoxLayout()
+        outdir_row.addWidget(self.outdir_edit, 1)
+        outdir_row.addWidget(outdir_browse_btn)
+
+        form = self._form()
+        form.addRow("Subject ID", self.subject_edit)
+        form.addRow("Output folder", outdir_row)
+        layout.addLayout(form)
+
+        self.execute_btn = QPushButton("Export")
+        self.execute_btn.setObjectName("primaryButton")
+        self.execute_btn.clicked.connect(self._execute_processing)
+        layout.addWidget(self.execute_btn)
+        return footer
+
+    def _connect_live_updates(self) -> None:
+        """Wire the inputs whose changes redraw the plot."""
         # Commit on Enter or focus-out rather than on every keystroke. With
         # Qt's default keyboard tracking, typing "15" emits valueChanged for
         # "1" first, so the grid would recompute for a one-image window and
@@ -638,48 +817,6 @@ class FlowProfileApp(QMainWindow):
         self.start_spin.editingFinished.connect(self._zoom_to_window)
         self.end_spin.editingFinished.connect(self._zoom_to_window)
 
-        srow3 = QHBoxLayout()
-        assemble_btn = QPushButton("Assemble && Export")
-        assemble_btn.clicked.connect(self._assemble_and_export)
-        srow3.addWidget(assemble_btn)
-        self.synth_status_label = QLabel("no parts")
-        srow3.addWidget(self.synth_status_label)
-        srow3.addStretch(1)
-        synth_layout.addLayout(srow3)
-
-        self._tab_synth_layout.addWidget(self.synth_group)
-
-        # Finalize the tabbed control strip
-        for _lay in (self._tab_data_layout, self._tab_trig_layout,
-                     self._tab_ctstep_layout, self._tab_synth_layout):
-            _lay.setContentsMargins(6, 6, 6, 6)
-            _lay.addStretch(1)
-
-        def _scroll(widget):
-            sa = QScrollArea()
-            sa.setWidgetResizable(True)
-            sa.setFrameShape(QFrame.NoFrame)
-            sa.setWidget(widget)
-            return sa
-
-        self.tabs.addTab(_scroll(self._tab_data_w), "1. Data && Window")
-        self.tabs.addTab(_scroll(self._tab_trig_w), "2. Triggers (4D)")
-        self._ct_step_tab = self.tabs.addTab(_scroll(self._tab_ctstep_w), "3. CT Step-Trigger")
-        self._ct_synth_tab = self.tabs.addTab(_scroll(self._tab_synth_w), "4. CT Synthetic Profile")
-        main_layout.addWidget(self.tabs, stretch=0)
-
-        # Initialize CT-tab enablement from the current workflow.
-        self._on_workflow_changed(self.workflow_combo.currentText())
-
-        # --- Status bar ---
-        self.status_bar = QStatusBar()
-        self.status_bar.showMessage("Ready")
-        self.setStatusBar(self.status_bar)
-
-        # Worker-completion signals land on the GUI thread here.
-        self._processing_done.connect(self._on_processing_done)
-        self._processing_failed.connect(self._on_processing_failed)
-
     def _on_processing_done(self, msg: str) -> None:
         """GUI-thread completion handler for the Execute worker."""
         self.status_bar.showMessage(msg)
@@ -705,17 +842,42 @@ class FlowProfileApp(QMainWindow):
     # Callbacks
     # ------------------------------------------------------------------
 
-    def _on_workflow_changed(self, text: str) -> None:
-        """Enable the CT-only tabs and focus them when CT is selected."""
-        if not hasattr(self, "_ct_synth_tab"):
-            return  # tabs not built yet (called during construction)
-        is_ct = text == "CT"
-        self.tabs.setTabEnabled(self._ct_step_tab, is_ct)
-        self.tabs.setTabEnabled(self._ct_synth_tab, is_ct)
+    def _workflow_name(self) -> str:
+        """The chosen study type as the handlers spell it: MRI, cpap,
+        phase-contrast or CT."""
+        return self.workflow_combo.currentData()
+
+    def _ct_method(self) -> str:
+        """The chosen CT method: parts, landmarks or cycle."""
+        return self.ct_method_combo.currentData()
+
+    def _on_workflow_changed(self) -> None:
+        """Show only the sections that belong to the chosen study type."""
+        is_ct = self._workflow_name() == "CT"
+        self.study_hint.setText(
+            self.workflow_combo.itemData(
+                self.workflow_combo.currentIndex(), Qt.ToolTipRole
+            )
+        )
+        self.ct_scan_section.setVisible(is_ct)
+        self.ct_method_section.setVisible(is_ct)
+        self.trigger_section.setVisible(not is_ct)
         if not is_ct and self.synth_enable_chk.isChecked():
             self.synth_enable_chk.setChecked(False)
-        if is_ct:
-            self.tabs.setCurrentIndex(self._ct_synth_tab)
+
+    def _on_ct_method_changed(self) -> None:
+        """Bring the chosen CT method's controls on screen, and only those."""
+        index = self.ct_method_combo.currentIndex()
+        self.ct_method_hint.setText(
+            self.ct_method_combo.itemData(index, Qt.ToolTipRole)
+        )
+        self.ct_method_stack.setCurrentIndex(index)
+        # A stacked widget is as tall as its tallest page. Letting the hidden
+        # pages give up their height keeps a short method from leaving a gap.
+        for i in range(self.ct_method_stack.count()):
+            policy = QSizePolicy.Preferred if i == index else QSizePolicy.Ignored
+            self.ct_method_stack.widget(i).setSizePolicy(QSizePolicy.Preferred, policy)
+        self.ct_method_stack.adjustSize()
 
     def _update_outdir(self, *_args) -> None:
         """Recompute output dir based on current mat file and subject."""
@@ -735,9 +897,21 @@ class FlowProfileApp(QMainWindow):
             "MAT files (*.mat);;All files (*.*)",
         )
         if filepath:
-            self.mat_filepath = Path(filepath)
-            self.file_label.setText(str(self.mat_filepath))
-            self._update_outdir()
+            self.open_recording(filepath)
+
+    def open_recording(self, path) -> None:
+        """Load a LabChart .mat export and show all its channels and blocks.
+
+        One action from the user's side: choosing the file is enough to see
+        the recording, with no separate load step.
+        """
+        self.mat_filepath = Path(path)
+        self.file_label.setText(self.mat_filepath.name)
+        self.file_label.setToolTip(str(self.mat_filepath))
+        self._update_outdir()
+        self._load_and_overview()
+        if self.data is None:  # the load failed and has already said why
+            self.file_label.setText(f"Could not open {self.mat_filepath.name}")
 
     def _browse_outdir(self) -> None:
         """Open directory dialog to select output directory."""
@@ -760,6 +934,7 @@ class FlowProfileApp(QMainWindow):
         replot (symptom: GUI stops drawing after switching blocks).
         """
         self._disconnect_click()
+        self._overview_axes = {}
         self._time_markers = []
         self._trigger_markers = []
         self._ct_step_markers = []
@@ -831,26 +1006,93 @@ class FlowProfileApp(QMainWindow):
             self._loading = False
         self._show_overview()
 
+    def _channel_titles(self) -> List[str]:
+        """One title per channel of the loaded recording, blank where unnamed."""
+        nch = self.data.num_channels
+        titles = list(self.data.titles or [])
+        return (titles + [""] * nch)[:nch]
+
+    def _channel_text(self, row: int) -> str:
+        """Short name for a channel row, such as "ch 2 Flow"."""
+        if self.data is None or row < 1 or row > self.data.num_channels:
+            return f"ch {row}"
+        return f"ch {row} {self._channel_titles()[row - 1]}".strip()
+
+    def _role_of(self, row: int) -> Optional[str]:
+        """Role the pickers give a channel row: flow, trigger, pressure or None."""
+        if row == self.flow_row_spin.value():
+            return "flow"
+        if row == self.trigger_row_spin.value():
+            return "trigger"
+        if row == self.pressure_row_spin.value():
+            return "pressure"
+        return None
+
+    def _go_to_overview(self) -> None:
+        """Return to the all-blocks overview of the loaded recording."""
+        if self.data is None:
+            self.status_bar.showMessage("Open a recording first.")
+            return
+        self._reset_plot_state()
+        self._show_overview()
+
+    def _on_selection_changed(self, *_args) -> None:
+        """Redraw the current view after the user changes a channel or block.
+
+        The pickers used to need a separate Plot Selected click, so the plot
+        could show one block while the pickers named another.
+        """
+        if self.data is None:
+            return
+        was_detail = self._plot_mode == "selected"
+        col = self.col_spin.value()
+        if was_detail and not self.data.is_block_empty(self.flow_row_spin.value(), col):
+            self._plot_selected()
+            return
+        self._go_to_overview()
+        if was_detail:
+            self.status_bar.showMessage(
+                f"Block {col} has no data on the flow channel, so all blocks "
+                "are shown. Pick another block or another Flow channel."
+            )
+
+    def _on_overview_click(self, event) -> None:
+        """Open the block whose overview tile was clicked."""
+        if self._plot_mode != "overview" or event.button != 1:
+            return
+        if self.toolbar.mode:  # zoom or pan owns the click
+            return
+        hit = next(
+            (key for key, ax in self._overview_axes.items() if ax is event.inaxes),
+            None,
+        )
+        if hit is None:
+            return
+        col = hit[1]
+        flow_row = self.flow_row_spin.value()
+        if self.data.is_block_empty(flow_row, col):
+            self.status_bar.showMessage(
+                f"Block {col} is empty on the flow channel "
+                f"({self._channel_text(flow_row)}). Pick another block, or "
+                "change the Flow channel on the left."
+            )
+            return
+        self.col_spin.setValue(col)
+        self._plot_selected()
+
     def _show_overview(self) -> None:
         """Draw the channels-x-blocks overview grid for the loaded file."""
 
         nch = self.data.num_channels
         nbl = self.data.num_blocks
 
-        # Update spinbox ranges to match actual data dimensions
-        self.flow_row_spin.setMaximum(nch)
-        self.trigger_row_spin.setMaximum(nch)  # 0 still allowed (= none)
-        self.pressure_row_spin.setMaximum(nch)  # 0 still allowed (= none)
-        self.col_spin.setMaximum(nbl)
-        # Clamp current values into valid range
-        if self.flow_row_spin.value() > nch:
-            self.flow_row_spin.setValue(nch)
-        if self.trigger_row_spin.value() > nch:
-            self.trigger_row_spin.setValue(nch)
-        if self.pressure_row_spin.value() > nch:
-            self.pressure_row_spin.setValue(nch)
-        if self.col_spin.value() > nbl:
-            self.col_spin.setValue(nbl)
+        # Offer exactly the channels and blocks this recording has, by name.
+        # A current choice past the last one is clamped to it by the picker.
+        titles = self._channel_titles()
+        for picker in (self.flow_row_spin, self.trigger_row_spin,
+                       self.pressure_row_spin):
+            picker.set_items(titles)
+        self.col_spin.set_items([""] * nbl)
 
         # Build overview grid
         self.fig.clear()
@@ -858,13 +1100,19 @@ class FlowProfileApp(QMainWindow):
         self.ax_top = None
         self.ax_bottom = None
         self.ax_top_trig = None
+        self._overview_axes = {}
 
-        axes = []
         for ch_idx in range(nch):
-            row_axes = []
+            row = ch_idx + 1  # 1-indexed
+            role = self._role_of(row)
+            color = _ROLE_COLORS.get(role, "0.45")
+            # Each row is named, and says which role the pickers give it, so a
+            # wrong channel assignment is visible before anything is exported.
+            row_label = channel_label(row, titles[ch_idx])
+            if role:
+                row_label += f"\n({role})"
             for bl_idx in range(nbl):
                 ax = self.fig.add_subplot(nch, nbl, ch_idx * nbl + bl_idx + 1)
-                row = ch_idx + 1  # 1-indexed
                 col = bl_idx + 1
 
                 if self.data.is_block_empty(row, col):
@@ -878,31 +1126,42 @@ class FlowProfileApp(QMainWindow):
                     data = self.data.get_data(row, col)
                     # Downsample for speed
                     step = max(1, len(time) // 500)
-                    ax.plot(time[::step], data[::step], "b-", linewidth=0.3)
+                    ax.plot(time[::step], data[::step], color=color, linewidth=0.5)
 
-                ax.set_title(f"[{row},{col}]", fontsize=7, pad=2)
-                ax.tick_params(labelsize=5)
+                if ch_idx == 0:
+                    ax.set_title(f"Block {col}", fontsize=9, pad=3)
+                if bl_idx == 0:
+                    ax.set_ylabel(
+                        row_label, rotation=0, ha="right", va="center",
+                        fontsize=8, color=color if role else "0.25",
+                    )
+                ax.tick_params(labelsize=6)
                 # Only show axis labels on edges
                 if ch_idx < nch - 1:
                     ax.set_xticklabels([])
                 if bl_idx > 0:
                     ax.set_yticklabels([])
 
-                row_axes.append(ax)
-            axes.append(row_axes)
+                self._overview_axes[(row, col)] = ax
 
         self.canvas.draw()
         self.toolbar.update()
 
+        # A click on a tile opens that block. The slot is the one the detail
+        # view uses for its own clicks, so only one handler is ever connected.
+        self._disconnect_click()
+        self._click_cid = self.canvas.mpl_connect(
+            "button_press_event", self._on_overview_click
+        )
+
         self.status_bar.showMessage(
-            f"Overview: {nch} channels x {nbl} blocks | "
-            f"Select row/col and click 'Plot Selected' for detail"
+            f"Overview: {nch} channels x {nbl} blocks | Click a block to open it"
         )
 
     def _plot_selected(self) -> None:
         """Plot a specific block in detail (flow + trigger top, flow-only bottom)."""
         if self.data is None:
-            QMessageBox.warning(self, "No Data", "Please load a .mat file first (click 'Load Overview').")
+            QMessageBox.warning(self, "No Data", "Open a recording first.")
             return
 
         flow_row = self.flow_row_spin.value()
@@ -953,7 +1212,7 @@ class FlowProfileApp(QMainWindow):
         self.ax_top.plot(time, flow, "b-", linewidth=0.5, label="flow info")
 
         has_trigger = trigger_row >= 1 and not self.data.is_block_empty(trigger_row, col)
-        is_ct = self.workflow_combo.currentText() == "CT"
+        is_ct = self._workflow_name() == "CT"
         if has_trigger:
             trigger = self.data.get_data(trigger_row, col)
             trigger_time = self.data.get_time(trigger_row, col)
@@ -980,11 +1239,17 @@ class FlowProfileApp(QMainWindow):
             trigger_info = f" | {self._trigger_count} triggers"
         else:
             trigger_info = ""
-        self.ax_top.set_title(
-            f"{self.mat_filepath.name} — Flow [{flow_row}, {col}]"
-            f"{f' + Trigger [{trigger_row}, {col}]' if has_trigger else ''}"
-            f"{trigger_info}"
-        )
+        # Names, not bare row numbers, so the title says what is on screen.
+        title_parts = [
+            self.mat_filepath.name if self.mat_filepath else "recording",
+            f"Block {col}",
+            f"Flow: {self._channel_text(flow_row)}",
+        ]
+        if has_trigger:
+            title_parts.append(f"Trigger: {self._channel_text(trigger_row)}")
+        # Padded so the marker times and image numbers drawn along the top
+        # edge of the axes sit under the title instead of across it.
+        self.ax_top.set_title(" | ".join(title_parts) + trigger_info, pad=16)
         self.ax_top.grid(True, alpha=0.3)
         self._refresh_top_legend()
 
@@ -993,7 +1258,7 @@ class FlowProfileApp(QMainWindow):
         self.ax_bottom.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
         self.ax_bottom.set_xlabel("Time (s)")
         self.ax_bottom.set_ylabel("Flow (L/s)")
-        self.ax_bottom.set_title("Flow Signal — left-click to place time marker, right-click to clear")
+        self.ax_bottom.set_title("Flow only")
         self.ax_bottom.grid(True, alpha=0.3)
         self.ax_bottom.format_coord = lambda x, y: f"time={x:.3f}s, flow={y:.4f}"
 
@@ -1265,7 +1530,10 @@ class FlowProfileApp(QMainWindow):
             QMessageBox.warning(self, "No Triggers", "No triggers detected. Load a block with trigger data first.")
             return
         if self.ax_top is None:
-            QMessageBox.warning(self, "No Plot", "Please click 'Plot Selected' first.")
+            QMessageBox.warning(
+                self, "No Plot",
+                "Open a block first: click it on the overview.",
+            )
             return
 
         # Clear previous trigger range markers
@@ -1338,7 +1606,10 @@ class FlowProfileApp(QMainWindow):
             QMessageBox.warning(self, "No Data", "Please load a .mat file first.")
             return
         if self.ax_top is None:
-            QMessageBox.warning(self, "No Plot", "Please click 'Plot Selected' first.")
+            QMessageBox.warning(
+                self, "No Plot",
+                "Open a block first: click it on the overview.",
+            )
             return
 
         trigger_row = self.trigger_row_spin.value()
@@ -1347,7 +1618,8 @@ class FlowProfileApp(QMainWindow):
         if trigger_row < 1 or self.data.is_block_empty(trigger_row, col):
             QMessageBox.warning(
                 self, "No Trigger",
-                "No trigger data. Set Trigger Row (in Data Source) to a non-empty channel.",
+                "No trigger data. Set Trigger (section 1, Recording) to a "
+                "channel that has data in this block.",
             )
             return
 
@@ -1839,7 +2111,7 @@ class FlowProfileApp(QMainWindow):
         n = len(self._ct_cycle_frames)
         self.cycle_count_label.setText(f"{n} frame{'s' if n != 1 else ''}")
         if n == 0:
-            self.cycle_seq_label.setText("seq: —")
+            self.cycle_seq_label.setText("seq: none")
         else:
             seq = ",".join(str(i) for i in self._ct_cycle_frames)
             if len(seq) > 80:
@@ -2034,7 +2306,7 @@ class FlowProfileApp(QMainWindow):
             else:
                 # Drop a stale grid rather than leaving it contradicting the boxes.
                 self._clear_synth_grid()
-                self.synth_grid_label.setText("images: —")
+                self.synth_grid_label.setText("images: none")
                 self.canvas.draw_idle()
             return
         origin, dt, n_images = meta
@@ -2105,7 +2377,11 @@ class FlowProfileApp(QMainWindow):
     def _arm_add_part(self) -> None:
         """Arm two-click capture that fills the From/To boxes from plot clicks."""
         if not self.synth_enable_chk.isChecked():
-            QMessageBox.information(self, "Enable Mode", "Tick 'Enable full-manual mode' first.")
+            QMessageBox.information(
+                self, "Choose Method",
+                "Choose the CT study type and the 'Reorder image parts' "
+                "method first.",
+            )
             return
         # Exclusive click mode: a pending landmark must not survive underneath.
         self._ct_landmark_mode = None
@@ -2268,7 +2544,7 @@ class FlowProfileApp(QMainWindow):
         self._part_artists = []
         self._clear_synth_grid()
         self._clear_time_markers()
-        self.synth_grid_label.setText("images: —")
+        self.synth_grid_label.setText("images: none")
         self.canvas.draw_idle()
         self.status_bar.showMessage("Cleared parts, image grid, and plot markers.")
 
@@ -2402,7 +2678,7 @@ class FlowProfileApp(QMainWindow):
         flow_row = self.flow_row_spin.value()
         pressure_row = self.pressure_row_spin.value()  # 0 = skip pressure
         col = self.col_spin.value()
-        workflow_name = self.workflow_combo.currentText()
+        workflow_name = self._workflow_name()
         output_dir = Path(self.outdir_edit.text())
         include_pressure = pressure_row > 0
 
