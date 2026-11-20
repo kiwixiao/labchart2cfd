@@ -65,6 +65,10 @@ The left sidebar is read from top to bottom:
 
 Enter the Subject ID and press **Export**. The line above the button says what is still missing, and a panel lists the files after the export. The coloured line above the plot always says what a click on the plot will do.
 
+Above the plot, **Flow Y** and **Trigger Y** enlarge or shrink each scale (the mouse wheel over the numbers of an axis does the same). Fit sets the flow scale to the flow in view. Full shows the whole range of the trigger channel in the block, which is also what the trigger scale starts with and keeps when the view zooms in time.
+
+The comments typed in LabChart are drawn as dashed purple lines with their text, from a `.mat` export (`com`, `comtext`, `tickrate`) and from a native file alike. View, Show comments hides them.
+
 ## Native LabChart files (.adicht)
 
 A native LabChart recording can be used directly, with no manual export from LabChart first.

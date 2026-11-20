@@ -71,6 +71,20 @@ def write_synthetic_recording(path: Path) -> None:
         "dataend": end,
         "samplerate": np.full((4, 3), fs),
         "titles": np.array(["Trigger ", "Flow    ", "        ", "Pressure"]),
+        # Comments as LabChart exports them: channel (-1 for all), block,
+        # position in ticks, type, row of the text.
+        "tickrate": np.full((1, 3), fs),
+        "com": np.array([
+            [-1, 1, 19500, 1, 1],
+            [-1, 1, 39500, 1, 2],
+            [4, 1, 52000, 1, 3],
+            [-1, 2, 19500, 1, 1],
+        ], dtype=float),
+        "comtext": np.array([
+            "CT scan 1 quiet breathing",
+            "CT scan 2 deep breath    ",
+            "mask adjusted            ",
+        ]),
     })
 
 
@@ -133,6 +147,9 @@ def main() -> None:
         window._add_part_from_spins()
     shot("6_ct_parts")
 
+    # Changing the method with parts in the list asks first, and a question
+    # box would block an offscreen run. Clear them, as a user would.
+    window._clear_parts()
     for name, key in (("7_ct_landmarks", "landmarks"), ("8_ct_cycle", "cycle")):
         window.ct_method_combo.setCurrentIndex(window.ct_method_combo.findData(key))
         shot(name)

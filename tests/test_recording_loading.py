@@ -83,6 +83,7 @@ class _FakeAdicht:
     titles = ["TRIGGER", "FLOW", "CALC"]
     n_samples = [[4, 0], [4, 3], [4, 3]]
     sample_rate = [[10.0, 10.0], [10.0, 10.0], [10.0, 10.0]]
+    comments = []
 
     def __init__(self, path):
         self.path = Path(path)
@@ -181,6 +182,8 @@ def test_opening_the_adicht_gives_the_same_numbers_as_labcharts_export():
 
     assert (native.num_channels, native.num_blocks) == (export.num_channels, export.num_blocks)
     assert [t.strip() for t in native.titles] == [t.strip() for t in export.titles]
+    # The comments too: same block, channel, time and text from both files.
+    assert native.comments == export.comments
     for ch in range(1, export.num_channels + 1):
         for bl in range(1, export.num_blocks + 1):
             where = f"channel {ch}, block {bl}"

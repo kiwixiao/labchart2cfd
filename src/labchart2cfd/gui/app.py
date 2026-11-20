@@ -35,6 +35,7 @@ import numpy as np
 import matplotlib
 matplotlib.use("QtAgg")
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from scipy.signal import find_peaks
 
@@ -210,8 +211,10 @@ class FlowProfileApp(QMainWindow):
         # full data and is refreshed whenever the visible range changes.
         self._envelopes: List[EnvelopeLine] = []
 
-        # Remarks from the reader of the open recording (native files only).
+        # Remarks from the reader of the open recording.
         self._load_notes: List[str] = []
+        # Lines and texts of the LabChart comments drawn on the detail view.
+        self._comment_artists: list = []
         # (flow row, trigger row, block) the current view was drawn from, so a
         # picker change can tell whether anything on the plot changed.
         self._shown_selection: Optional[Tuple[int, int, int]] = None
@@ -340,6 +343,14 @@ class FlowProfileApp(QMainWindow):
         self.zoom_action.setShortcut(QKeySequence("Ctrl+0"))
         self.zoom_action.triggered.connect(lambda: self._zoom_to_window())
         view_menu.addAction(self.zoom_action)
+        view_menu.addSeparator()
+        self.comments_action = QAction("Show &comments", self)
+        self.comments_action.setShortcut(QKeySequence("Ctrl+3"))
+        self.comments_action.setCheckable(True)
+        self.comments_action.setChecked(True)
+        self.comments_action.setEnabled(False)
+        self.comments_action.toggled.connect(self._set_comments_visible)
+        view_menu.addAction(self.comments_action)
 
         help_menu = self.menuBar().addMenu("&Help")
         self.guide_action = QAction("&Quick guide", self)
@@ -440,10 +451,156 @@ class FlowProfileApp(QMainWindow):
         self.mode_banner.setWordWrap(True)
         self.mode_banner.setProperty("kind", "idle")
 
+        tools = QHBoxLayout()
+        tools.setContentsMargins(0, 0, 0, 0)
+        tools.setSpacing(4)
+        tools.addWidget(self.toolbar, 1)
+        self._build_y_scale_controls(tools)
+
+        # Over the numbers of a y axis, the wheel stretches that axis.
+        self.canvas.mpl_connect("scroll_event", self._on_scroll)
+
         layout.addWidget(self.mode_banner)
-        layout.addWidget(self.toolbar)
+        layout.addLayout(tools)
         layout.addWidget(self.canvas, 1)
         return panel
+
+    # ------------------------------------------------------------------
+    # Y scales
+    # ------------------------------------------------------------------
+
+    # Scale change of one button press, and of one wheel notch.
+    _Y_BUTTON_FACTOR = 0.5
+    _Y_WHEEL_FACTOR = 0.8
+
+    def _build_y_scale_controls(self, row: QHBoxLayout) -> None:
+        """Zoom in, zoom out and fit for the flow and the trigger scale.
+
+        The two scales are independent (flow on the left, trigger on the
+        right), and each can be set by hand, so a small signal can be
+        enlarged or a large one brought back into view.
+        """
+        def _button(text: str, tip: str, action) -> QPushButton:
+            button = QPushButton(text)
+            button.setObjectName("scaleButton")
+            button.setToolTip(tip)
+            button.setFocusPolicy(Qt.NoFocus)
+            button.setEnabled(False)
+            # Compact, so the strip leaves the toolbar its coordinate readout.
+            button.setFixedWidth(34 if len(text) == 1 else 50)
+            button.clicked.connect(action)
+            row.addWidget(button)
+            return button
+
+        wheel = " The mouse wheel over the numbers of the axis does the same."
+        row.addWidget(QLabel("Flow Y"))
+        self.flow_y_out_btn = _button(
+            "−", "Show a larger range on the flow scale." + wheel,
+            lambda: self._scale_y("flow", 1 / self._Y_BUTTON_FACTOR))
+        self.flow_y_in_btn = _button(
+            "+", "Enlarge the flow signal." + wheel,
+            lambda: self._scale_y("flow", self._Y_BUTTON_FACTOR))
+        self.flow_y_fit_btn = _button(
+            "Fit", "Fit the flow scale to the flow in view.",
+            lambda: self._fit_y("flow"))
+        row.addSpacing(10)
+        row.addWidget(QLabel("Trigger Y"))
+        self.trig_y_out_btn = _button(
+            "−", "Show a larger range on the trigger scale." + wheel,
+            lambda: self._scale_y("trigger", 1 / self._Y_BUTTON_FACTOR))
+        self.trig_y_in_btn = _button(
+            "+", "Enlarge the trigger signal." + wheel,
+            lambda: self._scale_y("trigger", self._Y_BUTTON_FACTOR))
+        self.trig_y_fit_btn = _button(
+            "Full", "Show the whole range of the trigger channel in this block.",
+            lambda: self._fit_y("trigger"))
+
+    def _y_axes(self, which: str) -> list:
+        """The axes that carry one scale: 'flow' (both plots) or 'trigger'."""
+        if self._plot_mode != "selected":
+            return []
+        if which == "trigger":
+            return [self.ax_top_trig] if self.ax_top_trig is not None else []
+        return [ax for ax in (self.ax_top, self.ax_bottom) if ax is not None]
+
+    def _update_y_controls(self) -> None:
+        """Enable each scale's buttons only while that scale is on screen."""
+        for which, buttons in (
+            ("flow", (self.flow_y_out_btn, self.flow_y_in_btn, self.flow_y_fit_btn)),
+            ("trigger", (self.trig_y_out_btn, self.trig_y_in_btn, self.trig_y_fit_btn)),
+        ):
+            shown = bool(self._y_axes(which))
+            for button in buttons:
+                button.setEnabled(shown)
+
+    def _scale_y(self, which: str, factor: float,
+                 anchor: Optional[float] = None) -> None:
+        """Stretch one y scale by ``factor`` (below 1 enlarges the signal).
+
+        ``anchor`` is the value that keeps its place on screen. Without one
+        the middle of the scale stays put.
+        """
+        axes = self._y_axes(which)
+        if not axes:
+            return
+        lo, hi = axes[0].get_ylim()
+        if anchor is None:
+            anchor = (lo + hi) / 2
+        new = (anchor + (lo - anchor) * factor, anchor + (hi - anchor) * factor)
+        if not np.all(np.isfinite(new)) or new[1] <= new[0]:
+            return  # zoomed past what a float can tell apart
+        for ax in axes:
+            ax.set_ylim(*new)
+        self.canvas.draw_idle()
+
+    def _fit_y(self, which: str) -> None:
+        """Flow: fit to the flow in view. Trigger: the whole block.
+
+        The trigger scale is never fitted to the view. Inside a scan step the
+        trigger is flat, and fitting to it showed a few millivolts of noise
+        in place of the step.
+        """
+        axes = self._y_axes(which)
+        if not axes:
+            return
+        col = self.col_spin.value()
+        if which == "trigger":
+            limits = self._channel_y_limits(
+                self.trigger_row_spin.value(), col, -np.inf, np.inf)
+        else:
+            limits = self._channel_y_limits(
+                self.flow_row_spin.value(), col, *self.ax_top.get_xlim())
+        if limits is None:
+            return
+        for ax in axes:
+            ax.set_ylim(*limits)
+        self.canvas.draw_idle()
+
+    def _on_scroll(self, event) -> None:
+        """The wheel beside a plot, over its y axis numbers, zooms that scale.
+
+        Left of either plot is the flow scale, right of the top plot is the
+        trigger scale. Inside a plot the wheel does nothing, so a scale
+        cannot change by accident while reading the signal.
+        """
+        if self._plot_mode != "selected" or not event.step:
+            return
+        for ax, right in ((self.ax_top, "trigger"), (self.ax_bottom, None)):
+            if ax is None:
+                continue
+            box = ax.bbox
+            if not box.y0 <= event.y <= box.y1:
+                continue
+            if event.x < box.x0:
+                which, scale_ax = "flow", ax
+            elif event.x > box.x1 and right and self.ax_top_trig is not None:
+                which, scale_ax = right, self.ax_top_trig
+            else:
+                return
+            anchor = scale_ax.transData.inverted().transform((event.x, event.y))[1]
+            # One notch up enlarges the signal, as zooming in does elsewhere.
+            self._scale_y(which, self._Y_WHEEL_FACTOR ** event.step, anchor)
+            return
 
     # ------------------------------------------------------------------
     # Click modes
@@ -480,6 +637,8 @@ class FlowProfileApp(QMainWindow):
         if hasattr(self, "export_hint"):
             self._update_export_hint()
             self._update_channel_check()
+            self._update_y_controls()
+            self._update_comments_action()
         if self.mode_banner.property("kind") != kind:
             self.mode_banner.setProperty("kind", kind)
             # A changed dynamic property only restyles after a repolish.
@@ -1499,6 +1658,7 @@ class FlowProfileApp(QMainWindow):
         self._ct_step_markers = []
         self._ct_interval_markers = []
         self._ct_landmark_artists = []
+        self._comment_artists = []
         self._trigger_times = np.array([])
         self._trigger_count = 0
         self._ct_steps = []
@@ -1942,6 +2102,11 @@ class FlowProfileApp(QMainWindow):
             ))
             self.ax_top_trig.set_ylabel("Trigger", color="red")
             self.ax_top_trig.tick_params(axis="y", labelcolor="red")
+            # The whole range of the channel in this block, and it stays:
+            # no zoom in time refits it (see _fit_y).
+            trig_lim = self._channel_y_limits(trigger_row, col, -np.inf, np.inf)
+            if trig_lim is not None:
+                self.ax_top_trig.set_ylim(*trig_lim)
 
             if is_ct:
                 # CT uses step (bridge) detection, not pulsatile peak detection
@@ -1985,18 +2150,92 @@ class FlowProfileApp(QMainWindow):
         self.ax_bottom.grid(True, alpha=0.3)
         self.ax_bottom.format_coord = lambda x, y: f"time={x:.3f}s, flow={y:.4f}"
 
+        n_comments = self._draw_comments()
+
         self.canvas.draw()
         self.toolbar.update()
 
         # Connect click handler for data picker
         self._click_cid = self.canvas.mpl_connect("button_press_event", self._on_click)
 
+        comment_info = (
+            f" | {n_comments} comment{'s' if n_comments != 1 else ''}"
+            if n_comments else ""
+        )
         self.status_bar.showMessage(
             f"Block {col}, {self._channel_text(flow_row)}: {len(time)} samples, "
-            f"{time[-1]:.2f}s{trigger_info}"
+            f"{time[-1]:.2f}s{trigger_info}{comment_info}"
         )
         self._shown_selection = self._plotted_selection()
         self._refresh_banner()
+
+    # ------------------------------------------------------------------
+    # LabChart comments
+    # ------------------------------------------------------------------
+
+    # Not used by any signal or marker on the plot.
+    _COMMENT_COLOR = "#7c3aed"
+
+    def _comment_label(self, comment) -> str:
+        """The text drawn for a comment.
+
+        A comment typed on a channel that is not plotted names that channel,
+        so it is not read as a remark about the flow or the trigger.
+        """
+        shown = (None, self.flow_row_spin.value(), self.trigger_row_spin.value())
+        if comment.channel in shown:
+            return comment.text
+        return f"{comment.text} ({self._channel_text(comment.channel)})"
+
+    def _draw_comments(self) -> int:
+        """Draw the open block's comments, as LabChart does: a dashed line at
+        each time, with the text along it. Returns how many were drawn.
+
+        The lines are added as plain artists in axes height coordinates, so
+        they never change a scale or the range of the time axis.
+        """
+        self._comment_artists = []
+        comments = self.data.comments_in(self.col_spin.value())
+        visible = self.comments_action.isChecked()
+        for comment in comments:
+            for ax in (self.ax_top, self.ax_bottom):
+                line = Line2D(
+                    [comment.time, comment.time], [0, 1],
+                    transform=ax.get_xaxis_transform(),
+                    color=self._COMMENT_COLOR, linestyle=(0, (4, 3)),
+                    linewidth=0.8, alpha=0.9, visible=visible,
+                )
+                ax.add_artist(line)
+                self._comment_artists.append(line)
+            # Along the line from the bottom edge. The top edge carries the
+            # marker times and the image numbers. Drawn on the topmost axes
+            # with a pale backing, so the signals do not run through it.
+            host = self.ax_top_trig if self.ax_top_trig is not None else self.ax_top
+            text = host.text(
+                comment.time, 0.04, self._comment_label(comment),
+                transform=host.get_xaxis_transform(),
+                rotation=90, ha="right", va="bottom", fontsize=8,
+                color=self._COMMENT_COLOR, clip_on=True, visible=visible,
+                zorder=5,
+                bbox=dict(facecolor="white", edgecolor="none", alpha=0.8, pad=1.5),
+            )
+            text.set_in_layout(False)
+            self._comment_artists.append(text)
+        return len(comments)
+
+    def _set_comments_visible(self, visible: bool) -> None:
+        """Show or hide the comments (View menu)."""
+        for artist in self._comment_artists:
+            artist.set_visible(visible)
+        self.canvas.draw_idle()
+
+    def _update_comments_action(self) -> None:
+        """The menu entry is live only while there are comments to show."""
+        if not hasattr(self, "comments_action"):
+            return  # the banner is first refreshed before the menus exist
+        self.comments_action.setEnabled(
+            self._plot_mode == "selected" and bool(self._comment_artists)
+        )
 
     def _refresh_top_legend(self) -> None:
         """Combine handles from ax_top and ax_top_trig into one legend."""
@@ -2190,11 +2429,15 @@ class FlowProfileApp(QMainWindow):
             return None
         t = self.data.get_time(row, col)
         y = self.data.get_data(row, col)
-        mask = (t >= x_lo) & (t <= x_hi)
-        if not np.any(mask):
+        # Time rises with the sample index, so the samples in [x_lo, x_hi]
+        # are one slice. A mask over a 92 million sample channel would copy
+        # the whole of it to read its range.
+        first = int(np.searchsorted(t, x_lo, side="left"))
+        stop = int(np.searchsorted(t, x_hi, side="right"))
+        if stop <= first:
             return None
-        lo = float(np.min(y[mask]))
-        hi = float(np.max(y[mask]))
+        lo = float(np.min(y[first:stop]))
+        hi = float(np.max(y[first:stop]))
         pad = (hi - lo) * self._ZOOM_Y_MARGIN
         if pad == 0:  # flat signal: keep the view from collapsing to a line
             pad = abs(hi) * self._ZOOM_Y_MARGIN or 1.0
@@ -2204,9 +2447,10 @@ class FlowProfileApp(QMainWindow):
                         end_t: Optional[float] = None) -> None:
         """Zoom x and y to the processing window, with margin at every edge.
 
-        Each y axis is scaled to the data actually inside the window, so a
+        The flow scale is fitted to the flow actually inside the window, so a
         short step buried in a long recording fills the view instead of being
-        flattened by the full-recording range.
+        flattened by the full-recording range. The trigger scale is not
+        touched.
         """
         if self.data is None or self.ax_top is None or self._plot_mode != "selected":
             return
@@ -2231,12 +2475,9 @@ class FlowProfileApp(QMainWindow):
             if self.ax_bottom is not None:
                 self.ax_bottom.set_ylim(*flow_lim)
 
-        if self.ax_top_trig is not None:
-            trig_lim = self._channel_y_limits(
-                self.trigger_row_spin.value(), col, start_t, end_t
-            )
-            if trig_lim is not None:
-                self.ax_top_trig.set_ylim(*trig_lim)
+        # The trigger scale is left as it is. Fitted to the window it showed
+        # the noise on top of a scan step (2 mV on a real recording) and hid
+        # the step. It holds the block's whole range or what the user set.
 
         self.canvas.draw_idle()
         self.status_bar.showMessage(

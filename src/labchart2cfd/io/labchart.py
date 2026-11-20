@@ -12,11 +12,31 @@ LabChart exports contain:
 - unittext/unittextmap: unit strings per channel
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Union
 
 import numpy as np
 import scipy.io
+
+
+@dataclass(frozen=True)
+class Comment:
+    """A LabChart comment: text the operator typed at one moment of a block.
+
+    Attributes:
+        block: Block (column) the comment belongs to, 1-indexed.
+        channel: Channel (row) it was typed on, 1-indexed, or None when it
+            belongs to all channels.
+        time: Seconds from the start of the block, the same clock as
+            ``LabChartData.get_time``.
+        text: The comment as typed.
+    """
+
+    block: int
+    channel: Optional[int]
+    time: float
+    text: str
 
 
 class LabChartData:
@@ -29,6 +49,7 @@ class LabChartData:
         num_blocks: Number of blocks (segments) in the recording
         titles: Channel titles/names
         filepath: Source file path
+        comments: The recording's comments, ordered by block and time
     """
 
     def __init__(
@@ -39,6 +60,7 @@ class LabChartData:
         num_blocks,  # type: int
         titles=None,  # type: Optional[List[str]]
         filepath=None,  # type: Optional[Path]
+        comments=None,  # type: Optional[List[Comment]]
     ):
         self.data_cell = data_cell
         self.time_cell = time_cell
@@ -46,6 +68,14 @@ class LabChartData:
         self.num_blocks = num_blocks
         self.titles = titles if titles is not None else []
         self.filepath = filepath
+        self.comments = sorted(
+            comments or [], key=lambda c: (c.block, c.time)
+        )  # type: List[Comment]
+
+    def comments_in(self, column):
+        # type: (int) -> List[Comment]
+        """The comments of one block (1-indexed), in time order."""
+        return [c for c in self.comments if c.block == column]
 
     def get_data(self, row, column):
         # type: (int, int) -> np.ndarray
@@ -124,19 +154,17 @@ class LabChartData:
         return self.data_cell[ch][bl] is None
 
 
-def _extract_titles(mat, num_channels):
-    # type: (dict, int) -> List[str]
-    """Parse channel titles from any of the layouts LabChart/MATLAB produce.
+def _text_rows(raw):
+    # type: (np.ndarray) -> List[str]
+    """One string per row of a text variable, in any layout LabChart/MATLAB produce.
 
     LabChart's exporter writes a char matrix (rows of fixed-width chars).
     Re-saving from MATLAB turns it into a cell array, which loadmat delivers
     as an object array; the old chr() fallback crashed on that.
     """
-    if "titles" not in mat:
-        return []
 
-    def _one_title(item) -> str:
-        """Exactly one title per cell, however deeply loadmat nested it.
+    def _one_text(item) -> str:
+        """Exactly one string per cell, however deeply loadmat nested it.
 
         Returning a variable number of strings per cell shifted every later
         channel up a slot whenever a cell was blank, so `validate` printed the
@@ -148,31 +176,101 @@ def _extract_titles(mat, num_channels):
         if arr.size == 1:
             value = arr[0]
             if isinstance(value, np.ndarray):
-                return _one_title(value)    # cell inside a cell
+                return _one_text(value)     # cell inside a cell
             return str(value).strip()
         return "".join(str(x) for x in arr).strip()
 
-    titles_raw = mat["titles"]
     # Cell array: object dtype, possibly nested by loadmat.
-    if getattr(titles_raw, "dtype", None) is not None and titles_raw.dtype == object:
-        items = [_one_title(item) for item in titles_raw.ravel()]
-    else:
-        items = []
-        for title_item in titles_raw:
-            if isinstance(title_item, str):
-                items.append(title_item.strip())
-            else:
-                # Char matrix row: join character codes.
-                items.append("".join(chr(c) for c in title_item if c != 0).strip())
+    if getattr(raw, "dtype", None) is not None and raw.dtype == object:
+        return [_one_text(item) for item in raw.ravel()]
+    rows = []
+    for item in raw:
+        if isinstance(item, str):
+            rows.append(item.strip())
+        else:
+            # Char matrix row: join character codes.
+            rows.append("".join(chr(c) for c in item if c != 0).strip())
+    return rows
 
+
+def _extract_titles(mat, num_channels):
+    # type: (dict, int) -> List[str]
+    """Channel titles, exactly one per channel."""
+    if "titles" not in mat:
+        return []
+
+    items = _text_rows(mat["titles"])
     # Pad so index i is always channel i+1, never a shifted neighbour.
     items = items[:num_channels]
     items.extend([""] * (num_channels - len(items)))
     return items
 
 
-def load_labchart_mat(filepath):
-    # type: (Union[str, Path]) -> LabChartData
+def _extract_comments(mat, num_channels, num_blocks, notes):
+    # type: (dict, int, int, Optional[List[str]]) -> List[Comment]
+    """The comments of a LabChart export, or none with the reason in ``notes``.
+
+    ``com`` has one row per comment: channel (-1 for all channels, else
+    1-based), block (1-based), position in ticks from the start of the block,
+    type, and the 1-based row of its text in ``comtext``. ``tickrate`` holds
+    the ticks per second of each block.
+
+    Comments are all or nothing. If the table cannot be placed in time or
+    matched to its texts, none are returned: a comment drawn at a guessed
+    time would mislead more than a missing one. The signals are not affected.
+    """
+    if "com" not in mat:
+        return []
+    com = np.asarray(mat["com"], dtype=float)
+    if com.size == 0:
+        return []
+
+    def _dropped(reason):
+        # type: (str) -> List[Comment]
+        if notes is not None:
+            notes.append(
+                "The comments of this recording are not shown: {}.".format(reason)
+            )
+        return []
+
+    if com.ndim != 2 or com.shape[1] < 5:
+        return _dropped(
+            "the comment table has an unexpected shape {}".format(com.shape)
+        )
+    if "tickrate" not in mat:
+        return _dropped("the file has no tick rate to turn their positions into times")
+    if "comtext" not in mat:
+        return _dropped("the file holds no comment text")
+    tickrate = np.asarray(mat["tickrate"], dtype=float).ravel()
+    texts = _text_rows(mat["comtext"])
+
+    comments = []
+    for channel, block, tick, _kind, text_row in com[:, :5]:
+        channel, block, text_row = int(channel), int(block), int(text_row)
+        if not 1 <= block <= min(num_blocks, tickrate.size):
+            return _dropped("a comment names block {} of {}".format(block, num_blocks))
+        rate = tickrate[block - 1]
+        if not np.isfinite(rate) or rate <= 0:
+            return _dropped("block {} has tick rate {}".format(block, rate))
+        if channel != -1 and not 1 <= channel <= num_channels:
+            return _dropped(
+                "a comment names channel {} of {}".format(channel, num_channels)
+            )
+        if not 1 <= text_row <= len(texts):
+            return _dropped(
+                "a comment points at text {} of {}".format(text_row, len(texts))
+            )
+        comments.append(Comment(
+            block=block,
+            channel=None if channel == -1 else channel,
+            time=float(tick) / float(rate),
+            text=texts[text_row - 1],
+        ))
+    return comments
+
+
+def load_labchart_mat(filepath, notes=None):
+    # type: (Union[str, Path], Optional[List[str]]) -> LabChartData
     """Load a LabChart-exported .mat file.
 
     This function mirrors the behavior of LabChart.m, parsing the cell array
@@ -180,6 +278,8 @@ def load_labchart_mat(filepath):
 
     Args:
         filepath: Path to the .mat file
+        notes: If given, remarks for the user are appended to it (for now
+            only why the recording's comments could not be read).
 
     Returns:
         LabChartData object containing parsed data and time arrays
@@ -301,6 +401,7 @@ def load_labchart_mat(filepath):
         num_blocks=num_blocks,
         titles=titles,
         filepath=filepath,
+        comments=_extract_comments(mat, num_channels, num_blocks, notes),
     )
 
 

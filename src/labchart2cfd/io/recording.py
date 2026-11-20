@@ -11,7 +11,7 @@ from typing import Callable, List, Optional, Union
 import numpy as np
 
 from labchart2cfd.io.adicht import AdichtFile, plan_export
-from labchart2cfd.io.labchart import LabChartData, load_labchart_mat
+from labchart2cfd.io.labchart import Comment, LabChartData, load_labchart_mat
 
 # File types that hold a recording, lower case, in the order they are offered.
 RECORDING_SUFFIXES = (".mat", ".adicht")
@@ -71,6 +71,19 @@ def load_adicht(filepath: Union[str, Path],
                 np.arange(adi.n_samples[ch][rec]) / float(adi.sample_rate[ch][rec])
             )
 
+        # The native reader counts records and channels from 0 and marks a
+        # comment on all channels with -1. Its time is the tick over the
+        # record's tick rate, the same clock as the samples.
+        comments = [
+            Comment(
+                block=com["record"] + 1,
+                channel=None if com["channel"] < 0 else com["channel"] + 1,
+                time=float(com["time_s"]),
+                text=com["text"],
+            )
+            for com in adi.comments
+        ]
+
     if notes is not None:
         notes.extend(reader_notes)
     return LabChartData(
@@ -80,6 +93,7 @@ def load_adicht(filepath: Union[str, Path],
         num_blocks=n_records,
         titles=titles,
         filepath=filepath,
+        comments=comments,
     )
 
 
@@ -101,7 +115,7 @@ def load_recording(filepath: Union[str, Path],
     filepath = Path(filepath)
     suffix = filepath.suffix.lower()
     if suffix == ".mat":
-        return load_labchart_mat(filepath)
+        return load_labchart_mat(filepath, notes=notes)
     if suffix == ".adicht":
         return load_adicht(filepath, notes=notes, progress=progress)
     raise ValueError(

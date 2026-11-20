@@ -289,17 +289,17 @@ def test_zoom_to_window_scales_y_to_data_inside_the_window(win):
     assert win.ax_bottom.get_ylim() == pytest.approx((ylo, yhi))
 
 
-def test_zoom_to_window_scales_the_trigger_twin_axis_separately(win):
+def test_zoom_to_window_leaves_the_trigger_twin_axis_alone(win):
+    """It used to fit the trigger scale to the window. Inside a step the
+    trigger is flat, so the axis showed its noise and hid the step (the
+    user's report on a real recording). See tests/test_gui_view.py."""
     _load_fake_signal(win)
+    win.ax_top_trig.set_ylim(-0.5, 5.5)
 
     win._zoom_to_window(4.0, 6.0)
 
-    tlo, thi = win.ax_top_trig.get_ylim()
-    # The trigger is held high for the whole step, so its in-window range is
-    # flat at 5.0; the flat-signal fallback keeps the axis from collapsing.
-    assert tlo < 5.0 < thi
-    assert thi < 7.0          # not left at some huge default
-    # Scaled independently of the flow axis, which sits near zero.
+    assert win.ax_top_trig.get_ylim() == (-0.5, 5.5)
+    # The flow scale is still fitted to the window, independently.
     assert win.ax_top.get_ylim()[1] < 1.0
 
 
