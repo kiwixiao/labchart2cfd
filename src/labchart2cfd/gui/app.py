@@ -1,14 +1,27 @@
 """PyQt5 GUI for interactive flow profile selection and processing.
 
-Provides a desktop application that:
-1. Loads LabChart .mat files via file browser
-2. Displays an overview grid of all channels x blocks
-3. Lets user select a specific block (row/col) for detailed view
-4. Linked zoom between top and bottom subplots
-5. Detects and counts trigger pulses with visual markers
-6. Click-to-place time markers on flow curve for breath window selection
-7. Trigger range selection for 4D image registration (start frame + count)
-8. Runs the processing pipeline and exports CSV files
+The window is a sidebar of numbered sections beside a plot. The sections read
+in the order the work is done:
+
+1. Recording: open a LabChart .mat export and name the Flow, Trigger and
+   Pressure channels. An overview shows every channel and block; clicking a
+   block opens it.
+2. Study type: MRI, CPAP, phase contrast or CT. Only that type's controls show.
+3. Time window: click the plot for Start and End, or type them.
+4. Triggers (pulse triggers for 4D registration), or for CT the scan step and
+   one of three ways to build the breath from the images.
+
+Subject, output folder and the single Export button stay pinned below.
+
+Three rules keep the window honest:
+
+- ``_click_mode()`` is the one answer to what a plot click means. The click
+  handler dispatches on it and the banner above the plot displays it.
+- ``_ct_export_inputs()`` lets only the CT method on screen feed an export.
+- ``_export()`` is the only exit, and its result is shown as a report.
+
+Reusable widgets live in ``widgets.py``, dialogs in ``dialogs.py`` and the
+colours in ``theme.py``.
 """
 
 import sys
@@ -26,14 +39,18 @@ from scipy.signal import find_peaks
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QGroupBox, QLabel, QPushButton, QLineEdit, QComboBox,
+    QLabel, QPushButton, QLineEdit, QComboBox,
     QSpinBox, QDoubleSpinBox, QSlider, QFileDialog, QMessageBox,
     QStatusBar, QGridLayout, QSizePolicy, QFrame,
     QCheckBox, QListWidget, QListWidgetItem, QInputDialog, QDialog,
-    QScrollArea, QSplitter, QStackedWidget, QFormLayout,
+    QSplitter, QStackedWidget, QFormLayout, QAction,
 )
+from PyQt5.QtGui import QKeySequence
 
-from labchart2cfd.gui.dialogs import AssemblyPreviewDialog, ExportResultDialog
+from labchart2cfd.gui.dialogs import (
+    AssemblyPreviewDialog, ExportResultDialog, QuickGuideDialog,
+)
+from labchart2cfd.gui.theme import STYLE_SHEET, apply_theme
 from labchart2cfd.gui.widgets import (
     ChannelCombo, CollapsibleSection, VerticalScrollArea, channel_label,
 )
@@ -179,6 +196,12 @@ class FlowProfileApp(QMainWindow):
         self._outdir_user_set = False   # True once the user picks the folder
         self._last_export_report: Optional[dict] = None
         self._result_dialog: Optional[ExportResultDialog] = None
+        self._guide_dialog: Optional[QuickGuideDialog] = None
+
+        # Set on the window, not only on the application, so every way of
+        # creating the window (launch, tests, screenshots) looks the same.
+        self.setStyleSheet(STYLE_SHEET)
+        self.setAcceptDrops(True)
 
         # Axes references (set during _plot_selected)
         self.ax_top = None
@@ -248,15 +271,86 @@ class FlowProfileApp(QMainWindow):
         splitter.setSizes([self.SIDEBAR_WIDTH, 10 * self.SIDEBAR_WIDTH])
         self.setCentralWidget(splitter)
 
+        self._build_menus()
         self._connect_live_updates()
         # Show only the sections that belong to the current study type.
         self._on_workflow_changed()
         self._refresh_banner()
+        self._update_window_readout()
 
         # Worker-completion signals land on the GUI thread here.
         self._processing_done.connect(self._on_processing_done)
         self._processing_failed.connect(self._on_processing_failed)
         self._processing_report.connect(self._show_export_result)
+
+    def _build_menus(self) -> None:
+        """File, View and Help menus, with the usual shortcuts."""
+        file_menu = self.menuBar().addMenu("&File")
+        self.open_action = QAction("&Open recording...", self)
+        self.open_action.setShortcut(QKeySequence("Ctrl+O"))
+        self.open_action.triggered.connect(lambda: self._browse_file())
+        file_menu.addAction(self.open_action)
+        self.export_action = QAction("&Export", self)
+        self.export_action.setShortcut(QKeySequence("Ctrl+E"))
+        self.export_action.triggered.connect(lambda: self._export())
+        file_menu.addAction(self.export_action)
+        file_menu.addSeparator()
+        quit_action = QAction("&Quit", self)
+        quit_action.setShortcut(QKeySequence("Ctrl+Q"))
+        quit_action.triggered.connect(self.close)
+        file_menu.addAction(quit_action)
+
+        view_menu = self.menuBar().addMenu("&View")
+        self.overview_action = QAction("&All blocks", self)
+        self.overview_action.setShortcut(QKeySequence("Ctrl+1"))
+        self.overview_action.triggered.connect(lambda: self._go_to_overview())
+        view_menu.addAction(self.overview_action)
+        self.detail_action = QAction("&Selected block", self)
+        self.detail_action.setShortcut(QKeySequence("Ctrl+2"))
+        self.detail_action.triggered.connect(lambda: self._plot_selected())
+        view_menu.addAction(self.detail_action)
+        self.zoom_action = QAction("&Zoom to window", self)
+        self.zoom_action.setShortcut(QKeySequence("Ctrl+0"))
+        self.zoom_action.triggered.connect(lambda: self._zoom_to_window())
+        view_menu.addAction(self.zoom_action)
+
+        help_menu = self.menuBar().addMenu("&Help")
+        self.guide_action = QAction("&Quick guide", self)
+        self.guide_action.triggered.connect(lambda: self._show_quick_guide())
+        help_menu.addAction(self.guide_action)
+
+    def _show_quick_guide(self) -> None:
+        """Open the one page guide beside the window, without blocking it."""
+        if self._guide_dialog is None:
+            self._guide_dialog = QuickGuideDialog(self)
+        self._guide_dialog.show()
+        self._guide_dialog.raise_()
+
+    # ------------------------------------------------------------------
+    # Drag and drop
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _dropped_recording(mime) -> Optional[Path]:
+        """The first local .mat file in a drag, or None if there is none."""
+        if not mime.hasUrls():
+            return None
+        for url in mime.urls():
+            if url.isLocalFile():
+                path = Path(url.toLocalFile())
+                if path.suffix.lower() == ".mat":
+                    return path
+        return None
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802 (Qt spelling)
+        if self._dropped_recording(event.mimeData()) is not None:
+            event.acceptProposedAction()
+
+    def dropEvent(self, event) -> None:  # noqa: N802 (Qt spelling)
+        path = self._dropped_recording(event.mimeData())
+        if path is not None:
+            event.acceptProposedAction()
+            self.open_recording(path)
 
     # ------------------------------------------------------------------
     # Layout helpers
@@ -491,6 +585,10 @@ class FlowProfileApp(QMainWindow):
         form.addRow("Start (s)", self.start_spin)
         form.addRow("End (s)", self.end_spin)
         section.add_layout(form)
+
+        # The length of the window, or what is wrong with it.
+        self.window_readout = self._hint("")
+        section.add_widget(self.window_readout)
 
         row = QHBoxLayout()
         zoom_btn = QPushButton("Zoom to window")
@@ -909,6 +1007,19 @@ class FlowProfileApp(QMainWindow):
         self.subject_edit.textChanged.connect(lambda _t: self._update_export_hint())
         self.start_spin.valueChanged.connect(lambda _v: self._update_export_hint())
         self.end_spin.valueChanged.connect(lambda _v: self._update_export_hint())
+        self.start_spin.valueChanged.connect(lambda _v: self._update_window_readout())
+        self.end_spin.valueChanged.connect(lambda _v: self._update_window_readout())
+
+    def _update_window_readout(self) -> None:
+        """Show the window length, or say why the window is not usable yet."""
+        start, end = self.start_spin.value(), self.end_spin.value()
+        if start == 0 and end == 0:
+            text = "Not set yet. Click the plot twice, or type the times."
+        elif end <= start:
+            text = "End must be after Start."
+        else:
+            text = f"Duration {end - start:.3f} s"
+        self.window_readout.setText(text)
 
     def _on_processing_done(self, msg: str) -> None:
         """GUI-thread completion handler for the Execute worker."""
@@ -952,10 +1063,24 @@ class FlowProfileApp(QMainWindow):
                 self.workflow_combo.currentIndex(), Qt.ToolTipRole
             )
         )
+        entering_ct = is_ct and self.ct_scan_section.isHidden()
         self.ct_scan_section.setVisible(is_ct)
         self.ct_method_section.setVisible(is_ct)
         self.trigger_section.setVisible(not is_ct)
         self._sync_ct_method()
+        if entering_ct:
+            # The CT sections open below the fold. Bring them up, as the old
+            # window did by jumping to its CT tab. Deferred until the sidebar
+            # has laid the newly shown sections out.
+            QTimer.singleShot(
+                0, lambda: self._scroll_sidebar_to(self.ct_scan_section)
+            )
+
+    def _scroll_sidebar_to(self, section: QWidget) -> None:
+        """Bring a sidebar section to the top of the visible area."""
+        content = self.sidebar_scroll.widget()
+        content.layout().activate()  # geometry of just-shown sections
+        self.sidebar_scroll.verticalScrollBar().setValue(max(0, section.y() - 8))
 
     def _sync_ct_method(self) -> None:
         """Arm exactly the chosen CT method and disarm the other two.
@@ -3316,6 +3441,7 @@ def launch_gui() -> None:
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
+    apply_theme(app)
     window = FlowProfileApp()
     window.show()
     app.exec()

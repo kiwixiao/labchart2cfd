@@ -50,6 +50,40 @@ class AssemblyPreviewDialog(QDialog):
         layout.addWidget(buttons)
 
 
+class QuickGuideDialog(QDialog):
+    """The whole flow on one small page, opened from the Help menu."""
+
+    GUIDE = (
+        "<b>1. Recording.</b> Press Open recording and pick a LabChart .mat "
+        "export, or drop the file on the window. Check that Flow, Trigger and "
+        "Pressure name the right channels. Click a block to open it.<br><br>"
+        "<b>2. Study type.</b> Choose MRI, CPAP, Phase contrast or CT. Only "
+        "the controls of that type are shown.<br><br>"
+        "<b>3. Time window.</b> Click the plot once for Start and once for "
+        "End, or type the times.<br><br>"
+        "<b>4. CT only.</b> Select the scan step, then choose how the breath "
+        "is built: reorder image parts, landmarks, or cycle frames.<br><br>"
+        "<b>Export.</b> Enter the Subject ID and press Export. The line above "
+        "the button says what is still missing.<br><br>"
+        "The coloured line above the plot always says what a click on the "
+        "plot will do. If it turns red, the zoom or pan tool is on."
+    )
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Quick guide")
+        self.setModal(False)
+        layout = QVBoxLayout(self)
+        self.guide_label = QLabel(self.GUIDE)
+        self.guide_label.setTextFormat(Qt.RichText)
+        self.guide_label.setWordWrap(True)
+        self.guide_label.setMinimumWidth(440)
+        layout.addWidget(self.guide_label)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(self.close)
+        layout.addWidget(buttons)
+
+
 class ExportResultDialog(QDialog):
     """Lists what an export wrote, with any warning shown above the details.
 

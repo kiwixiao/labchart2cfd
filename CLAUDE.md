@@ -2,6 +2,12 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+Project memory lives inside the project folder so it travels with it:
+
+@.claude/memory/MEMORY.md
+
+`PROGRESS.md` at the repo root is the source of truth for where work stopped.
+
 ## Commands
 
 Dependency management uses `uv` (see `uv.lock`); the package installs as `labchart2cfd` via the `[project.scripts]` entry in `pyproject.toml`.
@@ -57,6 +63,11 @@ When adding a workflow, update both `workflows/__init__.py` and the `WorkflowTyp
 ### 4. Surfaces — `cli/main.py`, `gui/app.py`, `visualization/plots.py`
 - CLI is a single Typer `app` with `process`, `validate`, `visualize`, `detect-steps`, `gui`, `version`. `process` is the dispatcher that instantiates the right workflow; CT also calls `detect_steps` here when `--step-number` is given.
 - GUI is PyQt5 (`matplotlib.use("QtAgg")`). The `gui` CLI command has a macOS-specific relaunch: on Darwin, it re-execs itself through `open python.app --args ...` guarded by `LABCHART2CFD_GUI=1` to get real keyboard focus. Do not remove that branch — launching the GUI directly on macOS loses keyboard input (see commit `1669bb3`).
+- GUI layout (`gui/app.py`, `FlowProfileApp`): a sidebar of numbered sections beside the plot (1 Recording, 2 Study type, 3 Time window, then 4 Triggers, or for CT 4 CT scan and 5 Build the breath). Subject, output folder and the single Export button are pinned below the sections. `gui/widgets.py` holds the reusable widgets (`ChannelCombo`, `CollapsibleSection`, `VerticalScrollArea`), `gui/dialogs.py` the preview, result and guide dialogs, `gui/theme.py` the colours and style sheet.
+- Three rules hold the GUI together. `_click_mode()` is the single answer to what a plot click means; the click handler dispatches on it and the banner above the plot displays it, so add a new click mode there and in `_BANNERS`, nowhere else. `_ct_export_inputs()` lets only the CT method on screen feed an export. `_export()` is the only exit, and it reports through `_show_export_result()`.
+- Widget attribute names such as `flow_row_spin` and `col_spin` date from when they were spin boxes. They are dropdowns now (`ChannelCombo` keeps `value()` and `setValue()`), and the names stay because handlers and tests use them.
 
 ### Tests
+`tests/test_gui_*.py` drive the real window with Qt offscreen (`QT_QPA_PLATFORM=offscreen`, set in `tests/conftest.py`, which also provides the `win`, `mat_file` and `no_modal_dialogs` fixtures). A modal `QMessageBox` or `exec_()` hangs an offscreen run, so new GUI code shows results without blocking and tests use `no_modal_dialogs`. After any visual change, also run `python scripts/gui_screenshots.py <dir>` and look at the PNGs: a sidebar that clipped its controls passed every test and was only visible in a screenshot.
+
 `tests/test_io.py` and `tests/test_processing.py` cover the two lower layers. `tests/data/` and `tests/reference/` hold fixture `.mat` inputs and expected-output arrays used to validate parity with the MATLAB originals — treat reference files as authoritative when tuning algorithms.

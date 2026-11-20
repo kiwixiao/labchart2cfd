@@ -56,6 +56,15 @@ labchart2cfd
 
 (`labchart2cfd gui` also works.)
 
+The left sidebar is read from top to bottom:
+
+1. **Recording.** Open a LabChart `.mat` export (or drop it on the window). Check that Flow, Trigger and Pressure name the right channels, then click a block on the overview to open it.
+2. **Study type.** MRI, CPAP, Phase contrast or CT. Only the controls of that type are shown.
+3. **Time window.** Click the plot once for Start and once for End, or type the times.
+4. **CT only.** Select the scan step, then choose how the breath is built: reorder image parts, landmarks, or cycle frames.
+
+Enter the Subject ID and press **Export**. The line above the button says what is still missing, and a panel lists the files after the export. The coloured line above the plot always says what a click on the plot will do.
+
 ## Workflow Types
 
 - **MRI**: Standard OSAMRI processing (drift correction on full signal)
