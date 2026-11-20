@@ -404,3 +404,81 @@ def test_the_whole_quick_guide_can_be_read(win, qapp):
     # Nearly all of it at once, unless the screen is too small for that.
     screen = qapp.primaryScreen().availableGeometry().height()
     assert view >= min(needed, int(screen * 0.6))
+
+
+# ----------------------------- the line above Export is the gate, not a comment
+
+def _watch_export(win, monkeypatch):
+    """Record which export path runs and every warning shown."""
+    ran, shown = [], []
+    monkeypatch.setattr(win, "_execute_processing", lambda: ran.append("execute"))
+    monkeypatch.setattr(win, "_assemble_and_export", lambda: ran.append("assemble"))
+    for kind in ("warning", "critical"):
+        monkeypatch.setattr(
+            f"labchart2cfd.gui.app.QMessageBox.{kind}",
+            staticmethod(lambda _p, title, text, *a, **k: shown.append(f"{title}: {text}")),
+        )
+    return ran, shown
+
+
+def test_export_does_not_run_while_the_line_above_it_names_a_problem(
+        win, mat_file, monkeypatch):
+    """The line said 'raise Temporal Res' and Export wrote the files anyway:
+    the line and the export each kept their own list of what is wrong."""
+    _landmarks_marked(win, mat_file)
+    win.ct_temporal_res_spin.setValue(0.01)
+    ran, shown = _watch_export(win, monkeypatch)
+
+    win._export()
+
+    assert ran == []
+    assert len(shown) == 1 and "temporal res" in shown[0].lower()
+
+
+@pytest.mark.parametrize("spoil, word", [
+    (lambda win: win.subject_edit.setText(""), "subject"),
+    (lambda win: win.end_spin.setValue(1.0), "start before end"),
+], ids=["no subject", "end before start"])
+def test_every_problem_the_line_names_holds_the_export_back(
+        win, mat_file, monkeypatch, spoil, word):
+    open_block(win, mat_file)
+    win.subject_edit.setText("S1")
+    win.start_spin.setValue(2.0)
+    win.end_spin.setValue(6.0)
+    spoil(win)
+    ran, shown = _watch_export(win, monkeypatch)
+
+    win._export()
+
+    assert ran == []
+    assert len(shown) == 1 and word in shown[0].lower()
+    assert shown[0].split(": ", 1)[1] == win.export_hint.text()   # the same words
+
+
+def test_the_line_names_a_parts_grid_the_export_would_refuse(win, mat_file):
+    """The line said Ready while Export answered 'Bad Grid'."""
+    win.workflow_combo.setCurrentText("CT")
+    open_block(win, mat_file)
+    win._select_ct_step()
+    win._parts.append(ProfilePart(start_image=1, end_image=1, label=""))
+    win._refresh_parts_list()
+    win.subject_edit.setText("S1")
+    assert win.export_hint.text().lower().startswith("ready")
+
+    win.ct_temporal_res_spin.setValue(0.01)        # shorter than one flow sample
+
+    hint = win.export_hint.text().lower()
+    assert hint.startswith("before export") and "temporal res" in hint
+
+
+def test_a_complete_export_still_runs(win, mat_file, tmp_path, monkeypatch):
+    open_block(win, mat_file)
+    win.subject_edit.setText("S1")
+    win._set_output_dir(tmp_path / "out")
+    win.start_spin.setValue(2.0)
+    win.end_spin.setValue(6.0)
+    ran, shown = _watch_export(win, monkeypatch)
+
+    win._export()
+
+    assert ran == ["execute"] and shown == []

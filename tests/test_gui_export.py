@@ -81,13 +81,23 @@ def test_there_is_exactly_one_export_button(win):
     assert [text for text in labels if "export" in text.lower()] == ["Export"]
 
 
-def test_export_runs_the_path_of_the_chosen_method(win, monkeypatch):
+def test_export_runs_the_path_of_the_chosen_method(win, mat_file, tmp_path, monkeypatch):
+    from labchart2cfd.processing.profile_assembly import ProfilePart
+
     calls = []
     monkeypatch.setattr(win, "_assemble_and_export", lambda: calls.append("assemble"))
     monkeypatch.setattr(win, "_execute_processing", lambda: calls.append("execute"))
-
+    # Complete inputs: Export refuses to start while anything is missing.
     win.workflow_combo.setCurrentText("CT")      # the parts method by default
+    open_block(win, mat_file)
+    win.subject_edit.setText("S1")
+    win._set_output_dir(tmp_path / "out")
+    win._select_ct_step()
+
+    win._parts.append(ProfilePart(start_image=1, end_image=3, label=""))
+    win._refresh_parts_list()
     win.execute_btn.click()
+    win._clear_parts()                           # leaving the method would ask
     choose_ct_method(win, "landmarks")
     win.execute_btn.click()
     win.workflow_combo.setCurrentText("MRI")

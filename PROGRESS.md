@@ -51,7 +51,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 | Work item | Stage |
 |---|---|
-| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 377 tests, two independent review passes fixed, checked once on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
+| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 382 tests, two independent review passes fixed, checked once on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
 | Read native LabChart `.adicht` files without LabChart (`io/adicht.py`, `io/recording.py`, GUI open, `convert-adicht` command) | done on `feature/gui-pro-redesign`; equals LabChart's export bit for bit on ENT005 (user's manual export) and on 72 recording pairs; refuses what it was not checked on |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
@@ -70,6 +70,8 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 | Windows packaging / CI | not started; see notes on PyInstaller freeze |
 
 ## SESSION LOG
+
+- 2026-11-20: the reviewer reran its experiments on `0cbcd5d` and proved a hole in the Temporal Res fix: the line above Export named the problem and Export wrote the files anyway, and in the parts method the line said Ready while Export answered Bad Grid. The line and the export each kept their own list. `_export()` now refuses on `_export_blockers()` itself and shows the line word for word, and a parts grid shorter than one flow sample is a blocker. 382 tests.
 
 - 2026-11-20: first check of the current version on the real display (`scripts/gui_native_check.py`, new: platform cocoa, system font, pixel ratio 2, all four study types plus the smallest window size, synthetic recording). No control clips its text in any state. It showed three defects the offscreen pictures had not: at 900 x 600 the y scale buttons squeezed the plot toolbar so pan, zoom and save went behind an overflow arrow (the buttons now move to a row of their own when the two do not fit); the plot title ran off both edges (it now shortens, file name first, and comes back when the window grows); the Start and End marker times printed into each other and into the lower plot's title (each time now sits on the outer side of its line, and the lower title is raised like the upper one). 377 tests. This is a scripted walk on a real display, not a person using the window.
 

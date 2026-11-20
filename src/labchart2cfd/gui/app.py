@@ -1294,8 +1294,9 @@ class FlowProfileApp(QMainWindow):
         self.subject_edit.textChanged.connect(lambda _t: self._update_export_hint())
         self.start_spin.valueChanged.connect(lambda _v: self._update_export_hint())
         self.end_spin.valueChanged.connect(lambda _v: self._update_export_hint())
-        self.ct_temporal_res_spin.valueChanged.connect(
-            lambda _v: self._update_export_hint())
+        # Everything the list of blockers reads refreshes the line.
+        for box in (self.ct_temporal_res_spin, self.synth_dt_spin, self.synth_images_spin):
+            box.valueChanged.connect(lambda _v: self._update_export_hint())
         self.start_spin.valueChanged.connect(lambda _v: self._update_window_readout())
         self.end_spin.valueChanged.connect(lambda _v: self._update_window_readout())
 
@@ -1599,12 +1600,21 @@ class FlowProfileApp(QMainWindow):
             blockers.append("open a recording")
         elif self.data.is_block_empty(self.flow_row_spin.value(), self.col_spin.value()):
             # Export on such a block used to end the program.
-            blockers.append("pick a block that has flow data")
+            blockers.append(
+                "pick a block that has flow data (this one is empty on the "
+                "flow channel)"
+            )
         if not self.subject_edit.text().strip():
             blockers.append("enter a Subject ID")
         if self._uses_assembly():
             if not self._parts:
                 blockers.append("add at least one part")
+            if self._synth_grid() is None:
+                # Shorter than one flow sample, or no image: no grid exists.
+                blockers.append(
+                    "set a Temporal Res of at least one flow sample "
+                    f"({1000.0 / self._SYNTH_SAMPLE_RATE:g} ms) and at least one image"
+                )
         elif self.end_spin.value() <= self.start_spin.value():
             blockers.append("set Start before End")
         elif self._workflow_name() == "CT":
@@ -1706,23 +1716,28 @@ class FlowProfileApp(QMainWindow):
         if not self.execute_btn.isEnabled():
             self.status_bar.showMessage("An export is already running.")
             return
-        # Ask the questions only when the inputs are complete. If something is
-        # missing, the export itself says exactly what.
-        if not self._export_blockers():
-            # A channel named like another role would be exported as if it
-            # were the right one, with nothing wrong in the output files.
-            name_warnings = self._channel_name_warnings()
-            if name_warnings and QMessageBox.question(
-                self, "Check Channels",
-                "\n".join(name_warnings)
-                + "\n\nExport with these channels anyway?",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-            ) != QMessageBox.Yes:
-                self.status_bar.showMessage("Export cancelled. No file was changed.")
-                return
-            if not self._confirm_overwrite(self._export_targets()):
-                self.status_bar.showMessage("Export cancelled. No file was changed.")
-                return
+        # The list behind the line above the button is the gate. The line
+        # and the export used to keep separate lists, so the line could name
+        # a problem while Export wrote the files, or say Ready while Export
+        # refused. The message is the line itself, word for word.
+        if self._export_blockers():
+            self._update_export_hint()
+            QMessageBox.warning(self, "Cannot Export Yet", self.export_hint.text())
+            return
+        # A channel named like another role would be exported as if it were
+        # the right one, with nothing wrong in the output files.
+        name_warnings = self._channel_name_warnings()
+        if name_warnings and QMessageBox.question(
+            self, "Check Channels",
+            "\n".join(name_warnings)
+            + "\n\nExport with these channels anyway?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) != QMessageBox.Yes:
+            self.status_bar.showMessage("Export cancelled. No file was changed.")
+            return
+        if not self._confirm_overwrite(self._export_targets()):
+            self.status_bar.showMessage("Export cancelled. No file was changed.")
+            return
         if self._uses_assembly():
             self._assemble_and_export()
         else:
