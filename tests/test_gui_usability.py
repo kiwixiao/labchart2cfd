@@ -190,3 +190,190 @@ def test_picking_a_part_speaks_of_images_in_plain_sentences(win, mat_file):
     for text in (first, second, third):
         assert text and "—" not in text and "frame" not in text.lower()
     assert "image" in first.lower() and "Add Part" in third
+
+
+# ------------------------------------------------ what was exported, and how
+
+def _ready(win, mat_file, study="MRI"):
+    win.workflow_combo.setCurrentText(study)
+    open_block(win, mat_file)
+    win.subject_edit.setText("S1")
+    win.start_spin.setValue(2.0)
+    win.end_spin.setValue(6.0)
+
+
+def test_the_export_line_names_the_block_and_the_channels(win, mat_file):
+    """'Ready to export' named the study and the window, never the block or
+    the channels, which is where a wrong export comes from."""
+    _ready(win, mat_file)
+
+    hint = win.export_hint.text()
+
+    assert hint.startswith("Ready to export: MRI, 2.000 s to 6.000 s.")
+    assert "Block 1" in hint and "2: Flow" in hint and "4: Pressure" in hint
+
+
+def test_the_export_line_says_when_no_pressure_is_written(win, mat_file):
+    _ready(win, mat_file)
+    win.pressure_row_spin.setValue(0)
+    win._update_export_hint()
+    assert "no pressure" in win.export_hint.text()
+
+    win.workflow_combo.setCurrentText("Phase contrast (xenon)")
+    assert "no pressure" in win.export_hint.text()
+
+
+def test_the_result_records_where_the_numbers_came_from(win, mat_file):
+    """The result panel listed files and sample counts, but not the
+    recording, block, channels or the constants used. A CFD user needs
+    exactly those before trusting a boundary condition."""
+    _ready(win, mat_file)
+
+    facts = dict(win._export_provenance())
+
+    assert facts["Recording"] == "rec.mat"
+    assert facts["Study type"] == "MRI"
+    assert facts["Block"] == "1"
+    assert facts["Flow channel"] == "2: Flow"
+    assert facts["Pressure channel"] == "4: Pressure"
+    assert "1.2 kg/m3" in facts["Mass flow"] and "sign" in facts["Mass flow"]
+    assert "98.0665" in facts["Pressure"]
+
+
+def test_the_result_states_the_xenon_density_for_phase_contrast(win, mat_file):
+    _ready(win, mat_file, study="Phase contrast (xenon)")
+
+    facts = dict(win._export_provenance())
+
+    assert "5.761 kg/m3" in facts["Mass flow"]
+    assert "Pressure channel" not in facts and "no pressure" in facts["Pressure"].lower()
+
+
+def test_a_finished_export_shows_those_facts(win, qapp, mat_file, tmp_path):
+    import time
+    _ready(win, mat_file)
+    win._set_output_dir(tmp_path / "out")
+
+    win._export()
+    deadline = time.time() + 30
+    while win._last_export_report is None and time.time() < deadline:
+        qapp.processEvents()
+        time.sleep(0.01)
+
+    labels = [label for label, _value in win._last_export_report["summary"]]
+    assert labels[:4] == ["Recording", "Study type", "Block", "Flow channel"]
+    if win._result_dialog is not None:
+        win._result_dialog.close()
+
+
+def test_each_study_type_states_its_gas_density(win):
+    descriptions = {shown: text for shown, _engine, text in gui_app._STUDY_TYPES}
+
+    assert "1.2 kg/m3" in descriptions["MRI"] and "1.2 kg/m3" in descriptions["CPAP"]
+    assert "1.2 kg/m3" in descriptions["CT"]
+    assert "5.761 kg/m3" in descriptions["Phase contrast (xenon)"]
+
+
+def test_the_plot_names_its_channels_not_amplitude_and_info(win, mat_file):
+    """The left axis said 'Amplitude' and the legend 'flow info' and
+    'trigger info'."""
+    open_block(win, mat_file)
+
+    assert "Flow" in win.ax_top.get_ylabel() and "Amplitude" not in win.ax_top.get_ylabel()
+    assert "Trigger" in win.ax_top_trig.get_ylabel()
+    legend = [t.get_text() for t in win.ax_top.get_legend().get_texts()]
+    assert not [t for t in legend if "info" in t]
+
+
+# ----------------------------------------------------------- smaller points
+
+def test_the_plot_toolbar_has_no_tool_that_can_wreck_the_layout(win):
+    """Matplotlib's 'Configure subplots' and 'Edit axis' were on offer."""
+    names = [action.text() for action in win.toolbar.actions()]
+
+    assert "Subplots" not in names and "Customize" not in names
+    assert "Pan" in names and "Zoom" in names and "Save" in names
+
+
+def test_the_window_title_names_the_open_recording(win, mat_file):
+    assert "rec.mat" not in win.windowTitle()
+
+    win.open_recording(mat_file)
+
+    assert "rec.mat" in win.windowTitle()
+
+
+def test_the_pickers_are_off_until_a_recording_is_open(win, mat_file):
+    """They read 'Channel 2', 'Channel 1', 'Block 3' as if something had
+    been chosen."""
+    pickers = (win.flow_row_spin, win.trigger_row_spin, win.pressure_row_spin, win.col_spin)
+    assert not any(p.isEnabled() for p in pickers)
+
+    win.open_recording(mat_file)
+
+    assert all(p.isEnabled() for p in pickers)
+
+
+def test_phase_contrast_switches_the_pressure_picker_off(win, mat_file):
+    """It stayed on, and every export then warned that no pressure profile
+    was produced."""
+    win.open_recording(mat_file)
+
+    win.workflow_combo.setCurrentText("Phase contrast (xenon)")
+    assert not win.pressure_row_spin.isEnabled()
+    assert "no pressure" in win.pressure_row_spin.toolTip().lower()
+
+    win.workflow_combo.setCurrentText("MRI")
+    assert win.pressure_row_spin.isEnabled()
+
+
+def test_a_missing_pressure_profile_gives_one_reason_not_two(win, tmp_path):
+    """'...is empty in this block, or this study type has no pressure
+    output' left the user to guess which."""
+    warnings = win._pressure_warnings(True, None, tmp_path / "none.csv")
+
+    assert len(warnings) == 1 and " or " not in warnings[0]
+    assert "empty" in warnings[0]
+
+
+def test_the_triggers_section_says_what_it_is_for(win):
+    text = _visible_text(win.trigger_section).lower()
+
+    assert "optional" in text and "start and end" in text
+
+
+def test_an_accepted_channel_warning_is_not_asked_again(win, mat_file, tmp_path, monkeypatch):
+    """Every export asked 'Check Channels' again, with no way to say the
+    choice is deliberate."""
+    from PyQt5.QtWidgets import QMessageBox
+    _ready(win, mat_file)
+    win._set_output_dir(tmp_path / "out")
+    win.pressure_row_spin.setValue(1)              # 'Trigger' used as pressure
+    asked, ran = [], []
+    monkeypatch.setattr(
+        "labchart2cfd.gui.app.QMessageBox.question",
+        staticmethod(lambda _p, title, *a, **k: (asked.append(title), QMessageBox.Yes)[1]),
+    )
+    monkeypatch.setattr(win, "_execute_processing", lambda: ran.append(1))
+
+    win._export()
+    win._export()
+    assert asked.count("Check Channels") == 1 and len(ran) == 2
+
+    win.pressure_row_spin.setValue(3)              # a different mismatch asks again
+    win._update_channel_check()
+    win._export()
+    assert asked.count("Check Channels") == (2 if win._channel_name_warnings() else 1)
+
+
+def test_the_help_menu_states_the_version(win, monkeypatch):
+    import labchart2cfd
+    shown = []
+    monkeypatch.setattr(
+        "labchart2cfd.gui.app.QMessageBox.about",
+        staticmethod(lambda _p, title, text: shown.append(text)),
+    )
+
+    win.about_action.trigger()
+
+    assert labchart2cfd.__version__ in shown[0]

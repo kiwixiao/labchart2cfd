@@ -95,14 +95,16 @@ def _remove_all(artists) -> None:
 _STUDY_TYPES = (
     ("MRI", "MRI",
      "Standard MRI study. Drift is corrected on the whole signal, then the "
-     "window is cut out."),
+     "window is cut out. Gas: air, 1.2 kg/m3."),
     ("CPAP", "cpap",
-     "CPAP study. Drift is corrected inside the chosen window."),
+     "CPAP study. Drift is corrected inside the chosen window. Gas: air, "
+     "1.2 kg/m3."),
     ("Phase contrast (xenon)", "phase-contrast",
-     "Xenon phase contrast study. Uses xenon density and voltage calibration."),
+     "Xenon phase contrast study. The flow channel is a voltage, scaled "
+     "by calibration. Gas: xenon, 5.761 kg/m3. No pressure output."),
     ("CT", "CT",
      "4D CT study. The trigger channel marks the scan, and the images are "
-     "placed on a time grid across it."),
+     "placed on a time grid across it. Gas: air, 1.2 kg/m3."),
 )
 
 # CT methods: (name shown, key, description). One method is on screen at a time.
@@ -195,6 +197,11 @@ class ModeAwareToolbar(NavigationToolbar2QT):
 
     mode_changed = pyqtSignal()
 
+    # Without "Configure subplots" and "Edit axis". Both let a user break a
+    # layout that the window manages itself, with no way back but a restart.
+    toolitems = [item for item in NavigationToolbar2QT.toolitems
+                 if item[0] not in ("Subplots", "Customize")]
+
     def pan(self, *args) -> None:
         super().pan(*args)
         self.mode_changed.emit()
@@ -216,9 +223,11 @@ class FlowProfileApp(QMainWindow):
     # Carries the report dict of a finished export (files, summary, warnings).
     _processing_report = pyqtSignal(object)
 
+    _APP_TITLE = "CFD Flow Profile Processor"
+
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("CFD Flow Profile Processor")
+        self.setWindowTitle(self._APP_TITLE)
         self.resize(1400, 860)
         self.setMinimumSize(900, 600)
 
@@ -254,6 +263,9 @@ class FlowProfileApp(QMainWindow):
         # The study type the window is laid out for, to go back to when a
         # change is declined.
         self._workflow_index_shown = 0
+        # The channel name warnings the user has already accepted for this
+        # recording, so the same question is not asked at every export.
+        self._accepted_channel_warnings: Optional[tuple] = None
         # The CT method whose marks are on the plot. Only one method's marks
         # exist at a time, so the plot always shows what will be exported.
         self._active_ct_method = "parts"
@@ -395,6 +407,19 @@ class FlowProfileApp(QMainWindow):
         self.guide_action = QAction("&Quick guide", self)
         self.guide_action.triggered.connect(lambda: self._show_quick_guide())
         help_menu.addAction(self.guide_action)
+        self.about_action = QAction("&About", self)
+        self.about_action.triggered.connect(lambda: self._show_about())
+        help_menu.addAction(self.about_action)
+
+    def _show_about(self) -> None:
+        """Name and version, so a result can be traced to the program that made it."""
+        from labchart2cfd import __version__
+        QMessageBox.about(
+            self, f"About {self._APP_TITLE}",
+            f"{self._APP_TITLE}\nlabchart2cfd version {__version__}\n\n"
+            "Turns LabChart recordings into STAR-CCM+ boundary condition "
+            "tables (mass flow and pressure against time).",
+        )
 
     def _show_quick_guide(self) -> None:
         """Open the one page guide beside the window, without blocking it."""
@@ -925,6 +950,11 @@ class FlowProfileApp(QMainWindow):
         section = CollapsibleSection("4   Triggers")
         self.trigger_section = section
 
+        section.add_widget(self._hint(
+            "Optional. If the scanner sent trigger pulses, pick a run of them "
+            "and Mark triggers sets Start and End to it, replacing a window "
+            "clicked by hand."
+        ))
         self.total_triggers_label = self._readout("--")
 
         self.start_trigger_spin = QSpinBox()
@@ -1407,6 +1437,7 @@ class FlowProfileApp(QMainWindow):
             self.workflow_combo.blockSignals(False)
             return
         self._workflow_index_shown = index
+        self._update_picker_state()
         is_ct = self._workflow_name() == "CT"
         self.study_hint.setText(
             self.workflow_combo.itemData(
@@ -1595,9 +1626,30 @@ class FlowProfileApp(QMainWindow):
         # A new recording goes back to the default folder beside it.
         self._outdir_user_set = False
         self._update_outdir()
+        self._accepted_channel_warnings = None  # another recording, another answer
         self._load_and_overview()
         if self.data is None:  # the load failed and has already said why
             self.file_label.setText(f"Could not open {self.mat_filepath.name}")
+            self.setWindowTitle(self._APP_TITLE)
+        else:
+            self.setWindowTitle(f"{self.mat_filepath.name} | {self._APP_TITLE}")
+        self._update_picker_state()
+
+    def _update_picker_state(self) -> None:
+        """Pickers are live only when they mean something.
+
+        Before a recording is open they read "Channel 2" or "Block 3" as if
+        something had been chosen. Phase contrast writes no pressure, so its
+        Pressure picker only led to a warning after every export.
+        """
+        loaded = self.data is not None
+        for picker in (self.flow_row_spin, self.trigger_row_spin, self.col_spin):
+            picker.setEnabled(loaded)
+        no_pressure = self._workflow_name() == "phase-contrast"
+        self.pressure_row_spin.setEnabled(loaded and not no_pressure)
+        self.pressure_row_spin.setToolTip(
+            "Phase contrast writes no pressure profile." if no_pressure else ""
+        )
 
     def _browse_outdir(self) -> None:
         """Open directory dialog to select output directory."""
@@ -1619,7 +1671,7 @@ class FlowProfileApp(QMainWindow):
 
     _PRESSURE_MISSING = (
         "No pressure profile was produced: the pressure channel is empty in "
-        "this block, or this study type has no pressure output."
+        "this block."
     )
 
     def _pressure_warnings(self, requested: bool, note: Optional[str],
@@ -1722,7 +1774,48 @@ class FlowProfileApp(QMainWindow):
                 what = self._ct_export_description(study, window)
             else:
                 what = f"{study}, {window}"
-        self.export_hint.setText(f"Ready to export: {what}.")
+        self.export_hint.setText(f"Ready to export: {what}. {self._export_sources()}.")
+
+    def _export_sources(self) -> str:
+        """Block and channels the export reads, as shown in the pickers."""
+        parts = [f"Block {self.col_spin.value()}", f"flow {self.flow_row_spin.currentText()}"]
+        if self._workflow_name() == "phase-contrast" or self.pressure_row_spin.value() < 1:
+            parts.append("no pressure")
+        else:
+            parts.append(f"pressure {self.pressure_row_spin.currentText()}")
+        return ", ".join(parts)
+
+    def _export_provenance(self) -> List[tuple]:
+        """Where the exported numbers come from, for the result panel.
+
+        The panel listed files and counts, but not the recording, block,
+        channels or constants. Reads widgets, so it is called on the GUI
+        thread before an export starts.
+        """
+        phase = self._workflow_name() == "phase-contrast"
+        facts = [
+            ("Recording", self.mat_filepath.name if self.mat_filepath else ""),
+            ("Study type", self.workflow_combo.currentText()),
+            ("Block", str(self.col_spin.value())),
+            ("Flow channel", self.flow_row_spin.currentText()),
+        ]
+        if phase:
+            facts += [
+                ("Mass flow", "from the voltage on the flow channel, scaled by "
+                              "calibration, xenon at 5.761 kg/m3"),
+                ("Pressure", "no pressure output for this study type"),
+            ]
+        else:
+            pressure = self.pressure_row_spin.value()
+            if pressure > 0:
+                facts.append(("Pressure channel", self.pressure_row_spin.currentText()))
+            facts += [
+                ("Mass flow", "flow in L/s x 0.001 x 1.2 kg/m3 (air), sign "
+                              "inverted against the plot"),
+                ("Pressure", "cmH2O x 98.0665 = Pa" if pressure > 0
+                 else "no pressure channel chosen"),
+            ]
+        return facts
 
     def _export_targets(self) -> List[Path]:
         """Every file the chosen export may write."""
@@ -1780,15 +1873,19 @@ class FlowProfileApp(QMainWindow):
             return
         # A channel named like another role would be exported as if it were
         # the right one, with nothing wrong in the output files.
-        name_warnings = self._channel_name_warnings()
-        if name_warnings and QMessageBox.question(
-            self, "Check Channels",
-            "\n".join(name_warnings)
-            + "\n\nExport with these channels anyway?",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
-        ) != QMessageBox.Yes:
-            self.status_bar.showMessage("Export cancelled. No file was changed.")
-            return
+        name_warnings = tuple(self._channel_name_warnings())
+        if name_warnings and name_warnings != self._accepted_channel_warnings:
+            if QMessageBox.question(
+                self, "Check Channels",
+                "\n".join(name_warnings)
+                + "\n\nExport with these channels anyway?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) != QMessageBox.Yes:
+                self.status_bar.showMessage("Export cancelled. No file was changed.")
+                return
+            # A deliberate choice. The warning under the pickers stays on
+            # screen, and a different mismatch is asked about again.
+            self._accepted_channel_warnings = name_warnings
         if not self._confirm_overwrite(self._export_targets()):
             self.status_bar.showMessage("Export cancelled. No file was changed.")
             return
@@ -2322,7 +2419,12 @@ class FlowProfileApp(QMainWindow):
             return
 
         if self.data.is_block_empty(flow_row, col):
-            QMessageBox.warning(self, "Empty Block", f"Flow block [{flow_row}, {col}] is empty.")
+            QMessageBox.warning(
+                self, "Empty Block",
+                f"Block {col} is empty on the flow channel "
+                f"({self._channel_text(flow_row)}). Pick another block, or "
+                "change the Flow channel.",
+            )
             self.status_bar.showMessage("Block is empty")
             return
 
@@ -2348,6 +2450,14 @@ class FlowProfileApp(QMainWindow):
 
         time = self.data.get_time(flow_row, col)
         flow = self.data.get_data(flow_row, col)
+        # The channels by the names in the file, where the plot used to say
+        # "Amplitude", "flow info" and "trigger info".
+        titles = self._channel_titles()
+        flow_name = f"Flow: {titles[flow_row - 1] or f'channel {flow_row}'}"
+        trigger_name = (
+            f"Trigger: {titles[trigger_row - 1] or f'channel {trigger_row}'}"
+            if 1 <= trigger_row <= len(titles) else "Trigger"
+        )
 
         # Recreate detail axes with shared x-axis
         self.fig.clear()
@@ -2365,7 +2475,7 @@ class FlowProfileApp(QMainWindow):
 
         # Top subplot: flow on primary y-axis
         self._envelopes.append(EnvelopeLine(
-            self.ax_top, time, flow, "b-", linewidth=0.5, label="flow info"
+            self.ax_top, time, flow, "b-", linewidth=0.5, label=flow_name
         ))
 
         has_trigger = trigger_row >= 1 and not self.data.is_block_empty(trigger_row, col)
@@ -2378,9 +2488,9 @@ class FlowProfileApp(QMainWindow):
             self.ax_top_trig.callbacks.connect("xlim_changed", self._on_view_changed)
             self._envelopes.append(EnvelopeLine(
                 self.ax_top_trig, trigger_time, trigger, "r-", linewidth=0.5,
-                label="trigger info",
+                label=trigger_name,
             ))
-            self.ax_top_trig.set_ylabel("Trigger", color="red")
+            self.ax_top_trig.set_ylabel(trigger_name, color="red", parse_math=False)
             self.ax_top_trig.tick_params(axis="y", labelcolor="red")
             # The whole range of the channel in this block, and it stays:
             # no zoom in time refits it (see _fit_y).
@@ -2397,7 +2507,7 @@ class FlowProfileApp(QMainWindow):
 
         self.ax_top.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
         self.ax_top.set_xlabel("Time (s)")
-        self.ax_top.set_ylabel("Amplitude")
+        self.ax_top.set_ylabel(flow_name, color="blue", parse_math=False)
 
         if is_ct and has_trigger:
             trigger_info = f" | {len(self._ct_steps)} step triggers"
@@ -2632,7 +2742,14 @@ class FlowProfileApp(QMainWindow):
             handles.extend(h2)
             labels.extend(l2)
         if handles:
-            self.ax_top.legend(handles, labels, loc="upper right", fontsize="small")
+            # Half transparent, because it sits over the signal: the end of a
+            # selected step was hidden behind it.
+            legend = self.ax_top.legend(
+                handles, labels, loc="upper right", fontsize="small", framealpha=0.6
+            )
+            # The entries carry channel names from the file, drawn as typed.
+            for text in legend.get_texts():
+                text.set_parse_math(False)
 
     def _detect_triggers(self, trigger_data: np.ndarray, trigger_time: np.ndarray) -> None:
         """Detect trigger pulses and update UI."""
@@ -4162,7 +4279,7 @@ class FlowProfileApp(QMainWindow):
         self._show_export_result({
             "folder": output_dir,
             "files": written,
-            "summary": [
+            "summary": self._export_provenance() + [
                 ("Samples", str(len(asm.flow))),
                 ("Images", str(len(asm.reorder_map))),
                 ("Image order (original numbers)", order),
@@ -4185,6 +4302,9 @@ class FlowProfileApp(QMainWindow):
         if not subject:
             QMessageBox.warning(self, "Missing Subject", "Please enter a Subject ID.")
             return
+
+        # Read on this thread: the worker below may not touch widgets.
+        provenance = self._export_provenance()
 
         start_time = self.start_spin.value()
         end_time = self.end_spin.value()
@@ -4511,8 +4631,11 @@ class FlowProfileApp(QMainWindow):
                 # there, with the specific reason when the workflow gave one.
                 warnings = []
                 if result.pressure is None:
+                    # Phase contrast never writes one, so its absence is
+                    # not a warning there.
                     warnings = self._pressure_warnings(
-                        include_pressure, pressure_note,
+                        include_pressure and workflow_name != "phase-contrast",
+                        pressure_note,
                         output_dir / f"{subject}PressureProfile.csv",
                     )
                 files = [flow_file]
@@ -4522,7 +4645,7 @@ class FlowProfileApp(QMainWindow):
                 self._processing_report.emit({
                     "folder": output_dir,
                     "files": files,
-                    "summary": [
+                    "summary": provenance + [
                         ("Duration", f"{result.time[-1]:.2f} s"),
                         ("Sample rate", f"{result.sample_rate:.0f} Hz"),
                         ("Samples", str(len(result.time))),
