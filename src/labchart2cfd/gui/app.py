@@ -280,6 +280,13 @@ class FlowProfileApp(QMainWindow):
         # The shading of the window on each detail axes (see _update_window_span).
         self._window_spans: dict = {}
         self._placing_marker = False
+        # Images in step follows the window until the user types a count of
+        # their own. From then on the program never rewrites it, and the
+        # window is that many images long (the user's rule, as for the parts
+        # grid: Temporal Res and the image count are independent inputs).
+        self._ct_images_user_set = False
+        self._setting_ct_images = False   # the program is writing the box
+        self._setting_window = False      # the program is writing Start or End
         # The parts grid count follows the selected step until the user
         # types one of their own.
         self._synth_images_user_set = False
@@ -854,6 +861,44 @@ class FlowProfileApp(QMainWindow):
         )
         return True
 
+    def _on_ct_images_changed(self, _value: int) -> None:
+        """Images in step changed: by the user, unless the program is writing it."""
+        if not self._setting_ct_images:
+            self._ct_images_user_set = True
+
+    def _keep_user_image_count(self) -> None:
+        """With the user's own count in force, the window is that many images.
+
+        Called when Start or Temporal Res changes. The count stays as typed
+        and End moves to Start plus count times Temporal Res. Without this a
+        change of Temporal Res turned an applied 9 into 11.
+        """
+        count = self.ct_total_images_spin.value()
+        if not (self._ct_images_user_set and self._ct_selected_step is not None
+                and count == self._ct_applied_images):
+            return  # the program's count, or one not applied yet
+        end = self.start_spin.value() + count * self.ct_temporal_res_spin.value() / 1000.0
+        if abs(end - self.end_spin.value()) > 1e-9:
+            self._setting_window = True
+            try:
+                self.end_spin.setValue(end)
+            finally:
+                self._setting_window = False
+
+    def _on_ct_window_edge_changed(self, edge: str) -> None:
+        """Start or End changed: keep the user's count, or hand it back.
+
+        A new Start moves the whole window when the count is the user's. An
+        End typed by the user defines the window itself, so the count shows
+        what that window holds again: the last thing set wins.
+        """
+        if self._workflow_name() == "CT" and self._ct_selected_step is not None:
+            if edge == "start":
+                self._keep_user_image_count()
+            elif not self._setting_window and not self._placing_marker:
+                self._ct_images_user_set = False
+        self._redraw_ct_intervals_if_active()
+
     def _confirm_temporal_res(self) -> None:
         """The user typed Temporal Res, or pressed Enter in its box."""
         self._ct_dt_confirmed = True
@@ -1165,8 +1210,10 @@ class FlowProfileApp(QMainWindow):
         self.ct_total_images_spin.setRange(1, 500)
         self.ct_total_images_spin.setValue(1)
         self.ct_total_images_spin.setToolTip(
-            "Images in the selected step. Computed from the step when it is "
-            "selected; edit it before Apply shift and image count to override."
+            "Images in the scan. Counted from the step when it is selected. "
+            "Type your own number and press Apply shift and image count: the "
+            "window is then that many images long, shorter or longer than the "
+            "step, and the number is not changed for you again."
         )
 
         # Bidirectional: the detected step edge can sit either side of the true
@@ -1199,8 +1246,9 @@ class FlowProfileApp(QMainWindow):
             "measure it: enter it from your image series."
         ))
         section.add_widget(self._hint(
-            "Start Shift moves the scan window earlier (negative) or later, "
-            "for a step edge that is not where the first image starts."
+            "Images in step is counted from the step until you type your own "
+            "number. Yours is kept, also when Temporal Res changes. Start "
+            "Shift moves the scan window earlier (negative) or later."
         ))
 
         apply_correction_btn = QPushButton("Apply shift and image count")
@@ -1528,8 +1576,9 @@ class FlowProfileApp(QMainWindow):
         self.start_spin.valueChanged.connect(lambda _v: self._update_window_span())
         self.end_spin.valueChanged.connect(lambda _v: self._update_window_span())
         # The CT step grid shows the images of the window in force.
-        self.start_spin.valueChanged.connect(lambda _v: self._redraw_ct_intervals_if_active())
-        self.end_spin.valueChanged.connect(lambda _v: self._redraw_ct_intervals_if_active())
+        self.start_spin.valueChanged.connect(lambda _v: self._on_ct_window_edge_changed("start"))
+        self.end_spin.valueChanged.connect(lambda _v: self._on_ct_window_edge_changed("end"))
+        self.ct_total_images_spin.valueChanged.connect(self._on_ct_images_changed)
 
     def _update_window_span(self) -> None:
         """Shade the window on both plots, exactly where Start and End are.
@@ -2246,6 +2295,7 @@ class FlowProfileApp(QMainWindow):
         self._title_forms = []
         self._ct_applied_shift = 0
         self._ct_applied_images = None
+        self._ct_images_user_set = False
         self._window_spans = {}
         self._trigger_times = np.array([])
         self._trigger_count = 0
@@ -3576,9 +3626,15 @@ class FlowProfileApp(QMainWindow):
         self.ct_shift_spin.setRange(-slider_max, slider_max)
         self._suppress_shift_slider = False
 
-        # Auto-fill start/end time from step boundaries
-        self.start_spin.setValue(step["start_time"])
-        self.end_spin.setValue(step["end_time"])
+        # Auto-fill start/end time from step boundaries. A newly selected
+        # step is counted afresh, so a count typed for the last one is dropped.
+        self._ct_images_user_set = False
+        self._setting_window = True
+        try:
+            self.start_spin.setValue(step["start_time"])
+            self.end_spin.setValue(step["end_time"])
+        finally:
+            self._setting_window = False
 
         # Highlight selected step more prominently
         self._clear_ct_step_markers()
@@ -3734,9 +3790,18 @@ class FlowProfileApp(QMainWindow):
 
         total_images = n_images
         if update_total_images_field:
-            # A count the program derived is in force, not a pending edit.
+            # What the window holds is the count in force.
             self._ct_applied_images = total_images
-            self.ct_total_images_spin.setValue(total_images)
+            if not self._ct_images_user_set:
+                # The program's own count goes into the box. A count the user
+                # typed is left alone: it used to be overwritten here on every
+                # redraw, so a lower number snapped back to the one that
+                # covers the step.
+                self._setting_ct_images = True
+                try:
+                    self.ct_total_images_spin.setValue(total_images)
+                finally:
+                    self._setting_ct_images = False
         if not manual_override:
             # The grid in force was drawn: the cycle labels are image numbers
             # on it, so they are drawn again where those images are now.
@@ -3819,8 +3884,12 @@ class FlowProfileApp(QMainWindow):
         # Update the processing fields
         self._ct_applied_shift = shift_ms
         self._ct_applied_images = manual_frames
-        self.start_spin.setValue(corrected_start)
-        self.end_spin.setValue(corrected_end)
+        self._setting_window = True
+        try:
+            self.start_spin.setValue(corrected_start)
+            self.end_spin.setValue(corrected_end)
+        finally:
+            self._setting_window = False
 
         # Update trigger info box with corrected frame count
         self.total_triggers_label.setText(str(manual_frames))
@@ -4223,6 +4292,7 @@ class FlowProfileApp(QMainWindow):
             self.synth_dt_spin.setValue(float(dt_ms))
         finally:
             self._syncing_grid = False
+        self._keep_user_image_count()
         self._redraw_ct_intervals_if_active()
         self._refresh_synth_grid_if_active()
         self._update_grid_readout()

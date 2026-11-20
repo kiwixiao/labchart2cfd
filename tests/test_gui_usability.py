@@ -1253,3 +1253,105 @@ def test_the_banner_says_how_to_use_a_window_that_is_not_a_step(win, mat_file):
     open_block(win, mat_file)
 
     assert "Trigger to None" in win.mode_banner.text()
+
+
+# -------- the user's report: the image count of a detected step is theirs to set
+
+def _type_images(win, n):
+    """Type a count into Images in step, as a user does (not a program)."""
+    win.ct_total_images_spin.setValue(n)
+
+
+def test_a_typed_image_count_survives_a_temporal_res_change(win, mat_file):
+    """The count was recomputed from the window whenever the grid was drawn,
+    so a lower number snapped back up to the one that covers the step. The
+    user: 'I do want to be free to put those numbers even in the auto detect
+    step setting.' Temporal Res and the count are independent inputs."""
+    _ct_step_selected(win, mat_file, "landmarks")   # 3.0 s at 200 ms: 15 images
+    _type_images(win, 9)
+
+    win.ct_temporal_res_spin.setValue(190.0)
+
+    assert win.ct_total_images_spin.value() == 9
+
+
+def test_a_typed_image_count_survives_a_typed_start(win, mat_file):
+    _ct_step_selected(win, mat_file, "landmarks")
+    _type_images(win, 9)
+
+    win.start_spin.setValue(2.05)
+
+    assert win.ct_total_images_spin.value() == 9
+
+
+def test_an_applied_image_count_keeps_its_number_when_temporal_res_changes(win, mat_file):
+    """After Apply the window is N images long. Changing Temporal Res turned
+    9 into 11. Now the count stays and the window follows: N times the new
+    Temporal Res."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+    _type_images(win, 9)
+    win._apply_ct_correction()
+    assert win.end_spin.value() == pytest.approx(3.8)
+
+    win.ct_temporal_res_spin.setValue(150.0)
+
+    assert win.ct_total_images_spin.value() == 9
+    assert win.end_spin.value() == pytest.approx(2.0 + 9 * 0.15)
+    assert len(_grid_starts(win)) == 10                          # 9 images, 10 lines
+    assert "Apply shift" not in win.export_hint.text()           # nothing is pending
+    assert "9 images" in win.export_hint.text()
+
+
+def test_an_applied_image_count_moves_with_a_typed_start(win, mat_file):
+    _ct_step_selected(win, mat_file, "landmarks")
+    _type_images(win, 9)
+    win._apply_ct_correction()
+
+    win.start_spin.setValue(2.5)
+
+    assert win.ct_total_images_spin.value() == 9
+    assert win.end_spin.value() == pytest.approx(2.5 + 9 * 0.2)
+
+
+def test_the_count_may_be_longer_than_the_step(win, mat_file):
+    _ct_step_selected(win, mat_file, "landmarks")
+    _type_images(win, 20)                           # 4.0 s, the step is 3.0 s
+
+    win._apply_ct_correction()
+
+    assert win.ct_total_images_spin.value() == 20
+    assert win.end_spin.value() == pytest.approx(6.0)
+
+
+def test_typing_end_hands_the_count_back_to_the_window(win, mat_file):
+    """The last thing the user set wins. A typed End defines the window, and
+    the count shows what that window holds."""
+    _ct_step_selected(win, mat_file, "landmarks")
+    _type_images(win, 9)
+    win._apply_ct_correction()
+
+    win.end_spin.setValue(5.0)
+
+    assert win.ct_total_images_spin.value() == 15
+
+
+def test_selecting_the_step_again_counts_its_images_afresh(win, mat_file):
+    _ct_step_selected(win, mat_file, "landmarks")
+    _type_images(win, 9)
+    win._apply_ct_correction()
+
+    win._select_ct_step()
+
+    assert win.ct_total_images_spin.value() == 15
+    assert win.end_spin.value() == pytest.approx(5.0)
+
+    win.ct_temporal_res_spin.setValue(150.0)       # and the count is the program's again
+    assert win.ct_total_images_spin.value() == 20
+
+
+def test_the_section_says_the_count_is_yours_to_set(win):
+    win.workflow_combo.setCurrentText("CT")
+
+    text = _visible_text(win.ct_scan_section).lower()
+    assert "images in step" in text and "your own" in text
