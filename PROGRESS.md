@@ -3,13 +3,13 @@
 ## NEXT STEP
 The user tries `feature/gui-pro-redesign` by hand on ENT005 and says whether it reads as intuitive; that judgement is the one thing no test, script or reviewer here can give. Then decide the open design questions below, then the user merges. Still wanted: one real MRI recording driven by hand.
 
-Open design questions, raised by two independent usability reviews and left for the user because each changes what is exported or how the tool is meant to be used:
-1. **Cycle frames click rule.** A click takes the image that starts at the nearest grid line, so a click in the second half of the slice numbered N records N+1 (same on `main`). The parts method takes the slice under the pointer. Both reviewers ranked this near the top. The screen now says which image a click took; the rule itself is unchanged. Recommendation: take the slice under the pointer in both methods and shade it.
-2. **Phase contrast calibration is invisible.** The GUI passes no bag and no baseline time, so the engine scales by the window clicked. The engine has Bag1, Bag2 and Bag4 presets that the GUI does not offer, and the result panel does not show the calibration factor.
-3. **Channel roles are not remembered between sessions** (the last folder and the window size now are). Remembering roles for recordings with the same channel names would end the wrong default rows on the ENT recordings, but it selects channels without a click, which the standing rule forbids for name guessing.
-4. **CT opens in the reorder parts method**, the hardest of the three.
-5. **Trigger info file in MRI and CPAP** reports start_trigger and num_triggers even when the window was clicked by hand (engine output, not touched).
-6. Smaller: question boxes answer Yes and No instead of naming the action; the pressure channel is never drawn.
+Decided by the user on 2026-11-20 (asked directly, after two usability reviews raised them):
+1. **Cycle frames click rule: the image under the pointer.** Done in `52dc6d6`. What the export does with the labels is unchanged (it always cut whole slices); only which image a click names changed, for clicks in the right half of a slice.
+2. **Phase contrast calibration: leave as it is.** No xenon imaging has been done yet, so there is nothing to decide it against. Revisit when the first xenon study exists (the engine has Bag1, Bag2 and Bag4 presets the window does not offer, and the calibration factor is not shown).
+3. **Channel roles: not remembered.** The user repicks them for each recording, by choice.
+4. **CT default method: unchanged** (reorder image parts). The user asked what label cycle frames does instead of choosing; that was answered from the export code.
+
+Still open, smaller: the trigger info file in MRI and CPAP reports start_trigger and num_triggers also for a window clicked by hand (engine output, not touched); question boxes answer Yes and No instead of naming the action; the pressure channel is never drawn; Mark triggers replaces a hand window without asking.
 
 Still open from before, neither blocking:
 1. **Confirm Star-CCM+ accepts the CSV data format.** The data column is scientific notation (`3.001234560e-04`) because the old `%.5f` quantised mass flow (~1e-4 kg/s) to about 61 distinct values. Nobody has loaded one of the new files into Star-CCM+. If its table reader rejects it, switch to a high-precision fixed format in `io/csv_export.py` rather than reverting to `%.5f`.
@@ -59,7 +59,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 | Work item | Stage |
 |---|---|
-| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 458 tests, two review passes, two usability reviews and a CT retest acted on, checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
+| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 462 tests, two review passes, two usability reviews and a CT retest acted on, four design questions decided by the user, checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
 | Read native LabChart `.adicht` files without LabChart (`io/adicht.py`, `io/recording.py`, GUI open, `convert-adicht` command) | done on `feature/gui-pro-redesign`; equals LabChart's export bit for bit on ENT005 (user's manual export) and on 72 recording pairs; refuses what it was not checked on |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
@@ -78,6 +78,8 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 | Windows packaging / CI | not started; see notes on PyInstaller freeze |
 
 ## SESSION LOG
+
+- 2026-11-20: the user answered the four open design questions (see NEXT STEP). Implemented the one that asked for a change: a cycle frame click takes the image under the pointer, the image is shaded and numbered in its middle, a click outside the scan labels nothing (462 tests). The reviewer's byte comparison against `main` on `52dc6d6` is 11 of 11 identical; its cycle scenario clicks exactly on grid lines, where both rules name the same image, so that result shows the other ten paths and on line clicks are unchanged, not that the rule is the same.
 
 - 2026-11-20: the second usability reviewer retested CT on `947a4a9` and changed its verdict from no to: a first time user who reads the screen now gets a correct CT export through landmarks or reorder parts without the author (not yet for a user who does not read, nor for cycle frames). It found four states where the new green line could be trusted too much, all closed test first (458 tests): the step grid is drawn from the window in force, so it follows an applied shift, a Temporal Res change and a typed Start; a previewed shift or image count holds every CT method back and says what is in force; a Step number that is not the selected step holds the export back. Warnings are amber, not green (window not a whole number of images, nothing marked, Temporal Res still the program's default until entered or confirmed with Enter). No CT click mode arms before a step is selected, a click on a step selects it, a right click cancels an armed landmark, Clear markers keeps the selected step and its grid, leaving the parts method removes its grid. The reviewer's byte comparison against `main` on `ffeee1f`: 11 of 11 identical, with and without comments. Not retested by a reviewer after these fixes. Running the reviewer's harness wrote a settings file into the user's configuration folder (it opens real windows); the file held only a scratch path and was removed. Any harness that opens the window must set `LABCHART2CFD_SETTINGS`.
 
