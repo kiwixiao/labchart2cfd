@@ -51,7 +51,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 | Work item | Stage |
 |---|---|
-| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 265 tests; needs a manual pass on real data, then merge |
+| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 287 tests, independent review findings fixed; needs a manual pass on real data, then merge |
 | Read native LabChart `.adicht` files without LabChart (`io/adicht.py`, `io/recording.py`, GUI open, `convert-adicht` command) | done on `feature/gui-pro-redesign`; equals LabChart's export bit for bit on ENT005 (user's manual export) and on 72 recording pairs; refuses what it was not checked on |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
@@ -70,6 +70,8 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 | Windows packaging / CI | not started; see notes on PyInstaller freeze |
 
 ## SESSION LOG
+
+- 2026-11-20: independent review of the redesigned GUI (a second agent, experiments run against `8eef0cf`, outputs kept in the session scratch folder). It proved eight defects and one clean result: all 11 standard export paths write files byte identical to `main`. Fixed test first in `tests/test_gui_review_fixes.py` (22 tests, 287 in total): a picker change no longer drops CT markers silently (same entry and Pressure change nothing, a real change asks first); the mouse wheel over a sidebar control scrolls the sidebar and no longer changes the control (`WheelGuard`); the line above Export says "whole window as recorded" when no landmark or cycle frame is marked; changing the CT method asks, then removes the marks of the method left, so only one method's marks are on the plot; Export on an empty flow block is blocked and explained (it ended the program), and `launch_gui` installs an exception hook that shows unexpected errors; a long file name is shortened in the middle (`ElidedLabel`) and cannot widen the sidebar; a new recording resets Start, End, image count and offsets; the overwrite question leaves out a pressure file that would not be written; an extreme Temporal Res no longer draws 300,000 grid lines.
 
 - 2026-11-20: GUI redesign on `feature/gui-pro-redesign` in four tested units (layout, click modes and CT methods, export, polish). 143 to 265 tests. Memory migrated into the project folder. First run on a real recording led to drawing signal envelopes (21.5 s to 0.6 s) and a channel name check. Native `.adicht` reader added and checked bit for bit against LabChart exports; the GUI opens `.adicht` directly.
 - 2026-08-19: full-codebase review + fix batch on `fix/review-findings` (15 commits, 141 tests). Fifteen defects in the fixes themselves were caught by five rounds of verification and fixed, the worst being three failed attempts to auto-detect trigger polarity (now a declared parameter). All four subsystems got an adversarial pass.

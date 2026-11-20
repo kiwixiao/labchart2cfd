@@ -11,7 +11,7 @@ import pytest
 from PyQt5.QtWidgets import QDialog, QMessageBox, QPushButton
 
 from labchart2cfd.gui.dialogs import AssemblyPreviewDialog, ExportResultDialog
-from tests.gui_helpers import choose_ct_method, open_block
+from tests.gui_helpers import ClickEvent, choose_ct_method, open_block
 
 pytestmark = pytest.mark.usefixtures("no_modal_dialogs")
 
@@ -260,8 +260,12 @@ def test_export_hint_names_the_ct_method_that_will_be_exported(win, mat_file):
     win.subject_edit.setText("S1")
     win.start_spin.setValue(2.0)
     win.end_spin.setValue(5.0)
+    # With no landmark the export is the plain window, and the hint says so
+    # (tests/test_gui_review_fixes.py). The method is named once one is marked.
+    win._mark_inhale_start()
+    win._on_click(ClickEvent(win.ax_bottom, 4.0))
 
-    assert "landmarks" in _hint(win)
+    assert "landmarks method" in _hint(win)
 
 
 def test_export_hint_asks_for_a_part_in_the_parts_method(win, mat_file):

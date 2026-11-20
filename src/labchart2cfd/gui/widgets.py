@@ -6,10 +6,12 @@ building the whole main window.
 
 from typing import Sequence
 
-from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtCore import QEvent, QObject, QSize, Qt
+from PyQt5.QtGui import QPainter
 from PyQt5.QtWidgets import (
-    QComboBox, QFrame, QLayout, QScrollArea, QSizePolicy, QToolButton,
-    QVBoxLayout, QWidget,
+    QAbstractScrollArea, QAbstractSlider, QAbstractSpinBox, QApplication,
+    QComboBox, QFrame, QLabel, QLayout, QScrollArea, QScrollBar, QSizePolicy,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 
@@ -79,6 +81,71 @@ class ChannelCombo(QComboBox):
             self.blockSignals(False)
         if previous is not None:
             self.setValue(previous)
+
+
+class WheelGuard(QObject):
+    """Stops the mouse wheel from changing a control it happens to be over.
+
+    Inside a scrolling panel the wheel means "scroll". Qt also lets it step a
+    dropdown, a number box or a slider under the pointer, so scrolling the
+    sidebar silently changed the study type, a channel or a time. The guard
+    takes the wheel away from those controls and hands it to the scroll bar of
+    the panel around them, the same way a scroll area forwards its own wheel
+    events, so the panel scrolls as if the control were not there.
+    """
+
+    def eventFilter(self, watched, event) -> bool:  # noqa: N802 (Qt spelling)
+        if event.type() != QEvent.Wheel:
+            return False
+        area = watched.parentWidget()
+        while area is not None and not isinstance(area, QAbstractScrollArea):
+            area = area.parentWidget()
+        if area is not None:
+            QApplication.sendEvent(area.verticalScrollBar(), event)
+        # Accepted either way, so Qt does not offer the same wheel step to the
+        # parents again and scroll twice.
+        event.accept()
+        return True
+
+
+def guard_wheel(root: QWidget) -> WheelGuard:
+    """Protect every dropdown, number box and slider under ``root``.
+
+    Scroll bars are sliders too and are left alone: they are what the wheel
+    is meant to move.
+    """
+    guard = WheelGuard(root)
+    for kind in (QComboBox, QAbstractSpinBox, QAbstractSlider):
+        for control in root.findChildren(kind):
+            if isinstance(control, QScrollBar):
+                continue
+            control.installEventFilter(guard)
+            # Without wheel focus, hovering can never make a control active.
+            control.setFocusPolicy(Qt.StrongFocus)
+    return guard
+
+
+class ElidedLabel(QLabel):
+    """A one line label that shortens long text in the middle.
+
+    A plain label is as wide as its text. A long file name then widened the
+    whole sidebar and squeezed the plot. ``text()`` still returns everything.
+    """
+
+    _MIN_WIDTH = 40
+
+    def minimumSizeHint(self) -> QSize:  # noqa: N802 (Qt spelling)
+        return QSize(self._MIN_WIDTH, super().minimumSizeHint().height())
+
+    def sizeHint(self) -> QSize:  # noqa: N802 (Qt spelling)
+        return QSize(self._MIN_WIDTH, super().sizeHint().height())
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 (Qt spelling)
+        painter = QPainter(self)
+        area = self.contentsRect()
+        shown = self.fontMetrics().elidedText(self.text(), Qt.ElideMiddle, area.width())
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.drawText(area, int(self.alignment()) | Qt.TextSingleLine, shown)
 
 
 class VerticalScrollArea(QScrollArea):

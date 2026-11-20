@@ -26,6 +26,7 @@ colours in ``theme.py``.
 """
 
 import sys
+import traceback
 from pathlib import Path
 from threading import Thread
 from typing import Optional, List, Tuple
@@ -54,7 +55,8 @@ from labchart2cfd.gui.dialogs import (
 )
 from labchart2cfd.gui.theme import STYLE_SHEET, apply_theme
 from labchart2cfd.gui.widgets import (
-    ChannelCombo, CollapsibleSection, VerticalScrollArea, channel_label,
+    ChannelCombo, CollapsibleSection, ElidedLabel, VerticalScrollArea,
+    channel_label, guard_wheel,
 )
 from labchart2cfd.io.labchart import LabChartData
 from labchart2cfd.io.recording import RECORDING_SUFFIXES, load_recording
@@ -210,6 +212,12 @@ class FlowProfileApp(QMainWindow):
 
         # Remarks from the reader of the open recording (native files only).
         self._load_notes: List[str] = []
+        # (flow row, trigger row, block) the current view was drawn from, so a
+        # picker change can tell whether anything on the plot changed.
+        self._shown_selection: Optional[Tuple[int, int, int]] = None
+        # The CT method whose marks are on the plot. Only one method's marks
+        # exist at a time, so the plot always shows what will be exported.
+        self._active_ct_method = "parts"
 
         # Export state
         self._outdir_user_set = False   # True once the user picks the folder
@@ -510,6 +518,9 @@ class FlowProfileApp(QMainWindow):
         outer.addWidget(scroll, 1)
         # Outside the scroll area, so Export is always reachable.
         outer.addWidget(self._build_export_footer(), 0)
+        # In this panel the wheel scrolls. It must never step a dropdown, a
+        # number box or the slider that happens to be under the pointer.
+        self._wheel_guard = guard_wheel(self.sidebar)
         return self.sidebar
 
     # ------------------------------------------------------------------
@@ -529,7 +540,10 @@ class FlowProfileApp(QMainWindow):
         open_btn.clicked.connect(self._browse_file)
         section.add_widget(open_btn)
 
-        self.file_label = self._hint("No recording open")
+        # Shortened in the middle when long, so a long file name cannot widen
+        # the sidebar. The tooltip carries the full path.
+        self.file_label = ElidedLabel("No recording open")
+        self.file_label.setObjectName("hintLabel")
         section.add_widget(self.file_label)
 
         # Remarks from the reader of a native recording, such as a channel
@@ -1164,8 +1178,40 @@ class FlowProfileApp(QMainWindow):
                 and self.ct_total_images_spin.value() > 1):
             self.synth_images_spin.setValue(self.ct_total_images_spin.value())
 
+    def _marks_of_method(self, method: str) -> str:
+        """What a CT method has on the plot, in words, or '' if nothing."""
+        if method == "landmarks":
+            marked = self._ct_inhale_start is not None or self._ct_exhale_end is not None
+            return "the landmarks" if marked else ""
+        n = len(self._ct_cycle_frames) if method == "cycle" else len(self._parts)
+        noun = "cycle label" if method == "cycle" else "part"
+        return f"{n} {noun}{'s' if n != 1 else ''}" if n else ""
+
     def _on_ct_method_changed(self) -> None:
-        """Bring the chosen CT method's controls on screen, and only those."""
+        """Bring the chosen CT method's controls on screen, and only those.
+
+        Leaving a method removes its marks, after asking. The marks of the
+        method being left used to stay drawn although the export ignored
+        them, so the plot showed one thing and the files held another.
+        """
+        new, old = self._ct_method(), self._active_ct_method
+        if new != old:
+            marks = self._marks_of_method(old)
+            if marks and QMessageBox.question(
+                self, "Change Method?",
+                f"Only the method on screen is exported, so changing it "
+                f"removes {marks}.\n\nContinue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) != QMessageBox.Yes:
+                self.ct_method_combo.blockSignals(True)
+                self.ct_method_combo.setCurrentIndex(self.ct_method_combo.findData(old))
+                self.ct_method_combo.blockSignals(False)
+                return
+            if marks:
+                {"landmarks": self._clear_ct_landmarks,
+                 "cycle": self._clear_cycle_labels,
+                 "parts": self._clear_parts}[old]()
+            self._active_ct_method = new
         index = self.ct_method_combo.currentIndex()
         self.ct_method_hint.setText(
             self.ct_method_combo.itemData(index, Qt.ToolTipRole)
@@ -1298,6 +1344,9 @@ class FlowProfileApp(QMainWindow):
         blockers = []
         if self.data is None:
             blockers.append("open a recording")
+        elif self.data.is_block_empty(self.flow_row_spin.value(), self.col_spin.value()):
+            # Export on such a block used to end the program.
+            blockers.append("pick a block that has flow data")
         if not self.subject_edit.text().strip():
             blockers.append("enter a Subject ID")
         if self._uses_assembly():
@@ -1306,6 +1355,28 @@ class FlowProfileApp(QMainWindow):
         elif self.end_spin.value() <= self.start_spin.value():
             blockers.append("set Start before End")
         return blockers
+
+    def _ct_export_description(self, study: str, window: str) -> str:
+        """What a CT export through Execute will really hold.
+
+        With nothing marked, the landmark and cycle methods both export the
+        window as recorded. Saying "landmarks method" then was untrue.
+        """
+        frames, inhale, _exhale = self._ct_export_inputs()
+        if self._ct_method() == "cycle":
+            if not frames:
+                return (f"{study}, whole window as recorded "
+                        f"(no cycle frame labelled), {window}")
+            n = len(frames)
+            return f"{study}, cycle frames method, {n} frame{'s' if n != 1 else ''}, {window}"
+        if self._ct_inhale_start is None and self._ct_exhale_end is None:
+            return f"{study}, whole window as recorded (no landmark marked), {window}"
+        if inhale is None:
+            return (f"{study}, whole window as recorded "
+                    f"(inhale start not marked), {window}")
+        if self._ct_exhale_end is None:
+            return f"{study}, landmarks method (inhale start only), {window}"
+        return f"{study}, landmarks method, {window}"
 
     def _update_export_hint(self) -> None:
         """State what is missing, or exactly what Export will write."""
@@ -1320,8 +1391,7 @@ class FlowProfileApp(QMainWindow):
         else:
             window = f"{self.start_spin.value():.3f} s to {self.end_spin.value():.3f} s"
             if self._workflow_name() == "CT":
-                method = {"landmarks": "landmarks", "cycle": "cycle frames"}[self._ct_method()]
-                what = f"{study}, {method} method, {window}"
+                what = self._ct_export_description(study, window)
             else:
                 what = f"{study}, {window}"
         self.export_hint.setText(f"Ready to export: {what}.")
@@ -1331,10 +1401,15 @@ class FlowProfileApp(QMainWindow):
         subject = self.subject_edit.text().strip()
         folder = Path(self.outdir_edit.text())
         names = [f"{subject}FlowProfile.csv"]
-        # Pressure is written only when a pressure channel is chosen, and
-        # never for phase contrast, which has no pressure output.
-        if (self.pressure_row_spin.value() > 0
-                and self._workflow_name() != "phase-contrast"):
+        # Pressure is written only when a pressure channel is chosen and has
+        # data in this block, and never for phase contrast, which has no
+        # pressure output. Naming a file that would not be written made the
+        # question promise a replacement that did not happen.
+        pressure_row = self.pressure_row_spin.value()
+        if (pressure_row > 0
+                and self._workflow_name() != "phase-contrast"
+                and self.data is not None
+                and not self.data.is_block_empty(pressure_row, self.col_spin.value())):
             names.append(f"{subject}PressureProfile.csv")
         if self._uses_assembly():
             names.append(f"{subject}ImageReorderMap.csv")
@@ -1448,8 +1523,9 @@ class FlowProfileApp(QMainWindow):
         self.total_triggers_label.setText("--")
         self.ct_inhale_label.setText("--")
         self.ct_exhale_label.setText("--")
-        if hasattr(self, "cycle_count_label"):
-            self.cycle_count_label.setText("0 frames")
+        # Count and sequence together. Resetting the count alone left the old
+        # sequence on screen beside "0 frames".
+        self._update_cycle_ui()
 
     def _load_and_overview(self) -> None:
         """Load the chosen recording and show the grid of all channels x blocks."""
@@ -1505,10 +1581,25 @@ class FlowProfileApp(QMainWindow):
             self._update_load_notes()
 
             # A different recording invalidates any parts labelled against the
-            # previous file's grid.
+            # previous file's grid, and with them the window, the image count
+            # and the offsets, which all described a scan that is no longer
+            # open. The image count goes back to 1 so the next selected step
+            # seeds it again.
             if getattr(self, "_loaded_filepath", None) != self.mat_filepath:
                 self._parts = []
                 self._refresh_parts_list()
+                for box, value in (
+                    (self.start_spin, 0.0), (self.end_spin, 0.0),
+                    (self.synth_images_spin, 1), (self.ct_total_images_spin, 1),
+                    (self.synth_grid_offset_spin, 0), (self.synth_window_offset_spin, 0),
+                    (self.ct_shift_spin, 0), (self.ct_shift_slider, 0),
+                ):
+                    # Silently: the handlers would redraw a grid on a plot
+                    # that is about to be replaced.
+                    box.blockSignals(True)
+                    box.setValue(value)
+                    box.blockSignals(False)
+                self._update_window_readout()
             self._loaded_filepath = self.mat_filepath
         finally:
             self._loading = False
@@ -1583,16 +1674,67 @@ class FlowProfileApp(QMainWindow):
         self._reset_plot_state()
         self._show_overview()
 
+    def _plotted_selection(self) -> Tuple[int, int, int]:
+        """(flow row, trigger row, block): everything the plot is drawn from.
+
+        Pressure is not in it, because pressure is never plotted.
+        """
+        return (self.flow_row_spin.value(), self.trigger_row_spin.value(),
+                self.col_spin.value())
+
+    def _marks_at_risk(self, include_parts: bool) -> List[str]:
+        """What a redraw would remove, in the words shown to the user."""
+        marks = []
+        if self._ct_inhale_start is not None or self._ct_exhale_end is not None:
+            marks.append("the landmarks")
+        n = len(self._ct_cycle_frames)
+        if n:
+            marks.append(f"{n} cycle label{'s' if n != 1 else ''}")
+        n = len(self._parts)
+        if include_parts and n:
+            marks.append(f"{n} part{'s' if n != 1 else ''}")
+        return marks
+
     def _on_selection_changed(self, *_args) -> None:
         """Redraw the current view after the user changes a channel or block.
 
         The pickers used to need a separate Plot Selected click, so the plot
         could show one block while the pickers named another.
+
+        Redrawing drops the markers placed on the old signal, so it happens
+        only when something on the plot really changed, and it asks first when
+        work would be lost. Landmarks used to vanish on a Pressure change
+        while the line above Export still said "Ready".
         """
         if self.data is None:
             return
+        self._update_channel_check()
+        self._update_export_hint()
+        new = self._plotted_selection()
+        old = self._shown_selection
+        if new == old:
+            return  # the same entry again, or only Pressure changed
         was_detail = self._plot_mode == "selected"
-        col = self.col_spin.value()
+        block_changed = old is not None and new[2] != old[2]
+        if was_detail and old is not None:
+            # Parts name images of one scan, so they go with the block only.
+            at_risk = self._marks_at_risk(include_parts=block_changed)
+            if at_risk and QMessageBox.question(
+                self, "Remove Markers?",
+                "Changing the channel or block redraws the plot and removes:"
+                "\n\n  " + "\n  ".join(at_risk) + "\n\nContinue?",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+            ) != QMessageBox.Yes:
+                self.flow_row_spin.setValue(old[0])
+                self.trigger_row_spin.setValue(old[1])
+                self.col_spin.setValue(old[2])
+                self._update_channel_check()
+                self._update_export_hint()
+                return
+            if block_changed and self._parts:
+                self._parts = []
+                self._refresh_parts_list()
+        col = new[2]
         if was_detail and not self.data.is_block_empty(self.flow_row_spin.value(), col):
             self._plot_selected()
             return
@@ -1722,6 +1864,7 @@ class FlowProfileApp(QMainWindow):
         self.status_bar.showMessage(
             f"Overview: {nch} channels x {nbl} blocks | Click a block to open it"
         )
+        self._shown_selection = self._plotted_selection()
         self._refresh_banner()
 
     def _plot_selected(self) -> None:
@@ -1852,6 +1995,7 @@ class FlowProfileApp(QMainWindow):
             f"Block {col}, {self._channel_text(flow_row)}: {len(time)} samples, "
             f"{time[-1]:.2f}s{trigger_info}"
         )
+        self._shown_selection = self._plotted_selection()
         self._refresh_banner()
 
     def _refresh_top_legend(self) -> None:
@@ -2318,6 +2462,9 @@ class FlowProfileApp(QMainWindow):
         self.status_bar.showMessage("Click on plot to mark EXHALE END")
         self._refresh_banner()
 
+    # Most images the step grid is drawn for; the range of the Total Images box.
+    _MAX_GRID_IMAGES = 500
+
     def _draw_ct_intervals(self, update_total_images_field: bool = True) -> None:
         """Draw temporal resolution interval lines within the step window.
 
@@ -2368,6 +2515,18 @@ class FlowProfileApp(QMainWindow):
             start_t = step["start_time"]
             end_t = step["end_time"]
             n_images = compute_image_count(end_t - start_t, temporal_res_s)
+
+        # A Temporal Res far too small for the step asks for a line per image
+        # on two axes: 0.01 ms in a 3 s step is 300,000 images, and drawing
+        # them froze the window. The Total Images box stops at this many too.
+        if n_images > self._MAX_GRID_IMAGES:
+            self.canvas.draw_idle()
+            self.status_bar.showMessage(
+                f"Temporal Res {temporal_res_ms:g} ms gives {n_images} images in "
+                f"this step, too many to draw (limit {self._MAX_GRID_IMAGES}). "
+                "Check Temporal Res."
+            )
+            return
 
         # N images are bounded by N+1 lines.
         for i in range(n_images + 1):
@@ -2666,7 +2825,7 @@ class FlowProfileApp(QMainWindow):
         )
         self._ct_cycle_artists.append(ann)
 
-        self._update_cycle_ui()
+        self._cycle_labels_changed()
         self.canvas.draw_idle()
 
     def _remove_last_cycle_label(self) -> None:
@@ -2680,7 +2839,7 @@ class FlowProfileApp(QMainWindow):
                 last_artist.remove()
             except (ValueError, AttributeError):
                 pass
-        self._update_cycle_ui()
+        self._cycle_labels_changed()
         self.canvas.draw_idle()
         self.status_bar.showMessage(f"Removed cycle label for original frame {removed}.")
 
@@ -2693,7 +2852,7 @@ class FlowProfileApp(QMainWindow):
                 pass
         self._ct_cycle_artists = []
         self._ct_cycle_frames = []
-        self._update_cycle_ui()
+        self._cycle_labels_changed()
         self.canvas.draw_idle()
         self.status_bar.showMessage("Cycle labels cleared.")
 
@@ -2708,6 +2867,12 @@ class FlowProfileApp(QMainWindow):
             if len(seq) > 80:
                 seq = seq[:77] + "..."
             self.cycle_seq_label.setText(f"seq: {seq}")
+
+    def _cycle_labels_changed(self) -> None:
+        """After the user adds or removes a cycle label: the readout, then
+        the line above Export, which counts these frames."""
+        self._update_cycle_ui()
+        self._update_export_hint()
 
     # ------------------------------------------------------------------
     # Full-manual synthetic-profile mode
@@ -3164,6 +3329,16 @@ class FlowProfileApp(QMainWindow):
         grid_end = start_t + n_images * dt
         flow_row = self.flow_row_spin.value()
         col = self.col_spin.value()
+        # Checked here, because reading an empty block raises, and an error
+        # inside a button handler used to end the program.
+        if self.data.is_block_empty(flow_row, col):
+            QMessageBox.critical(
+                self, "Empty Block",
+                f"Block {col} is empty on the flow channel "
+                f"({self._channel_text(flow_row)}). Pick a block that has "
+                "flow data.",
+            )
+            return
 
         # The grid defines the exported range, so it must sit inside the
         # recording. Refuse rather than invent or silently truncate data.
@@ -3638,11 +3813,34 @@ class FlowProfileApp(QMainWindow):
         Thread(target=_run, daemon=True).start()
 
 
+def report_unhandled_exception(exc_type, exc, tb) -> None:
+    """Show an unexpected error instead of letting it end the program.
+
+    PyQt aborts the whole process when an error escapes a button handler,
+    which lost the session over something as small as an empty block. The
+    traceback still goes to the terminal for whoever debugs it.
+    """
+    traceback.print_exception(exc_type, exc, tb)
+    if QApplication.instance() is not None:
+        QMessageBox.critical(
+            None, "Unexpected Error",
+            f"{exc_type.__name__}: {exc}\n\n"
+            "The window stays open. If this happened during an export, check "
+            "the output folder before using its files.",
+        )
+
+
+def install_exception_hook() -> None:
+    """Route errors that nothing caught to ``report_unhandled_exception``."""
+    sys.excepthook = report_unhandled_exception
+
+
 def launch_gui() -> None:
     """Launch the Flow Profile GUI application."""
     app = QApplication.instance()
     if app is None:
         app = QApplication(sys.argv)
+    install_exception_hook()
     apply_theme(app)
     window = FlowProfileApp()
     window.show()
