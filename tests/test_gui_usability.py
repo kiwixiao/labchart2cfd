@@ -36,7 +36,7 @@ def test_a_plain_click_leaves_the_selected_scan_step_alone(win, mat_file, method
 
 
 @pytest.mark.parametrize("method, button", [
-    ("landmarks", "Mark Inhale Start"), ("cycle", "Label Cycle Frames"),
+    ("landmarks", "Mark inhale start"), ("cycle", "Label cycle frames"),
 ])
 def test_the_banner_names_the_button_to_press_next(win, mat_file, method, button):
     _ct_step_selected(win, mat_file, method)
@@ -66,9 +66,9 @@ def test_selecting_a_step_removes_window_markers_that_no_longer_apply(win, mat_f
 # ------------------------------------- the status line fits the method on screen
 
 @pytest.mark.parametrize("method, wanted, unwanted", [
-    ("parts", "Add Part", "Inhale"),
-    ("landmarks", "Mark Inhale Start", "Label Cycle"),
-    ("cycle", "Label Cycle Frames", "Inhale"),
+    ("parts", "Add part", "Inhale"),
+    ("landmarks", "Mark inhale start", "Label Cycle"),
+    ("cycle", "Label cycle frames", "Inhale"),
 ])
 def test_select_step_points_at_controls_that_are_on_screen(
         win, mat_file, method, wanted, unwanted):
@@ -179,7 +179,7 @@ def test_picking_a_part_speaks_of_images_in_plain_sentences(win, mat_file):
 
     for text in (first, second, third):
         assert text and "—" not in text and "frame" not in text.lower()
-    assert "image" in first.lower() and "Add Part" in third
+    assert "image" in first.lower() and "Add part" in third
 
 
 # ------------------------------------------------ what was exported, and how
@@ -383,7 +383,7 @@ def test_ct_is_not_ready_until_a_scan_step_is_selected(win, mat_file):
     win.end_spin.setValue(5.0)
 
     hint = win.export_hint.text()
-    assert hint.startswith("Before export") and "Select Step" in hint
+    assert hint.startswith("Before export") and "Select step" in hint
 
     win._select_ct_step()
     assert win.export_hint.text().startswith("Ready to export")
@@ -392,12 +392,12 @@ def test_ct_is_not_ready_until_a_scan_step_is_selected(win, mat_file):
 @pytest.mark.parametrize("method", ["parts", "landmarks", "cycle"])
 def test_the_banner_says_to_select_the_step_first(win, mat_file, method):
     """In the parts method the banner explained why clicks do nothing, not
-    what to do. The first action in every CT method is Select Step."""
+    what to do. The first action in every CT method is Select step."""
     win.workflow_combo.setCurrentText("CT")
     choose_ct_method(win, method)
     open_block(win, mat_file)
 
-    assert "Select Step" in win.mode_banner.text()
+    assert "Select step" in win.mode_banner.text()
 
     win._on_click(ClickEvent(win.ax_bottom, 3.0))  # and a click moves nothing
     assert win._time_markers == []

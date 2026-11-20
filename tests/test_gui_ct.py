@@ -6,7 +6,7 @@ previously easy to break by hand:
 1. In full-manual mode an unarmed plot click must not silently redefine the
    Start/End window, because the image grid is computed live from it.
 2. Clearing must never abort part-way on a stale matplotlib artist, and the
-   tab's "Clear All" must clear everything drawn, not just the parts list.
+   tab's "Clear all" must clear everything drawn, not just the parts list.
 """
 import os
 

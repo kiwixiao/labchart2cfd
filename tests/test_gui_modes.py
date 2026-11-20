@@ -138,7 +138,7 @@ def test_reorder_parts_method_is_what_turns_manual_mode_on(win):
 
 def test_choosing_ct_with_a_block_open_looks_for_scan_steps(win, mat_file):
     """Steps are found when a block is plotted. Choosing CT afterwards used to
-    leave none, and Select Step then asked for a detection first."""
+    leave none, and Select step then asked for a detection first."""
     open_block(win, mat_file)                # opened as MRI: pulse detection
     assert win._ct_steps == []
 

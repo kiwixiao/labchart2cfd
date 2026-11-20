@@ -158,21 +158,21 @@ _BANNERS = {
               "Right click removes the last label."),
     "ct_need_step": ("idle",
                      "Scan steps are marked in orange. Choose one under "
-                     "4 CT scan and press Select Step. Clicks on the plot do "
+                     "4 CT scan and press Select step. Clicks on the plot do "
                      "nothing until then."),
     "ct_landmarks_idle": ("idle",
-                          "Scan step selected. Press Mark Inhale Start or "
-                          "Mark Exhale End, then click the plot. Plain clicks "
+                          "Scan step selected. Press Mark inhale start or "
+                          "Mark exhale end, then click the plot. Plain clicks "
                           "do nothing here, so the scan window cannot move by "
                           "accident."),
     "ct_cycle_idle": ("idle",
-                      "Scan step selected. Press Label Cycle Frames, then "
+                      "Scan step selected. Press Label cycle frames, then "
                       "click the images in breathing order. Plain clicks do "
                       "nothing here, so the scan window cannot move by "
                       "accident."),
     "parts_idle": ("idle",
                    "Reorder parts: plain clicks do nothing here, so the image "
-                   "grid cannot move by accident. Press Pick on Plot to "
+                   "grid cannot move by accident. Press Pick on plot to "
                    "choose images."),
     "part_first": ("active",
                    "Picking a part: click the first image of the range. "
@@ -187,9 +187,9 @@ _BANNERS = {
 # line used to point at the landmark buttons in every method, also where they
 # are not on screen.
 _CT_NEXT_STEP = {
-    "parts": "Reorder parts: choose image ranges under 5 Build the breath, then Add Part",
-    "landmarks": "Landmarks: press Mark Inhale Start, then click the plot",
-    "cycle": "Cycle frames: press Label Cycle Frames, then click the images in breathing order",
+    "parts": "Reorder parts: choose image ranges under 5 Build the breath, then Add part",
+    "landmarks": "Landmarks: press Mark inhale start, then click the plot",
+    "cycle": "Cycle frames: press Label cycle frames, then click the images in breathing order",
 }
 
 
@@ -1061,7 +1061,7 @@ class FlowProfileApp(QMainWindow):
             "set Start and End to the scan."
         ))
 
-        detect_steps_btn = QPushButton("Detect Steps")
+        detect_steps_btn = QPushButton("Detect steps")
         detect_steps_btn.setToolTip(
             "Find the scan steps in the Trigger channel. This also runs when "
             "a block is opened."
@@ -1072,7 +1072,7 @@ class FlowProfileApp(QMainWindow):
         self.ct_step_spin = QSpinBox()
         self.ct_step_spin.setRange(1, 1)
         self.ct_step_spin.setValue(1)
-        select_step_btn = QPushButton("Select Step")
+        select_step_btn = QPushButton("Select step")
         select_step_btn.setToolTip(
             "Use this step: sets Start/End to it, draws the image grid and "
             "zooms the plot to it."
@@ -1238,7 +1238,7 @@ class FlowProfileApp(QMainWindow):
         grid_row = QHBoxLayout()
         self.synth_grid_label = QLabel("images: none")
         grid_row.addWidget(self.synth_grid_label, 1)
-        show_grid_btn = QPushButton("Show Image Grid")
+        show_grid_btn = QPushButton("Show image grid")
         # Explicit lambda: clicked() would otherwise pass its checked flag as
         # the `quiet` argument.
         show_grid_btn.clicked.connect(lambda: self._draw_synth_grid(quiet=False))
@@ -1258,7 +1258,7 @@ class FlowProfileApp(QMainWindow):
         ))
         layout.addWidget(self._hint(
             "An image is the slice between two grid lines. Set From and To "
-            "(or use Pick on Plot), then Add Part. The order of the list is "
+            "(or use Pick on plot), then Add part. The order of the list is "
             "the order of the breath. From equal to To selects one image."
         ))
 
@@ -1275,11 +1275,11 @@ class FlowProfileApp(QMainWindow):
         layout.addLayout(range_row)
 
         pick_row = QHBoxLayout()
-        self.pick_part_btn = QPushButton("Pick on Plot")
+        self.pick_part_btn = QPushButton("Pick on plot")
         self.pick_part_btn.setToolTip("Click two images on the plot to fill From and To.")
         self.pick_part_btn.clicked.connect(self._arm_add_part)
         pick_row.addWidget(self.pick_part_btn)
-        add_part_btn = QPushButton("Add Part")
+        add_part_btn = QPushButton("Add part")
         add_part_btn.setToolTip("Add a part covering From..To images, in assembly order.")
         add_part_btn.clicked.connect(self._add_part_from_spins)
         pick_row.addWidget(add_part_btn)
@@ -1298,9 +1298,9 @@ class FlowProfileApp(QMainWindow):
         actions = QGridLayout()
         actions.setSpacing(4)
         for position, (_text, _slot) in enumerate([
-            ("Move Up", self._move_part_up), ("Move Down", self._move_part_down),
-            ("Edit Label", self._edit_part_label), ("Delete", self._delete_part),
-            ("Clear Parts", self._clear_parts), ("Clear All", self._clear_synth_all),
+            ("Move up", self._move_part_up), ("Move down", self._move_part_down),
+            ("Edit label", self._edit_part_label), ("Delete", self._delete_part),
+            ("Clear parts", self._clear_parts), ("Clear all", self._clear_synth_all),
         ]):
             _b = QPushButton(_text)
             _b.clicked.connect(_slot)
@@ -1319,7 +1319,7 @@ class FlowProfileApp(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        mark_inhale_btn = QPushButton("Mark Inhale Start")
+        mark_inhale_btn = QPushButton("Mark inhale start")
         mark_inhale_btn.setToolTip("Then click the plot where inhale starts.")
         mark_inhale_btn.clicked.connect(self._mark_inhale_start)
         self.ct_inhale_label = self._readout("--")
@@ -1328,7 +1328,7 @@ class FlowProfileApp(QMainWindow):
         inhale_row.addWidget(self.ct_inhale_label, 1)
         layout.addLayout(inhale_row)
 
-        mark_exhale_btn = QPushButton("Mark Exhale End")
+        mark_exhale_btn = QPushButton("Mark exhale end")
         mark_exhale_btn.setToolTip("Then click the plot where exhale ends.")
         mark_exhale_btn.clicked.connect(self._mark_exhale_end)
         self.ct_exhale_label = self._readout("--")
@@ -1337,7 +1337,7 @@ class FlowProfileApp(QMainWindow):
         exhale_row.addWidget(self.ct_exhale_label, 1)
         layout.addLayout(exhale_row)
 
-        clear_landmarks_btn = QPushButton("Clear Landmarks")
+        clear_landmarks_btn = QPushButton("Clear landmarks")
         clear_landmarks_btn.clicked.connect(self._clear_ct_landmarks)
         layout.addWidget(clear_landmarks_btn)
         layout.addStretch(1)
@@ -1350,7 +1350,7 @@ class FlowProfileApp(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        self.cycle_mode_btn = QPushButton("Label Cycle Frames")
+        self.cycle_mode_btn = QPushButton("Label cycle frames")
         self.cycle_mode_btn.setCheckable(True)
         self.cycle_mode_btn.setToolTip(
             "Toggle: click the images in breathing order to build a cycle. "
@@ -1368,7 +1368,7 @@ class FlowProfileApp(QMainWindow):
         self.cycle_seq_label.setToolTip("Original image indices in click order")
         layout.addWidget(self.cycle_seq_label)
 
-        clear_cycle_btn = QPushButton("Clear Cycle Labels")
+        clear_cycle_btn = QPushButton("Clear cycle labels")
         clear_cycle_btn.clicked.connect(self._clear_cycle_labels)
         layout.addWidget(clear_cycle_btn)
         layout.addStretch(1)
@@ -1566,7 +1566,7 @@ class FlowProfileApp(QMainWindow):
         self.trigger_section.setVisible(not is_ct)
         self._sync_ct_method()
         # Trigger detection belongs to the study type: pulses for most, scan
-        # steps for CT. Redo it for an open block, or Select Step finds none.
+        # steps for CT. Redo it for an open block, or Select step finds none.
         if self.data is not None and self._plot_mode == "selected":
             self._plot_selected()
         if entering_ct:
@@ -1829,7 +1829,7 @@ class FlowProfileApp(QMainWindow):
         if not self.subject_edit.text().strip():
             blockers.append("enter a Subject ID")
         if self._ct_needs_step():
-            blockers.append("select the scan step (4 CT scan, Select Step)")
+            blockers.append("select the scan step (4 CT scan, Select step)")
         if self._uses_assembly():
             if not self._parts:
                 blockers.append("add at least one part")
@@ -2106,7 +2106,7 @@ class FlowProfileApp(QMainWindow):
         # Do not change self._ct_cycle_mode — it's a UI toggle, user controls it.
         # Full-manual synthetic-profile artists become invalid after fig.clear();
         # drop the references but keep self._parts (the user's labeling data) and
-        # the UI toggle. Grid/overlay are redrawn on demand via "Show Image Grid".
+        # the UI toggle. Grid/overlay are redrawn on demand via "Show image grid".
         self._grid_artists = []
         self._part_artists = []
         self._capturing_part = False
@@ -2293,7 +2293,7 @@ class FlowProfileApp(QMainWindow):
         One rule for every control: landmarks, cycle labels and parts are
         never removed without a question. Only the Clear buttons, whose
         whole purpose is to remove them, do not ask. Before this rule the
-        pickers asked while All blocks, Selected block, Select Step, the
+        pickers asked while All blocks, Selected block, Select step, the
         study type and opening a recording dropped the same marks silently.
         """
         at_risk = self._marks_at_risk(include_parts)
@@ -2322,7 +2322,7 @@ class FlowProfileApp(QMainWindow):
             self._clear_all_markers()
 
     def _user_select_step(self) -> None:
-        """Select Step, from the button."""
+        """Select step, from the button."""
         if self._ask_before_dropping("Selecting a step redraws its image grid and"):
             self._select_ct_step()
 
@@ -3078,7 +3078,7 @@ class FlowProfileApp(QMainWindow):
                 # those, so a stray click would silently redefine the grid and
                 # invalidate parts already added.
                 self.status_bar.showMessage(
-                    "Reorder parts: press 'Pick on Plot' first to select images."
+                    "Reorder parts: press 'Pick on plot' first to select images."
                 )
             elif mode in ("ct_need_step", "ct_landmarks_idle", "ct_cycle_idle"):
                 self.status_bar.showMessage(_BANNERS[mode][1])
@@ -3769,7 +3769,7 @@ class FlowProfileApp(QMainWindow):
         self._ct_cycle_mode = checked
         if checked:
             # Stop landmark placement AND part capture so clicks don't race.
-            # An armed 'Pick on Plot' outranks cycle mode in the click
+            # An armed 'Pick on plot' outranks cycle mode in the click
             # dispatch, so leaving it armed meant the status bar announced
             # cycle mode while clicks silently rewrote the From/To boxes.
             self._ct_landmark_mode = None
@@ -4130,7 +4130,7 @@ class FlowProfileApp(QMainWindow):
         if self._synth_grid() is None:
             QMessageBox.warning(
                 self, "Bad Window",
-                "Set Start < End and a positive Temporal Res, then 'Show Image Grid'.",
+                "Set Start < End and a positive Temporal Res, then 'Show image grid'.",
             )
             return
         a = self.part_from_spin.value()
@@ -4163,7 +4163,7 @@ class FlowProfileApp(QMainWindow):
         if self._synth_grid() is None:
             QMessageBox.warning(
                 self, "Bad Window",
-                "Set Start < End and a positive Temporal Res, then 'Show Image Grid'.",
+                "Set Start < End and a positive Temporal Res, then 'Show image grid'.",
             )
             return
         self._capturing_part = True
@@ -4222,8 +4222,8 @@ class FlowProfileApp(QMainWindow):
         # a == b is a legal single-image part, same as typing From = To.
         self.part_from_spin.setValue(a)
         self.part_to_spin.setValue(b)
-        self.capture_hint.setText(f"Images {a} to {b} chosen. Press Add Part.")
-        self.status_bar.showMessage(f"Images {a} to {b} chosen. Press Add Part to add them.")
+        self.capture_hint.setText(f"Images {a} to {b} chosen. Press Add part.")
+        self.status_bar.showMessage(f"Images {a} to {b} chosen. Press Add part to add them.")
 
     def _draw_parts_overlay(self) -> None:
         """Shade each part's span on the top plot with its order number."""
@@ -4294,7 +4294,7 @@ class FlowProfileApp(QMainWindow):
         i = self._selected_part_row()
         if not (0 <= i < len(self._parts)):
             return
-        text, ok = QInputDialog.getText(self, "Edit Label", "Part label:", text=self._parts[i].label)
+        text, ok = QInputDialog.getText(self, "Edit label", "Part label:", text=self._parts[i].label)
         if ok:
             self._parts[i].label = text.strip()
             self._refresh_parts_list()
