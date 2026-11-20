@@ -36,6 +36,7 @@ import matplotlib
 matplotlib.use("QtAgg")
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
+from matplotlib.transforms import Bbox, TransformedBbox
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from scipy.signal import find_peaks
 
@@ -2062,6 +2063,43 @@ class FlowProfileApp(QMainWindow):
         # Which labels crowd each other depends on the zoom.
         self._layout_comment_labels()
         self._layout_step_labels()
+        self._fence_time_labels()
+
+    def _fence_time_labels(self) -> None:
+        """Keep every label placed at a time within the width of its plot.
+
+        Step names, marker times, image numbers and cycle labels sit at a
+        time on the x axis and at a height of the axes, often just above the
+        top edge, so the plot does not clip them. Zoomed in elsewhere, such
+        a label was still drawn, far outside the plot, and the layout
+        engine, asked to make room for it, gave up with a warning on every
+        redraw. Each is clipped to the width of its plot, not its height,
+        and left out of the layout. Labels are added at many places and at
+        any time, so this runs on every change of the view and takes each
+        label once.
+        """
+        for ax in (self.ax_top, self.ax_bottom, self.ax_top_trig):
+            if ax is None:
+                continue
+            fence = None
+            for text in ax.texts:
+                # A text has clipping switched on by default, with nothing to
+                # clip against. Only a clip region means it is clipped.
+                if (getattr(text, "_time_fenced", False)
+                        or text.get_clip_path() is not None
+                        or text.get_clip_box() is not None):
+                    continue  # done before, or already clipped to the plot
+                if fence is None:
+                    fence = TransformedBbox(Bbox([[0.0, -1.0], [1.0, 2.0]]), ax.transAxes)
+                # The backing shape of a label (the circle of a cycle label)
+                # is drawn on its own, so it is fenced as well.
+                for artist in (text, text.get_bbox_patch()):
+                    if artist is not None:
+                        artist.set_clip_path(None)
+                        artist.set_clip_box(fence)
+                        artist.set_clip_on(True)
+                text.set_in_layout(False)
+                text._time_fenced = True
 
     def _show_overview(self) -> None:
         """Draw the channels-x-blocks overview grid for the loaded file."""

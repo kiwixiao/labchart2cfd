@@ -7,7 +7,8 @@ from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtGui import QDesktopServices, QPixmap
 from PyQt5.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QLabel, QListWidget, QVBoxLayout,
+    QDialog, QDialogButtonBox, QFormLayout, QFrame, QLabel, QListWidget,
+    QScrollArea, QVBoxLayout,
 )
 
 
@@ -85,11 +86,29 @@ class QuickGuideDialog(QDialog):
         self.guide_label = QLabel(self.GUIDE)
         self.guide_label.setTextFormat(Qt.RichText)
         self.guide_label.setWordWrap(True)
-        self.guide_label.setMinimumWidth(440)
-        layout.addWidget(self.guide_label)
+        self.guide_label.setMinimumWidth(self._TEXT_WIDTH)
+        self.guide_label.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.guide_label.setContentsMargins(4, 4, 12, 4)
+        # A wrapped label does not tell a dialog how tall it is, so the
+        # window opened at 400 pixels for text that needs 640 and the rest
+        # could not be reached. The text scrolls, and the window opens tall
+        # enough for all of it where the screen allows.
+        self.guide_scroll = QScrollArea()
+        self.guide_scroll.setWidgetResizable(True)
+        self.guide_scroll.setFrameShape(QFrame.NoFrame)
+        self.guide_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.guide_scroll.setWidget(self.guide_label)
+        layout.addWidget(self.guide_scroll, 1)
         buttons = QDialogButtonBox(QDialogButtonBox.Close)
         buttons.rejected.connect(self.close)
         layout.addWidget(buttons)
+
+        width = self._TEXT_WIDTH + 16 + 40      # text, its margins, scroll bar and frame
+        wanted = self.guide_label.heightForWidth(self._TEXT_WIDTH + 16) + 90
+        screen = self.screen().availableGeometry().height() if self.screen() else 800
+        self.resize(width, min(wanted, int(screen * 0.85)))
+
+    _TEXT_WIDTH = 440
 
 
 class ExportResultDialog(QDialog):

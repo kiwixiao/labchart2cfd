@@ -348,3 +348,59 @@ def test_export_is_held_back_while_temporal_res_gives_too_many_images(win, mat_f
     hint = win.export_hint.text().lower()
     assert hint.startswith("before export") and "temporal res" in hint
     assert "300000" in hint.replace(",", "")
+
+
+# ------------------------------------------------- labels placed at a time
+
+def test_a_label_at_a_time_out_of_view_is_not_drawn_beside_the_plot(win, mat_file):
+    """A step label is placed at a time. Zoomed in elsewhere it was still
+    drawn, far outside the plot, and the layout engine gave up with a
+    warning on every redraw (the old window did the same)."""
+    win.workflow_combo.setCurrentText("CT")
+    open_block(win, mat_file)                      # one step label at 3.5 s
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        win.ax_top.set_xlim(8.499, 8.503)
+        win.canvas.draw()
+
+    label = win._ct_step_labels[0][1]
+    plot = win.ax_top.bbox
+    assert label.get_clip_on() and not label.get_in_layout()
+    assert label.get_clip_box().x0 == pytest.approx(plot.x0)
+    assert label.get_clip_box().x1 == pytest.approx(plot.x1)
+    assert label.get_clip_box().y1 > plot.y1       # still free above the top edge
+
+
+def test_labels_added_later_are_fenced_too(win, mat_file):
+    """Time markers and landmarks are placed after the block is drawn."""
+    open_block(win, mat_file)
+    win._on_click(ClickEvent(win.ax_bottom, 2.0))
+    win._on_click(ClickEvent(win.ax_bottom, 6.0))
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        win.ax_top.set_xlim(8.499, 8.503)
+        win.canvas.draw()
+
+    placed = [t for ax in (win.ax_top, win.ax_bottom) for t in ax.texts]
+    assert placed and all(t.get_clip_on() and not t.get_in_layout() for t in placed)
+
+
+# ----------------------------------------------------------------- quick guide
+
+def test_the_whole_quick_guide_can_be_read(win, qapp):
+    """The window was 400 pixels tall for text that needs 640, with no way
+    to reach the rest."""
+    win.guide_action.trigger()
+    dialog = win._guide_dialog
+    qapp.processEvents()
+
+    needed = dialog.guide_label.heightForWidth(dialog.guide_label.width())
+    view = dialog.guide_scroll.viewport().height()
+    reach = view + dialog.guide_scroll.verticalScrollBar().maximum()
+
+    assert needed > 0 and reach >= needed
+    # Nearly all of it at once, unless the screen is too small for that.
+    screen = qapp.primaryScreen().availableGeometry().height()
+    assert view >= min(needed, int(screen * 0.6))

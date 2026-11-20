@@ -154,6 +154,13 @@ def main() -> None:
         window.ct_method_combo.setCurrentIndex(window.ct_method_combo.findData(key))
         shot(name)
 
+    # Zoomed in away from every label: nothing may be drawn beside the plot.
+    window.ax_top.set_xlim(30.0, 30.5)
+    shot("9_zoomed_in")
+
+    window._show_quick_guide()
+    shot("10_quick_guide", window._guide_dialog)
+
     window.close()
     print("screenshots in", out)
 
