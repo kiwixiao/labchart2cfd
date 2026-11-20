@@ -56,6 +56,7 @@ from labchart2cfd.gui.decimate import EnvelopeLine, minmax_envelope
 from labchart2cfd.gui.dialogs import (
     AssemblyPreviewDialog, ExportResultDialog, QuickGuideDialog,
 )
+from labchart2cfd.gui.settings import LAST_FOLDER, WINDOW_GEOMETRY, open_settings
 from labchart2cfd.gui.theme import STYLE_SHEET, apply_theme
 from labchart2cfd.gui.widgets import (
     ChannelCombo, CollapsibleSection, ElidedLabel, VerticalScrollArea,
@@ -235,6 +236,10 @@ class FlowProfileApp(QMainWindow):
         self.setWindowTitle(self._APP_TITLE)
         self.resize(1400, 860)
         self.setMinimumSize(900, 600)
+        # The size and position the window was last closed with.
+        geometry = open_settings().value(WINDOW_GEOMETRY)
+        if geometry is not None:
+            self.restoreGeometry(geometry)
 
         # State
         self.data: Optional[LabChartData] = None
@@ -422,6 +427,10 @@ class FlowProfileApp(QMainWindow):
         self.about_action = QAction("&About", self)
         self.about_action.triggered.connect(lambda: self._show_about())
         help_menu.addAction(self.about_action)
+
+    def closeEvent(self, event) -> None:  # noqa: N802 (Qt spelling)
+        open_settings().setValue(WINDOW_GEOMETRY, self.saveGeometry())
+        super().closeEvent(event)
 
     def _show_about(self) -> None:
         """Name and version, so a result can be traced to the program that made it."""
@@ -1701,8 +1710,12 @@ class FlowProfileApp(QMainWindow):
 
     def _browse_file(self) -> None:
         """Open file dialog to select a recording (.mat export or .adicht)."""
+        # Start where the last recording was, if that folder still exists.
+        folder = str(open_settings().value(LAST_FOLDER, "") or "")
+        if folder and not Path(folder).is_dir():
+            folder = ""
         filepath, _ = QFileDialog.getOpenFileName(
-            self, "Open LabChart recording", "", self._OPEN_FILTER,
+            self, "Open LabChart recording", folder, self._OPEN_FILTER,
         )
         if filepath:
             self.open_recording(filepath)
@@ -1749,6 +1762,7 @@ class FlowProfileApp(QMainWindow):
             self.setWindowTitle(self._APP_TITLE)
         else:
             self.setWindowTitle(f"{self.mat_filepath.name} | {self._APP_TITLE}")
+            open_settings().setValue(LAST_FOLDER, str(self.mat_filepath.parent))
         self._update_picker_state()
 
     def _update_picker_state(self) -> None:

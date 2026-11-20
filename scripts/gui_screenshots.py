@@ -93,6 +93,9 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     recording = out / "synthetic_demo.mat"
     write_synthetic_recording(recording)
+    # The window saves its size on closing. Keep that out of the user's own
+    # settings: this run is not a session of theirs.
+    os.environ["LABCHART2CFD_SETTINGS"] = str(out / "settings.ini")
 
     app = QApplication.instance() or QApplication([])
     apply_theme(app)

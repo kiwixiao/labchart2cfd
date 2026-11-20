@@ -8,6 +8,13 @@ import pytest
 from scipy.io import savemat
 
 
+@pytest.fixture(autouse=True)
+def _own_settings_file(tmp_path, monkeypatch):
+    """Each test gets its own settings file, so no test sees what another
+    (or the real application) saved: a last folder, a window size."""
+    monkeypatch.setenv("LABCHART2CFD_SETTINGS", str(tmp_path / "settings.ini"))
+
+
 @pytest.fixture(scope="session")
 def qapp():
     from PyQt5.QtWidgets import QApplication

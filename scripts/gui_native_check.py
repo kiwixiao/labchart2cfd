@@ -24,6 +24,9 @@ import tempfile
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(tempfile.mkdtemp(prefix="labchart2cfd_native_"))
 out.mkdir(parents=True, exist_ok=True)
+# The window saves its size on closing, and this walk shrinks it to the
+# minimum. Keep that out of the user's own settings.
+os.environ["LABCHART2CFD_SETTINGS"] = str(out / "settings.ini")
 
 from PyQt5.QtWidgets import (QAbstractButton, QApplication, QComboBox, QLabel,
                              QLineEdit, QMessageBox)
