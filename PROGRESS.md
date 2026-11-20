@@ -59,7 +59,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 | Work item | Stage |
 |---|---|
-| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 462 tests, two review passes, two usability reviews and a CT retest acted on, four design questions decided by the user, checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
+| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 480 tests, two review passes, two usability reviews and two CT retests acted on, four design questions decided by the user, checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
 | Read native LabChart `.adicht` files without LabChart (`io/adicht.py`, `io/recording.py`, GUI open, `convert-adicht` command) | done on `feature/gui-pro-redesign`; equals LabChart's export bit for bit on ENT005 (user's manual export) and on 72 recording pairs; refuses what it was not checked on |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
@@ -78,6 +78,8 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 | Windows packaging / CI | not started; see notes on PyInstaller freeze |
 
 ## SESSION LOG
+
+- 2026-11-20: second retest by the usability reviewer on `046d863`. It still found six states where the line said Ready while the plot showed images the files would not hold (four in cycle frames, one in landmarks, two in reorder parts), and named the cause: more than one source for the image grid, and marks that did not follow it. Fixed at the cause in `c44adee` (480 tests): `_ct_grid()` is the one definition of the grid in force, read by the drawn grid, the cycle click, the label shading and the landmark status; cycle labels are redrawn whenever the grid changes, and a label on an image that no longer exists blocks the export; the shift preview draws only while something is pending; the Grid Out of Sync refusal after Ready is gone. Also: reorder parts warns about a default Temporal Res and about a grid that does not cover the scan; the parts grid count follows the selected step until the user types one; landmarks on the same image are a caution; Temporal Res is confirmed by Enter or a typed value, not by focus leaving the box; refusing is red, caution amber, ready green; the result panel shows every row whole; a short method page no longer keeps the height of the long one. On `c44adee`: the byte comparison against `main` is 11 of 11 identical with and without comments, the real display check reports no clipped control, and the two real recording tests pass (25 passed). A third retest was requested.
 
 - 2026-11-20: the user answered the four open design questions (see NEXT STEP). Implemented the one that asked for a change: a cycle frame click takes the image under the pointer, the image is shaded and numbered in its middle, a click outside the scan labels nothing (462 tests). The reviewer's byte comparison against `main` on `52dc6d6` is 11 of 11 identical; its cycle scenario clicks exactly on grid lines, where both rules name the same image, so that result shows the other ten paths and on line clicks are unchanged, not that the rule is the same.
 
