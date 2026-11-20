@@ -159,15 +159,15 @@ def test_the_wheel_zooms_about_the_value_under_the_pointer(win, mat_file):
     assert win.ax_top_trig.transData.inverted().transform((x, y))[1] == pytest.approx(value)
 
 
-def test_the_wheel_inside_the_plot_changes_no_scale(win, mat_file):
+def test_the_wheel_inside_the_plot_changes_no_y_scale(win, mat_file):
     open_block(win, mat_file)
     win.canvas.draw()
     box = win.ax_top.bbox
-    before = (win.ax_top.get_ylim(), win.ax_top_trig.get_ylim(), win.ax_top.get_xlim())
+    before = (win.ax_top.get_ylim(), win.ax_top_trig.get_ylim())
 
     win._on_scroll(ScrollEvent((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, step=2))
 
-    assert (win.ax_top.get_ylim(), win.ax_top_trig.get_ylim(), win.ax_top.get_xlim()) == before
+    assert (win.ax_top.get_ylim(), win.ax_top_trig.get_ylim()) == before
 
 
 def test_the_wheel_on_the_overview_does_nothing(win, mat_file):

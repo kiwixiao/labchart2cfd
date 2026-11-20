@@ -36,6 +36,7 @@ import matplotlib
 matplotlib.use("QtAgg")
 from matplotlib.collections import LineCollection
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 from matplotlib.transforms import Bbox, TransformedBbox
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 from scipy.signal import find_peaks
@@ -267,6 +268,9 @@ class FlowProfileApp(QMainWindow):
         # The study type the window is laid out for, to go back to when a
         # change is declined.
         self._workflow_index_shown = 0
+        # The shading of the window on each detail axes (see _update_window_span).
+        self._window_spans: dict = {}
+        self._placing_marker = False
         # Start Shift and Images in step as last applied to Start and End, to
         # tell a value that is only previewed from one that is in force.
         self._ct_applied_shift = 0
@@ -665,6 +669,26 @@ class FlowProfileApp(QMainWindow):
             ax.set_ylim(*new)
         self.canvas.draw_idle()
 
+    def _zoom_time(self, ax, x_px: float, y_px: float, factor: float) -> None:
+        """Zoom the time axis about the time under the pointer.
+
+        Zooming out stops at the view the block opened with, and zooming in
+        at a few samples, so the wheel cannot lose the recording.
+        """
+        anchor = ax.transData.inverted().transform((x_px, y_px))[0]
+        lo, hi = ax.get_xlim()
+        new_lo = anchor + (lo - anchor) * factor
+        new_hi = anchor + (hi - anchor) * factor
+        time = self.data.get_time(self.flow_row_spin.value(), self.col_spin.value())
+        margin = 0.05 * float(time[-1] - time[0])
+        full_lo, full_hi = float(time[0]) - margin, float(time[-1]) + margin
+        new_lo, new_hi = max(new_lo, full_lo), min(new_hi, full_hi)
+        smallest = 4.0 * float(time[1] - time[0]) if len(time) > 1 else 0.0
+        if new_hi - new_lo <= smallest:
+            return
+        self.ax_top.set_xlim(new_lo, new_hi)  # the lower plot shares this axis
+        self.canvas.draw_idle()
+
     # How far a scale may leave the signal's own range, as a factor each way.
     _Y_SPAN_BAND = 1e6
 
@@ -706,14 +730,23 @@ class FlowProfileApp(QMainWindow):
         self.canvas.draw_idle()
 
     def _on_scroll(self, event) -> None:
-        """The wheel beside a plot, over its y axis numbers, zooms that scale.
+        """The wheel zooms: time inside a plot, a y scale beside it.
 
-        Left of either plot is the flow scale, right of the top plot is the
-        trigger scale. Inside a plot the wheel does nothing, so a scale
-        cannot change by accident while reading the signal.
+        Inside either plot it zooms in time about the pointer, as LabChart
+        does, which is how a few seconds are found in a long recording. Over
+        the numbers of a y axis it zooms that scale: left of either plot is
+        the flow scale, right of the top plot is the trigger scale. A y scale
+        never changes from inside a plot.
         """
         if self._plot_mode != "selected" or not event.step:
             return
+        if self.toolbar.mode:
+            return  # the zoom or pan tool owns the plot
+        step = max(-self._Y_WHEEL_MAX_STEP, min(event.step, self._Y_WHEEL_MAX_STEP))
+        for ax in (self.ax_top, self.ax_bottom):
+            if ax is not None and ax.bbox.contains(event.x, event.y):
+                self._zoom_time(ax, event.x, event.y, self._Y_WHEEL_FACTOR ** step)
+                return
         for ax, right in ((self.ax_top, "trigger"), (self.ax_bottom, None)):
             if ax is None:
                 continue
@@ -977,7 +1010,8 @@ class FlowProfileApp(QMainWindow):
             "Remove every marker drawn on the plot: time markers, trigger "
             "ranges, CT landmarks and cycle labels."
         )
-        clear_markers_btn.clicked.connect(self._clear_all_markers)
+        clear_markers_btn.clicked.connect(lambda: self._user_clear_markers())
+        self.clear_markers_btn = clear_markers_btn
         row.addWidget(clear_markers_btn)
         section.add_layout(row)
         return section
@@ -1371,6 +1405,8 @@ class FlowProfileApp(QMainWindow):
 
         # Says what is still missing, or what exactly will be exported.
         self.export_hint = self._hint("")
+        self.export_hint.setObjectName("exportHint")
+        self.export_hint.setProperty("state", "blocked")
         layout.addWidget(self.export_hint)
 
         self.execute_btn = QPushButton("Export")
@@ -1419,6 +1455,47 @@ class FlowProfileApp(QMainWindow):
             box.valueChanged.connect(lambda _v: self._update_export_hint())
         self.start_spin.valueChanged.connect(lambda _v: self._update_window_readout())
         self.end_spin.valueChanged.connect(lambda _v: self._update_window_readout())
+        self.start_spin.valueChanged.connect(lambda _v: self._update_window_span())
+        self.end_spin.valueChanged.connect(lambda _v: self._update_window_span())
+
+    def _update_window_span(self) -> None:
+        """Shade the window on both plots, exactly where Start and End are.
+
+        The plot used to show the window only through the markers of the
+        clicks that set it. Typing a time left a marker at the old one, and
+        clearing the markers left a window in force with nothing drawn. The
+        shading is drawn from Start and End themselves, so the plot, the
+        boxes and the export always show one window.
+        """
+        if self._plot_mode != "selected" or self.ax_top is None:
+            return
+        start, end = self.start_spin.value(), self.end_spin.value()
+        for ax in (self.ax_top, self.ax_bottom):
+            patch = self._window_spans.get(ax)
+            if patch is None:
+                # A plain artist in axes height coordinates: it never changes
+                # a scale, wherever the window lies.
+                patch = Rectangle(
+                    (start, 0.0), 0.0, 1.0, transform=ax.get_xaxis_transform(),
+                    facecolor=self._WINDOW_COLOR, edgecolor=self._WINDOW_COLOR,
+                    alpha=0.10, linewidth=0.8, zorder=0.5,
+                )
+                patch.set_in_layout(False)
+                ax.add_artist(patch)
+                self._window_spans[ax] = patch
+            patch.set_x(start)
+            patch.set_width(max(end - start, 0.0))
+            patch.set_visible(end > start)
+        # A marker that no longer stands at Start or End would show a time
+        # that is not in force. Markers set by clicks match and stay.
+        in_force = (start, end)
+        if not self._placing_marker and any(min(abs(artists[0].get_xdata()[0] - t) for t in in_force) > 1e-3
+               for artists in self._time_markers):
+            self._clear_time_markers()
+        self.canvas.draw_idle()
+
+    # The colour of the window shading, the application's accent.
+    _WINDOW_COLOR = "#1f6feb"
 
     def _update_window_readout(self) -> None:
         """Show the window length, or say why the window is not usable yet."""
@@ -1809,6 +1886,7 @@ class FlowProfileApp(QMainWindow):
     def _update_export_hint(self) -> None:
         """State what is missing, or exactly what Export will write."""
         blockers = self._export_blockers()
+        self._set_export_state("blocked" if blockers else "ready")
         if blockers:
             self.export_hint.setText("Before export: " + ", ".join(blockers) + ".")
             return
@@ -1840,6 +1918,14 @@ class FlowProfileApp(QMainWindow):
         if abs(exact - images) > 0.05:
             text += f" (the window is {exact:.2f} images long)"
         return text
+
+    def _set_export_state(self, state: str) -> None:
+        """Colour the line above Export by whether an export can run."""
+        if self.export_hint.property("state") != state:
+            self.export_hint.setProperty("state", state)
+            # A changed dynamic property only restyles after a repolish.
+            self.export_hint.style().unpolish(self.export_hint)
+            self.export_hint.style().polish(self.export_hint)
 
     def _export_sources(self) -> str:
         """Block and channels the export reads, as shown in the pickers."""
@@ -2004,6 +2090,7 @@ class FlowProfileApp(QMainWindow):
         self._title_forms = []
         self._ct_applied_shift = 0
         self._ct_applied_images = None
+        self._window_spans = {}
         self._trigger_times = np.array([])
         self._trigger_count = 0
         self._ct_steps = []
@@ -2227,6 +2314,12 @@ class FlowProfileApp(QMainWindow):
         """Selected block, from the button or the menu."""
         if self._ask_before_dropping("Redrawing the block"):
             self._plot_selected()
+
+    def _user_clear_markers(self) -> None:
+        """Clear markers, from the button. It also removes landmarks and
+        cycle labels, which its name does not say, so it asks like the rest."""
+        if self._ask_before_dropping("Clear markers"):
+            self._clear_all_markers()
 
     def _user_select_step(self) -> None:
         """Select Step, from the button."""
@@ -2628,6 +2721,7 @@ class FlowProfileApp(QMainWindow):
         if n_comments:
             self._layout_comment_labels()
         self._fit_title()
+        self._update_window_span()
         self.canvas.draw_idle()
 
         # Connect click handler for data picker
@@ -3047,16 +3141,23 @@ class FlowProfileApp(QMainWindow):
 
         # Auto-populate Start/End Time from first two markers
         marker_count = len(self._time_markers)
-        if marker_count == 1:
-            self.start_spin.setValue(x_time)
-        elif marker_count == 2:
-            self.end_spin.setValue(x_time)
-            # Ensure start < end
-            s = self.start_spin.value()
-            e = self.end_spin.value()
-            if e < s:
-                self.start_spin.setValue(e)
-                self.end_spin.setValue(s)
+        # While the two boxes are being filled from the markers they pass
+        # through values that match neither marker. That is not a typed time.
+        self._placing_marker = True
+        try:
+            if marker_count == 1:
+                self.start_spin.setValue(x_time)
+            elif marker_count == 2:
+                self.end_spin.setValue(x_time)
+                # Ensure start < end
+                s = self.start_spin.value()
+                e = self.end_spin.value()
+                if e < s:
+                    self.start_spin.setValue(e)
+                    self.end_spin.setValue(s)
+        finally:
+            self._placing_marker = False
+        self._update_window_span()
 
         self.canvas.draw_idle()
         self.status_bar.showMessage(

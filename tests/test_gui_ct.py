@@ -478,7 +478,9 @@ def test_landmark_reports_where_the_cut_snaps(win):
 
 def test_clear_synth_all_clears_parts_markers_and_grid(win):
     win._synth_mode = False
-    win._on_click(_Event(win.ax_top, 3.0))
+    # A marker where Start is: one that matched no time in force is removed
+    # as soon as a time is typed (tests/test_gui_usability.py).
+    win._on_click(_Event(win.ax_top, 0.0))
     win.start_spin.setValue(0.0)
     win.end_spin.setValue(2.0)
     win.ct_temporal_res_spin.setValue(200)

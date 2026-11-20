@@ -70,6 +70,8 @@ class QuickGuideDialog(QDialog):
         "the button says what is still missing.<br><br>"
         "The coloured line above the plot always says what a click on the "
         "plot will do. If it turns red, the zoom or pan tool is on.<br><br>"
+        "<b>Moving in time.</b> The mouse wheel over a plot zooms in time "
+        "about the pointer. The window in force is shaded on both plots.<br><br>"
         "<b>Scales.</b> Flow Y and Trigger Y above the plot enlarge or "
         "shrink each scale. The mouse wheel over the numbers of an axis does "
         "the same. Fit sets the flow scale to the flow in view. Full shows "

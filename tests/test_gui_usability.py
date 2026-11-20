@@ -510,3 +510,152 @@ def test_a_ct_result_lists_the_images_it_selected(win, qapp, mat_file, tmp_path)
     assert facts["Images selected"].startswith("11 (")
     if win._result_dialog is not None:
         win._result_dialog.close()
+
+
+# ------------------------------------ the plot and the numbers show one window
+
+def _span(win, ax):
+    """(left, right) of the shaded window on an axes, or None when hidden."""
+    patch = win._window_spans[ax]
+    if not patch.get_visible():
+        return None
+    return (round(patch.get_x(), 6), round(patch.get_x() + patch.get_width(), 6))
+
+
+def test_the_window_is_shaded_wherever_start_and_end_are(win, mat_file):
+    """Typing Start left the green marker at the old time, and clearing the
+    markers left a window in force with nothing on the plot to show it."""
+    open_block(win, mat_file)
+    assert _span(win, win.ax_bottom) is None       # no window yet
+
+    win.start_spin.setValue(3.0)
+    win.end_spin.setValue(6.0)
+    assert _span(win, win.ax_bottom) == (3.0, 6.0)
+    assert _span(win, win.ax_top) == (3.0, 6.0)
+
+    win.start_spin.setValue(3.5)
+    assert _span(win, win.ax_bottom) == (3.5, 6.0)
+
+    win.end_spin.setValue(1.0)                     # not a window
+    assert _span(win, win.ax_bottom) is None
+
+
+def test_the_shading_follows_clicks_and_survives_clear_markers(win, mat_file):
+    open_block(win, mat_file)
+    win._on_click(ClickEvent(win.ax_bottom, 2.0))
+    win._on_click(ClickEvent(win.ax_bottom, 6.0))
+    assert _span(win, win.ax_bottom) == (2.0, 6.0)
+
+    win._clear_time_markers()
+
+    assert (win.start_spin.value(), win.end_spin.value()) == (2.0, 6.0)
+    assert _span(win, win.ax_bottom) == (2.0, 6.0)  # the window is still in force
+
+
+def test_a_typed_time_removes_a_marker_that_no_longer_matches(win, mat_file):
+    open_block(win, mat_file)
+    win._on_click(ClickEvent(win.ax_bottom, 2.0))
+    win._on_click(ClickEvent(win.ax_bottom, 6.0))
+    assert len(win._time_markers) == 2
+
+    win.start_spin.setValue(3.5)
+
+    assert win._time_markers == []
+
+
+def test_the_shading_is_redrawn_with_the_block(win, mat_file):
+    open_block(win, mat_file)
+    win.start_spin.setValue(3.0)
+    win.end_spin.setValue(6.0)
+
+    win._plot_selected()
+
+    assert _span(win, win.ax_bottom) == (3.0, 6.0)
+
+
+def test_the_shading_does_not_move_a_scale(win, mat_file):
+    open_block(win, mat_file)
+    before = (win.ax_top.get_xlim(), win.ax_top.get_ylim())
+
+    win.start_spin.setValue(3.0)
+    win.end_spin.setValue(600.0)                   # far past the recording
+
+    assert (win.ax_top.get_xlim(), win.ax_top.get_ylim()) == before
+
+
+def test_clear_markers_asks_before_it_removes_ct_marks(win, mat_file, monkeypatch):
+    """It sits under Time window and is named for markers, but it also
+    removed landmarks and cycle labels, the one control that did not ask."""
+    from PyQt5.QtWidgets import QMessageBox
+    _ct_step_selected(win, mat_file, "landmarks")
+    win._mark_inhale_start()
+    win._on_click(ClickEvent(win.ax_bottom, 4.0))
+    asked = []
+    monkeypatch.setattr(
+        "labchart2cfd.gui.app.QMessageBox.question",
+        staticmethod(lambda _p, title, text, *a, **k: (asked.append(text), QMessageBox.No)[1]),
+    )
+
+    win.clear_markers_btn.click()
+
+    assert asked and "landmark" in asked[0]
+    assert win._ct_inhale_start == 4.0
+
+
+# ------------------------------------------------------ moving along the time axis
+
+def test_the_wheel_over_the_plot_zooms_in_time_about_the_pointer(win, mat_file):
+    """A long block opens as a solid band, and the only way in was to switch
+    the zoom tool on and off. LabChart users expect the wheel to zoom."""
+    from tests.test_gui_view import ScrollEvent
+    open_block(win, mat_file)
+    win.canvas.draw()
+    box = win.ax_bottom.bbox
+    x, y = box.x0 + 0.25 * box.width, (box.y0 + box.y1) / 2
+    under_pointer = win.ax_bottom.transData.inverted().transform((x, y))[0]
+    before = win.ax_bottom.get_xlim()
+
+    win._on_scroll(ScrollEvent(x, y, step=2))
+
+    after = win.ax_bottom.get_xlim()
+    assert (after[1] - after[0]) < (before[1] - before[0])
+    assert win.ax_bottom.transData.inverted().transform((x, y))[0] == pytest.approx(under_pointer)
+    assert win.ax_top.get_xlim() == pytest.approx(after)       # both plots together
+
+
+def test_the_wheel_cannot_zoom_out_past_the_recording(win, mat_file):
+    from tests.test_gui_view import ScrollEvent
+    open_block(win, mat_file)
+    win.canvas.draw()
+    box = win.ax_bottom.bbox
+    full = win.ax_bottom.get_xlim()
+
+    for _ in range(30):
+        win._on_scroll(ScrollEvent((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, step=-5))
+
+    assert win.ax_bottom.get_xlim() == pytest.approx(full)
+
+
+def test_the_zoom_tool_keeps_the_wheel_to_itself(win, mat_file):
+    from tests.test_gui_view import ScrollEvent
+    open_block(win, mat_file)
+    win.canvas.draw()
+    box = win.ax_bottom.bbox
+    before = win.ax_bottom.get_xlim()
+    win.toolbar.zoom()
+
+    win._on_scroll(ScrollEvent((box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2, step=2))
+
+    assert win.ax_bottom.get_xlim() == before
+    win.toolbar.zoom()
+
+
+# ------------------------------------------------- ready looks different from not
+
+def test_the_export_line_looks_different_when_ready(win, mat_file):
+    """The same grey text said 'Before export' and 'Ready to export'."""
+    assert win.export_hint.property("state") == "blocked"
+
+    _ready(win, mat_file)
+
+    assert win.export_hint.property("state") == "ready"
