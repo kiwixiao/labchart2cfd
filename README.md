@@ -83,9 +83,10 @@ The output folder must not be the recording's own folder. `python -m labchart2cf
 
 What to expect:
 
-- The format has no public description. The reader was worked out from real recordings and checked sample for sample against LabChart's own exports of them (LabChart 6.1.2 and 8.1.x). Where it converts, the samples, index tables, titles, units, comments and block times equal the export. The two display range variables (`rangemin`, `rangemax`) are not written.
+- The format has no public description. The reader was worked out from real recordings and checked sample for sample against LabChart's own exports of them (LabChart 6.1.2 and 8.1.x). Where it converts, the samples, index tables, titles, units, comments and block times equal the export. The two display range variables (`rangemin`, `rangemax`) are not written, and `comtext` is left out when a recording has no comments (LabChart writes it empty). This program reads none of the three.
 - A channel that LabChart computes is not stored in the file. The Integral calculation is recomputed with LabChart's arithmetic. A channel with any other calculation is left empty and named in the output.
-- A file with anything the reader has not been checked on is refused with the reason (exit code 2). It does not guess. Export that file from LabChart by hand.
+- A file with anything the reader has not been checked on is refused with the reason (exit code 2). It does not guess. Export that file from LabChart by hand. Of 198 native files tried, 158 open and 40 are refused: files saved from a selection, files with records deleted in LabChart, imports from other systems, and a few with settings never seen in a checked file.
+- One known gap. Only recordings whose computed channels are Integrals had an export to compare against. A channel with another calculation (a digital filter, arithmetic, a derivative) is left empty when its marker is found in the file. If LabChart stored such a calculation without that marker, the reader would return the channel's raw input with no warning. No such case was seen, and it cannot be ruled out. If a recording uses those calculations, compare it with a manual export once.
 - When a new kind of recording comes along (another setup or LabChart version), export one file by hand once and compare:
 
 ```bash
