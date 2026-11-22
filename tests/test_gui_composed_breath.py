@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from labchart2cfd.gui import app as gui_app
 from tests.gui_helpers import ClickEvent, choose_ct_method, open_block
 
 pytestmark = pytest.mark.usefixtures("no_modal_dialogs")
@@ -255,3 +256,145 @@ def test_export_targets_lists_the_files_written(win, qapp, mat_file, tmp_path, m
         report = _parts_export(win, qapp, mat_file, tmp_path)
 
     assert {p.name for p in win._export_targets()} == {p.name for p in report["files"]}
+
+
+# ------------------------------------------- 4.4: the drift correction breath
+
+def _type_breath(win, start, end):
+    win.drift_from_spin.setValue(start)
+    win.drift_to_spin.setValue(end)
+
+
+def test_pick_on_plot_sets_the_drift_breath_with_two_clicks(win, mat_file):
+    _step_selected(win, mat_file, "landmarks")
+
+    win.drift_pick_btn.click()
+    assert win._click_mode() == "drift_first"
+    win._on_click(ClickEvent(win.ax_bottom, 6.0))
+    assert win._click_mode() == "drift_second"
+    win._on_click(ClickEvent(win.ax_bottom, 2.0))     # backward: still one breath
+
+    assert win._drift_breath() == (pytest.approx(2.0), pytest.approx(6.0))
+    assert win.drift_from_spin.value() == pytest.approx(2.0)
+    assert win.drift_to_spin.value() == pytest.approx(6.0)
+    assert win._click_mode() == "ct_landmarks_idle"
+
+
+def test_right_click_cancels_picking_the_drift_breath(win, mat_file):
+    _step_selected(win, mat_file, "landmarks")
+    win.drift_pick_btn.click()
+    win._on_click(ClickEvent(win.ax_bottom, 6.0))
+
+    win._on_click(ClickEvent(win.ax_bottom, 2.0, button=3))
+
+    assert win._drift_breath() is None
+    assert win._click_mode() == "ct_landmarks_idle"
+
+
+def test_typed_from_and_to_set_the_drift_breath(win, mat_file):
+    _step_selected(win, mat_file, "landmarks")
+
+    _type_breath(win, 1.0, 5.0)
+
+    assert win._drift_breath() == (pytest.approx(1.0), pytest.approx(5.0))
+
+
+def test_the_drift_breath_is_drawn_on_both_plots(win, mat_file):
+    _step_selected(win, mat_file, "landmarks")
+
+    _type_breath(win, 1.0, 5.0)
+
+    assert {a.axes for a in win._drift_artists} >= {win.ax_top, win.ax_bottom}
+    assert any(getattr(a, "get_text", lambda: "")().strip() == "drift breath"
+               for a in win._drift_artists)
+    win.drift_clear_btn.click()
+    assert win._drift_artists == [] and win._drift_breath() is None
+
+
+def test_no_breath_gives_an_amber_caution_naming_the_range(win, mat_file):
+    _step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+    win._ct_dt_confirmed = True
+    win._update_export_hint()
+
+    hint = win.export_hint.text()
+    assert win.export_hint.property("state") == "caution"
+    assert hint.startswith("Ready to export")
+    assert "no drift correction breath" in hint and "2.000 s to 5.000 s" in hint
+
+    _type_breath(win, 1.0, 5.0)
+
+    assert "drift correction breath" not in win.export_hint.text()
+
+
+def test_a_breath_outside_the_recording_holds_the_export_back(win, mat_file):
+    _step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+
+    _type_breath(win, 8.0, 12.0)                      # the block ends near 10 s
+
+    hint = win.export_hint.text()
+    assert hint.startswith("Before export") and "drift correction breath" in hint
+
+
+@pytest.mark.parametrize("method", ["landmarks", "cycle"])
+def test_a_drift_breath_reaches_the_engine(win, qapp, mat_file, tmp_path, monkeypatch, method):
+    from labchart2cfd.workflows.ct import CTWorkflow
+    ranges = []
+    original = CTWorkflow.process
+
+    def spy(self, *args, **kwargs):
+        ranges.append(kwargs.get("drift_range"))
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(CTWorkflow, "process", spy)
+    _step_selected(win, mat_file, method)
+    _type_breath(win, 2.0, 6.0)
+    win.subject_edit.setText("S1")
+    win._set_output_dir(tmp_path)
+
+    win._export()
+    _wait_for_report(win, qapp)
+
+    assert ranges == [(pytest.approx(2.0), pytest.approx(6.0))]
+    info = _info(tmp_path / "S1_trigger_info.txt")
+    assert info["drift_source"] == "your breath"
+    assert info["drift_range_start"] == "2.000000" and info["drift_range_end"] == "6.000000"
+
+
+def test_landmarks_details_name_the_drift_without_a_breath(win, qapp, mat_file, tmp_path):
+    _step_selected(win, mat_file, "landmarks")
+    win.subject_edit.setText("S1")
+    win._set_output_dir(tmp_path)
+
+    win._export()
+    _wait_for_report(win, qapp)
+
+    info = _info(tmp_path / "S1_trigger_info.txt")
+    assert info["drift_source"] == "image grid"
+    assert (info["drift_range_start"], info["drift_range_end"]) == ("2.000000", "5.000000")
+    assert {"window_start_time", "window_end_time", "drift_removed_L_per_s"} <= set(info)
+    assert info["ct_method"] == "landmarks"
+
+
+def test_selecting_another_step_asks_before_dropping_the_breath(win, mat_file, monkeypatch):
+    _step_selected(win, mat_file, "landmarks")
+    _type_breath(win, 1.0, 5.0)
+    asked = []
+    monkeypatch.setattr(
+        "labchart2cfd.gui.app.QMessageBox.question",
+        staticmethod(lambda _p, _title, text, *a, **k: asked.append(text) or gui_app.QMessageBox.Yes),
+    )
+
+    win._user_select_step()
+
+    assert len(asked) == 1 and "the drift breath" in asked[0]
+    assert win._drift_breath() is None
+
+
+def test_drift_controls_are_hidden_outside_ct(win):
+    win.workflow_combo.setCurrentText("CT")
+    assert not win.drift_box.isHidden()
+
+    win.workflow_combo.setCurrentText("MRI")
+
+    assert win.drift_box.isHidden()

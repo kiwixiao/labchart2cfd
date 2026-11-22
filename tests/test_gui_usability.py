@@ -6,7 +6,7 @@ wrong action, or left them without the fact they needed.
 import pytest
 
 from labchart2cfd.gui import app as gui_app
-from tests.gui_helpers import ClickEvent, choose_ct_method, open_block
+from tests.gui_helpers import ClickEvent, choose_ct_method, open_block, pick_drift_breath
 
 pytestmark = pytest.mark.usefixtures("no_modal_dialogs")
 
@@ -803,6 +803,7 @@ def test_a_new_temporal_res_leaves_no_partial_image_to_caution_about(win, mat_fi
     means go. The window now grows to whole images (design 2026-11-22, 4.1),
     so there is no partial image left to caution about."""
     _ct_step_selected(win, mat_file, "landmarks")
+    pick_drift_breath(win)   # so only this test's own caution can turn the line amber
     win.subject_edit.setText("S1")
     win._ct_dt_confirmed = True
     win._mark_inhale_start()
@@ -831,6 +832,7 @@ def test_temporal_res_is_unconfirmed_until_the_user_touches_it(win, mat_file):
     """200 ms is the program's default, and a wrong value that divides the
     step evenly passed in green with nothing to notice."""
     _ct_step_selected(win, mat_file, "landmarks")
+    pick_drift_breath(win)   # so only this test's own caution can turn the line amber
     win.subject_edit.setText("S1")
     win._mark_inhale_start()
     win._on_click(ClickEvent(win.ax_bottom, 4.0))
@@ -1108,6 +1110,7 @@ def test_reorder_parts_also_warns_about_a_default_temporal_res(win, mat_file):
     """Nothing in this method warned about Temporal Res at all."""
     from labchart2cfd.processing.profile_assembly import ProfilePart
     _ct_step_selected(win, mat_file, "parts")
+    pick_drift_breath(win)   # so only this test's own caution can turn the line amber
     win.subject_edit.setText("S1")
     win._parts.append(ProfilePart(start_image=1, end_image=3, label=""))
     win._refresh_parts_list()
@@ -1134,6 +1137,7 @@ def test_a_parts_grid_that_is_not_the_scan_is_amber(win, mat_file):
     that did not cover the scan passed in green."""
     from labchart2cfd.processing.profile_assembly import ProfilePart
     _ct_step_selected(win, mat_file, "parts")
+    pick_drift_breath(win)   # so only this test's own caution can turn the line amber
     win.subject_edit.setText("S1")
     win.ct_temporal_res_spin.lineEdit().returnPressed.emit()
     win._parts.append(ProfilePart(start_image=1, end_image=3, label=""))
@@ -1467,6 +1471,7 @@ def test_the_export_line_follows_the_grid_offset(win, mat_file):
     """The line stayed as it was until some other edit refreshed it."""
     from labchart2cfd.processing.profile_assembly import ProfilePart
     _ct_step_selected(win, mat_file, "parts")
+    pick_drift_breath(win)   # so only this test's own caution can turn the line amber
     win.subject_edit.setText("S1")
     win.ct_temporal_res_spin.lineEdit().returnPressed.emit()
     win._parts.append(ProfilePart(start_image=1, end_image=3, label=""))

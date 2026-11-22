@@ -185,7 +185,16 @@ _BANNERS = {
     "part_second": ("active",
                     "Picking a part: now click the last image of the range. "
                     "Right click cancels."),
+    "drift_first": ("active",
+                    "Picking the drift correction breath: click where one "
+                    "complete breath starts. Right click cancels."),
+    "drift_second": ("active",
+                     "Picking the drift correction breath: now click where "
+                     "that breath ends. Right click cancels."),
 }
+
+# The band of the drift correction breath on both plots.
+_DRIFT_COLOR = "#7d3c98"
 
 
 # What to do next once a scan step is selected, by CT method. The status
@@ -305,6 +314,13 @@ class FlowProfileApp(QMainWindow):
         # from this length, not from the rounded window, so the count does
         # not creep up with each change (design 2026-11-22, 4.1).
         self._ct_raw_span_s: Optional[float] = None
+        # The drift correction breath (design 2026-11-22, 4.4). Its From and
+        # To boxes in section 3 hold it; these are the picking state and the
+        # band drawn for it.
+        self._picking_drift = False
+        self._drift_first_click: Optional[float] = None
+        self._drift_artists: list = []
+        self._setting_drift = False       # the program is writing From or To
         # The channel name warnings the user has already accepted for this
         # recording, so the same question is not asked at every export.
         self._accepted_channel_warnings: Optional[tuple] = None
@@ -816,6 +832,8 @@ class FlowProfileApp(QMainWindow):
             return "toolbar"
         if self._plot_mode == "overview":
             return "overview"
+        if self._picking_drift:
+            return "drift_second" if self._drift_first_click is not None else "drift_first"
         if self._capturing_part:
             return "part_second" if self._part_click_buffer else "part_first"
         if self._ct_cycle_mode:
@@ -1175,13 +1193,153 @@ class FlowProfileApp(QMainWindow):
         clear_markers_btn = QPushButton("Clear markers")
         clear_markers_btn.setToolTip(
             "Remove every marker drawn on the plot: time markers, trigger "
-            "ranges, CT landmarks and cycle labels."
+            "ranges, CT landmarks, cycle labels and the drift breath."
         )
         clear_markers_btn.clicked.connect(lambda: self._user_clear_markers())
         self.clear_markers_btn = clear_markers_btn
         row.addWidget(clear_markers_btn)
         section.add_layout(row)
+        section.add_widget(self._build_drift_box())
         return section
+
+    def _build_drift_box(self) -> QWidget:
+        """The drift correction breath, CT only (design 2026-11-22, 4.4)."""
+        box = QWidget()
+        self.drift_box = box
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 6, 0, 0)
+        layout.addWidget(self._hint(
+            "Drift correction breath: pick one complete breath. Its mean flow "
+            "is the drift taken out of the export. Without one, the drift is "
+            "measured on the image grid."
+        ))
+        self.drift_from_spin = QDoubleSpinBox()
+        self.drift_to_spin = QDoubleSpinBox()
+        for spin in (self.drift_from_spin, self.drift_to_spin):
+            spin.setRange(0, 99999)
+            spin.setDecimals(3)
+            spin.setSingleStep(0.001)
+            spin.setValue(0.0)
+            spin.valueChanged.connect(lambda _v: self._on_drift_changed())
+        form = self._form()
+        form.addRow("From (s)", self.drift_from_spin)
+        form.addRow("To (s)", self.drift_to_spin)
+        layout.addLayout(form)
+        row = QHBoxLayout()
+        self.drift_pick_btn = QPushButton("Pick on plot")
+        self.drift_pick_btn.setToolTip(
+            "Click where the breath starts, then where it ends.")
+        self.drift_pick_btn.clicked.connect(lambda: self._start_drift_pick())
+        self.drift_clear_btn = QPushButton("Clear")
+        self.drift_clear_btn.clicked.connect(lambda: self._clear_drift_breath())
+        row.addWidget(self.drift_pick_btn)
+        row.addWidget(self.drift_clear_btn)
+        layout.addLayout(row)
+        return box
+
+    def _drift_breath(self) -> Optional[Tuple[float, float]]:
+        """The breath the drift is measured on, (From, To), or None (CT only)."""
+        if self._workflow_name() != "CT":
+            return None
+        start, end = self.drift_from_spin.value(), self.drift_to_spin.value()
+        return (start, end) if end > start else None
+
+    def _drift_breath_problems(self) -> List[str]:
+        """Blockers for a drift breath the engine would refuse."""
+        if self._workflow_name() != "CT" or self.data is None:
+            return []
+        start, end = self.drift_from_spin.value(), self.drift_to_spin.value()
+        if start == 0 and end == 0:
+            return []  # none picked: the image grid is used
+        if end <= start:
+            return ["set the drift correction breath so To is after From"]
+        flow_row, col = self.flow_row_spin.value(), self.col_spin.value()
+        if self.data.is_block_empty(flow_row, col):
+            return []
+        time = self.data.get_time(flow_row, col)
+        lo, hi = float(time[0]), float(time[-1])
+        if start < lo or end > hi:
+            return [
+                "move the drift correction breath inside the recording, which "
+                f"runs from {lo:.3f} s to {hi:.3f} s (the breath is {start:.3f} s "
+                f"to {end:.3f} s)"
+            ]
+        # Sorted time: count by search, not by a mask over the whole channel.
+        held = int(np.searchsorted(time, end, "right") - np.searchsorted(time, start, "left"))
+        if held < 2:
+            return ["make the drift correction breath longer: it holds fewer than 2 samples"]
+        return []
+
+    def _start_drift_pick(self) -> None:
+        """Pick on plot: the next two clicks are the breath's start and end."""
+        if self._plot_mode != "selected":
+            self.status_bar.showMessage("Open a block first: click it on the overview.")
+            return
+        self._picking_drift = True
+        self._drift_first_click = None
+        self._refresh_banner()
+        self.status_bar.showMessage(_BANNERS["drift_first"][1])
+
+    def _drift_click(self, x_time: float) -> None:
+        """A click while picking the breath: its start, then its end."""
+        if self._drift_first_click is None:
+            self._drift_first_click = x_time
+            self.status_bar.showMessage(
+                f"The breath starts at {x_time:.3f} s. Now click where it ends.")
+            return
+        start, end = sorted((self._drift_first_click, x_time))
+        self._picking_drift = False
+        self._drift_first_click = None
+        self._setting_drift = True
+        try:
+            self.drift_from_spin.setValue(start)
+            self.drift_to_spin.setValue(end)
+        finally:
+            self._setting_drift = False
+        self._on_drift_changed()
+        self.status_bar.showMessage(
+            f"Drift correction breath: {start:.3f} s to {end:.3f} s.")
+
+    def _cancel_drift_pick(self) -> None:
+        self._picking_drift = False
+        self._drift_first_click = None
+        self.status_bar.showMessage("Drift correction breath not changed.")
+
+    def _on_drift_changed(self) -> None:
+        if self._setting_drift:
+            return
+        self._draw_drift_breath()
+        self._update_export_hint()
+
+    def _clear_drift_breath(self) -> None:
+        """Clear, from its button: the drift is measured on the image grid again."""
+        self._picking_drift = False
+        self._drift_first_click = None
+        self._setting_drift = True
+        try:
+            self.drift_from_spin.setValue(0.0)
+            self.drift_to_spin.setValue(0.0)
+        finally:
+            self._setting_drift = False
+        self._on_drift_changed()
+        self._refresh_banner()
+
+    def _draw_drift_breath(self) -> None:
+        """Draw the breath as a band on both plots, labelled "drift breath"."""
+        _remove_all(self._drift_artists)
+        self._drift_artists = []
+        breath = self._drift_breath()
+        if breath is None or self.ax_top is None or self._plot_mode != "selected":
+            self.canvas.draw_idle()
+            return
+        for ax in (self.ax_top, self.ax_bottom):
+            self._drift_artists.append(
+                ax.axvspan(breath[0], breath[1], color=_DRIFT_COLOR, alpha=0.12, zorder=0))
+        self._drift_artists.append(self.ax_top.text(
+            breath[0], 0.97, " drift breath", transform=self.ax_top.get_xaxis_transform(),
+            ha="left", va="top", fontsize=8, color=_DRIFT_COLOR, parse_math=False,
+        ))
+        self.canvas.draw_idle()
 
     def _build_trigger_section(self) -> QWidget:
         """Pulse triggers for 4D image registration (every study type but CT)."""
@@ -1746,6 +1904,7 @@ class FlowProfileApp(QMainWindow):
         entering_ct = is_ct and self.ct_scan_section.isHidden()
         self.ct_scan_section.setVisible(is_ct)
         self.ct_method_section.setVisible(is_ct)
+        self.drift_box.setVisible(is_ct)
         self.trigger_section.setVisible(not is_ct)
         self._sync_ct_method()
         # Trigger detection belongs to the study type: pulses for most, scan
@@ -2052,6 +2211,7 @@ class FlowProfileApp(QMainWindow):
                     f"this window, the limit is {self._MAX_GRID_IMAGES})"
                 )
         blockers += self._window_outside_recording()
+        blockers += self._drift_breath_problems()
         if self._workflow_name() == "CT" and not self._uses_assembly():
             blockers += self._landmarks_outside_window()
         if self._workflow_name() == "CT" and self._ct_selected_step is not None:
@@ -2187,6 +2347,17 @@ class FlowProfileApp(QMainWindow):
                 "Temporal Res is still the program's default. Enter yours, or "
                 "confirm it with Enter in its box"
             )
+        if self._drift_breath() is None:
+            # Not a block (the user's decision, 2026-11-22), but named: the
+            # drift of a part of a breath is not the drift of the recording.
+            grid = self._assembly_grid() if self._exports_by_assembly() else self._ct_grid()
+            if grid is not None:
+                start_t, dt, n_images = grid
+                cautions.append(
+                    "no drift correction breath is picked, so the drift is "
+                    f"measured on the image grid ({start_t:.3f} s to "
+                    f"{start_t + n_images * dt:.3f} s)"
+                )
         start, end = self.start_spin.value(), self.end_spin.value()
         if self._uses_assembly():
             # The grid's image count is the user's own and may differ from
@@ -2411,6 +2582,18 @@ class FlowProfileApp(QMainWindow):
         self._ct_applied_images = None
         self._ct_images_user_set = False
         self._ct_raw_span_s = None
+        # The drift breath was marked on the plot being replaced. The
+        # question before a redraw names it (_marks_at_risk).
+        self._drift_artists = []
+        self._picking_drift = False
+        self._drift_first_click = None
+        if hasattr(self, "drift_from_spin"):
+            self._setting_drift = True
+            try:
+                self.drift_from_spin.setValue(0.0)
+                self.drift_to_spin.setValue(0.0)
+            finally:
+                self._setting_drift = False
         self._window_spans = {}
         self._trigger_times = np.array([])
         self._trigger_count = 0
@@ -2606,6 +2789,8 @@ class FlowProfileApp(QMainWindow):
         n = len(self._parts)
         if include_parts and n:
             marks.append(f"{n} part{'s' if n != 1 else ''}")
+        if self._drift_breath() is not None:
+            marks.append("the drift breath")
         return marks
 
     def _ask_before_dropping(self, what: str, include_parts: bool = False) -> bool:
@@ -3399,7 +3584,9 @@ class FlowProfileApp(QMainWindow):
         picking_part = mode in ("part_first", "part_second")
 
         if event.button == 1:  # Left click
-            if picking_part:
+            if mode in ("drift_first", "drift_second"):
+                self._drift_click(event.xdata)
+            elif picking_part:
                 self._capture_part_click(event.xdata)
             elif mode == "cycle":
                 self._add_cycle_label(event.xdata)
@@ -3420,7 +3607,9 @@ class FlowProfileApp(QMainWindow):
             else:
                 self._add_time_marker(event.xdata)
         elif event.button == 3:  # Right click
-            if picking_part:
+            if mode in ("drift_first", "drift_second"):
+                self._cancel_drift_pick()
+            elif picking_part:
                 self._cancel_part_capture()
             elif mode == "cycle":
                 self._remove_last_cycle_label()
@@ -3674,6 +3863,7 @@ class FlowProfileApp(QMainWindow):
             self._clear_ct_interval_markers()
         self._clear_ct_landmarks()
         self._clear_cycle_labels()  # drop stale cycle frames + artists
+        self._clear_drift_breath()
         if self.ax_top is not None:
             self._refresh_top_legend()
         self.canvas.draw_idle()
@@ -3784,9 +3974,11 @@ class FlowProfileApp(QMainWindow):
         self._zoom_to_window(step["start_time"], step["end_time"])
 
         # Reset landmarks AND cycle frames for the new step (stale cycle frames
-        # from a prior step must not leak into this step's export).
+        # from a prior step must not leak into this step's export). The drift
+        # breath was picked for the last step's scan too.
         self._clear_ct_landmarks()
         self._clear_cycle_labels()
+        self._clear_drift_breath()
 
         # Start and End are the step now. Markers clicked for an earlier
         # window would show times that no longer apply.
@@ -4850,7 +5042,8 @@ class FlowProfileApp(QMainWindow):
                 runs.append([image])
         return [ProfilePart(run[0], run[-1]) for run in runs]
 
-    def _ct_details_entries(self, *, subject, method, result, asm, grid, processed, drift_range):
+    def _ct_details_entries(self, *, subject, method, result, asm, grid, processed,
+                            drift_range, drift_source):
         """Every fact of a composed CT export, for the details file.
 
         The keys the old cycle frames file had come first, with their old
@@ -4902,7 +5095,7 @@ class FlowProfileApp(QMainWindow):
             ("window_end_time", f"{self.end_spin.value():.6f}"),
             ("processed_start_time", f"{processed[0]:.6f}"),
             ("processed_end_time", f"{processed[1]:.6f}"),
-            ("drift_source", "image grid"),
+            ("drift_source", drift_source),
             ("drift_range_start", f"{drift_range[0]:.6f}"),
             ("drift_range_end", f"{drift_range[1]:.6f}"),
             ("drift_removed_L_per_s", f"{result.drift_error:.6f}"),
@@ -4999,7 +5192,9 @@ class FlowProfileApp(QMainWindow):
         extras = [p.extra_until_s for p in parts if p.extra_until_s is not None]
         if extras:
             process_end = max(process_end, max(extras) + 1.0 / rate)
-        drift_range = (start_t, grid_end)
+        breath = self._drift_breath()
+        drift_range = breath if breath is not None else (start_t, grid_end)
+        drift_source = "your breath" if breath is not None else "image grid"
 
         try:
             from labchart2cfd.io.csv_export import (
@@ -5057,6 +5252,7 @@ class FlowProfileApp(QMainWindow):
             details = self._ct_details_entries(
                 subject=subject, method=method, result=result, asm=asm,
                 grid=meta, processed=(start_t, process_end), drift_range=drift_range,
+                drift_source=drift_source,
             )
             info_file = output_dir / f"{subject}_trigger_info.txt"
             write_ct_details(info_file, details)
@@ -5162,6 +5358,8 @@ class FlowProfileApp(QMainWindow):
         # Standard/CPAP/CT read pressure from self.pressure_row on the workflow;
         # pick a safe default when user set "none" so the attribute exists.
         effective_pressure_row = pressure_row if include_pressure else 1
+        # The breath the drift is measured on, None for the window itself.
+        ct_drift_range = self._drift_breath()
 
         # Capture trigger info from main thread for the background thread
         trigger_start = self.start_trigger_spin.value()
@@ -5200,6 +5398,7 @@ class FlowProfileApp(QMainWindow):
                             exhale_end_time=None,
                             temporal_resolution=ct_temporal_res_ms / 1000.0,
                             include_pressure=include_pressure,
+                            drift_range=ct_drift_range,
                         )
                     else:
                         result = wf.process(
@@ -5208,6 +5407,7 @@ class FlowProfileApp(QMainWindow):
                             exhale_end_time=ct_exhale_end,
                             temporal_resolution=ct_temporal_res_ms / 1000.0,
                             include_pressure=include_pressure,
+                            drift_range=ct_drift_range,
                         )
 
                     total_imgs = result.metadata.get("total_images", 0)
@@ -5359,6 +5559,16 @@ class FlowProfileApp(QMainWindow):
                             tf.write(f"cycle_mode: false\n")
                         tf.write(f"start_time_exported: 0.000\n")
                         tf.write(f"end_time_exported: {exported_duration:.3f}\n")
+                        # Where the drift was measured (design 2026-11-22, 4.3).
+                        drift_lo, drift_hi = ct_drift_range or (start_time, end_time)
+                        tf.write("ct_method: landmarks\n")
+                        tf.write(f"window_start_time: {start_time:.6f}\n")
+                        tf.write(f"window_end_time: {end_time:.6f}\n")
+                        tf.write("drift_source: "
+                                 f"{'your breath' if ct_drift_range else 'image grid'}\n")
+                        tf.write(f"drift_range_start: {drift_lo:.6f}\n")
+                        tf.write(f"drift_range_end: {drift_hi:.6f}\n")
+                        tf.write(f"drift_removed_L_per_s: {result.drift_error:.6f}\n")
                     else:
                         end_trigger = trigger_start + trigger_num - 1
                         tf.write(f"start_trigger: {trigger_start}\n")
