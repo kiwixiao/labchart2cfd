@@ -8,48 +8,118 @@ from matplotlib.figure import Figure
 from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtGui import QDesktopServices, QPixmap
 from PyQt5.QtWidgets import (
-    QDialog, QDialogButtonBox, QFormLayout, QFrame, QLabel, QListWidget,
-    QScrollArea, QVBoxLayout,
+    QButtonGroup, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout,
+    QLabel, QListWidget, QRadioButton, QScrollArea, QVBoxLayout, QWidget,
 )
+
+from labchart2cfd.gui.frame_order_plot import SIDE_NAMES, balance_notes, draw_frame_order
 
 
 class AssemblyPreviewDialog(QDialog):
-    """Shows the assembled synthetic flow profile and asks whether to export it.
+    """The composed breath with its frame order, before anything is written.
 
+    The curve is the array the export writes: the composed flow with one
+    half scaled so in equals out (design 2026-11-22, 4.5 and 4.7). The user
+    names the complete half; the curve and the notes follow the choice.
     ``exec_()`` returns ``QDialog.Accepted`` only when Export is pressed, so
     the caller can leave the disk untouched after a Cancel.
+
+    Attributes:
+        asm: The AssemblyResult shown.
+        balances: The balance for each complete half, {} when none is possible.
+        chosen_keep: "positive" or "negative", the half kept as recorded;
+            None when no balance is possible.
+        shown_notes: The notes under the plot now, for the saved picture.
     """
 
-    def __init__(self, time, flow, n_images, parent=None):
+    # Above 10 percent the composed half differed that much from the
+    # complete half, so the extra flow or the breath is probably off.
+    FACTOR_CAUTION = (0.9, 1.1)
+
+    def __init__(self, asm, balances, default_keep, notes, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Synthetic Profile Preview")
-        self.resize(640, 440)
+        self.setWindowTitle("Composed Breath Preview")
+        self.resize(820, 600)
+        self.asm = asm
+        self.balances = dict(balances)
+        self.chosen_keep = default_keep if self.balances else None
+        self._notes = list(notes)
+        self.shown_notes = []
         layout = QVBoxLayout(self)
 
-        fig = Figure(figsize=(6, 3.5))
-        canvas = FigureCanvasQTAgg(fig)
-        ax = fig.add_subplot(111)
-        ax.plot(time, flow, "b-", linewidth=0.8)
-        ax.axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
-        ax.set_xlabel("Synthetic time (s)")
-        ax.set_ylabel("Mass flow (kg/s)")
-        ax.set_title(f"Assembled profile: {len(flow)} samples, {n_images} images")
-        ax.grid(True, alpha=0.3)
-        fig.tight_layout()
-        layout.addWidget(canvas)
+        self.figure = Figure(figsize=(8, 4.4))
+        self.canvas = FigureCanvasQTAgg(self.figure)
+        layout.addWidget(self.canvas)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Complete half, kept as recorded:"))
+        self.keep_buttons = {}
+        group = QButtonGroup(self)
+        for keep in ("positive", "negative"):
+            button = QRadioButton(SIDE_NAMES[keep])
+            button.setEnabled(bool(self.balances))
+            button.setChecked(keep == self.chosen_keep)
+            button.toggled.connect(lambda on, k=keep: on and self._choose(k))
+            group.addButton(button)
+            row.addWidget(button)
+            self.keep_buttons[keep] = button
+        row.addStretch(1)
+        layout.addLayout(row)
+
+        self.caution_label = QLabel("")
+        self.caution_label.setObjectName("warningBox")
+        self.caution_label.setWordWrap(True)
+        layout.addWidget(self.caution_label)
 
         layout.addWidget(QLabel(
             "This is the profile that will be written. Export saves it, "
             "Cancel changes nothing."
         ))
-
         buttons = QDialogButtonBox()
         self.export_button = buttons.addButton("Export", QDialogButtonBox.AcceptRole)
         self.cancel_button = buttons.addButton("Cancel", QDialogButtonBox.RejectRole)
         self.export_button.setDefault(True)
+        self.export_button.setEnabled(bool(self.balances))
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+        self._redraw()
+
+    def _choose(self, keep: str) -> None:
+        self.chosen_keep = keep
+        self._redraw()
+
+    def shown_flow(self):
+        """The flow on screen now: the one Export writes."""
+        if self.chosen_keep is None:
+            return self.asm.flow
+        return self.balances[self.chosen_keep].flow
+
+    def _redraw(self) -> None:
+        caution = ""
+        if self.chosen_keep is None:
+            notes = list(self._notes)
+            caution = (
+                "Every sample lies on one side of zero, so in and out cannot "
+                "be matched and nothing can be written. Check the drift "
+                "correction breath and the frames, then export again."
+            )
+        else:
+            balance = self.balances[self.chosen_keep]
+            notes = self._notes + balance_notes(balance, self.chosen_keep, self.asm.time)
+            low, high = self.FACTOR_CAUTION
+            if not low <= balance.factor <= high:
+                caution = (
+                    f"The scale factor is {balance.factor:.3f}, more than 10 percent "
+                    "from 1. The composed half differed that much before "
+                    "scaling, so check the extra flow and the drift correction breath."
+                )
+        self.shown_notes = notes
+        draw_frame_order(self.figure, self.asm.time, self.shown_flow(),
+                         self.asm.frames, self.asm.extra_spans, notes)
+        self.canvas.draw_idle()
+        self.caution_label.setText(caution)
+        self.caution_label.setVisible(bool(caution))
 
 
 class QuickGuideDialog(QDialog):
@@ -118,8 +188,9 @@ class ExportResultDialog(QDialog):
     """Lists what an export wrote, with any warning shown above the details.
 
     ``report`` holds ``folder`` (Path), ``files`` (list of Path), ``summary``
-    (list of label and value pairs), ``warnings`` (list of str) and ``plot``
-    (Path of a picture of the exported data, or None).
+    (list of label and value pairs), ``errors`` (list of str, optional: a file
+    that was written but must not be used, shown in red), ``warnings`` (list
+    of str) and ``plot`` (Path of a picture of the exported data, or None).
     """
 
     PLOT_WIDTH = 620
@@ -129,19 +200,25 @@ class ExportResultDialog(QDialog):
         self.setWindowTitle("Export complete")
         self._folder = Path(report["folder"])
         files = list(report.get("files", []))
+        errors = list(report.get("errors", []))
         warnings = list(report.get("warnings", []))
         layout = QVBoxLayout(self)
 
         heading = QLabel(f"Wrote {len(files)} file{'s' if len(files) != 1 else ''} to")
         heading.setObjectName("dialogHeading")
         layout.addWidget(heading)
-        folder_label = QLabel(str(self._folder))
-        folder_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        folder_label.setWordWrap(True)
-        layout.addWidget(folder_label)
+        self.folder_label = QLabel(str(self._folder))
+        self.folder_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.folder_label.setWordWrap(True)
+        layout.addWidget(self.folder_label)
 
-        # Warnings come first: a missing pressure profile used to sit at the
-        # far end of a long status bar line.
+        # Errors, then warnings, come first: a missing pressure profile used
+        # to sit at the far end of a long status bar line.
+        self.error_label = QLabel("\n".join(errors))
+        self.error_label.setObjectName("errorBox")
+        self.error_label.setWordWrap(True)
+        self.error_label.setVisible(bool(errors))
+        layout.addWidget(self.error_label)
         self.warning_label = QLabel("\n".join(warnings))
         self.warning_label.setObjectName("warningBox")
         self.warning_label.setWordWrap(True)
@@ -153,7 +230,16 @@ class ExportResultDialog(QDialog):
             self.file_list.addItem(Path(path).name)
         row_height = self.file_list.sizeHintForRow(0) if files else 18
         self.file_list.setFixedHeight(max(1, len(files)) * row_height + 8)
-        layout.addWidget(self.file_list)
+
+        # The long parts scroll; the folder, the warnings and the buttons stay
+        # in view. The composed breath panel (a picture and the balance rows)
+        # was taller than a laptop screen. It opened at its layout minimum,
+        # which counts a wrapped folder path as one line, and the picture
+        # covered the last summary row.
+        page = QWidget()
+        body = QVBoxLayout(page)
+        body.setContentsMargins(0, 0, 0, 0)
+        body.addWidget(self.file_list)
 
         # One wrapped label holding a two column table. Separate wrapped
         # labels in a form layout were given one line of height each, so a
@@ -174,17 +260,25 @@ class ExportResultDialog(QDialog):
         # given to it outright; a wider dialog only needs less.
         self.summary_label.setMinimumHeight(
             self.summary_label.heightForWidth(self.PLOT_WIDTH) + 4)
-        layout.addWidget(self.summary_label)
+        body.addWidget(self.summary_label)
 
+        self.plot_label = None
         plot = report.get("plot")
         if plot is not None and Path(plot).exists():
             pixmap = QPixmap(str(plot))
             if not pixmap.isNull():
-                picture = QLabel()
-                picture.setPixmap(
+                self.plot_label = QLabel()
+                self.plot_label.setPixmap(
                     pixmap.scaledToWidth(self.PLOT_WIDTH, Qt.SmoothTransformation)
                 )
-                layout.addWidget(picture)
+                body.addWidget(self.plot_label)
+        body.addStretch(1)
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setFrameShape(QFrame.NoFrame)
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll.setWidget(page)
+        layout.addWidget(self.scroll, 1)
 
         buttons = QDialogButtonBox()
         self.open_folder_button = buttons.addButton(
@@ -195,6 +289,24 @@ class ExportResultDialog(QDialog):
         self.open_folder_button.clicked.connect(self._open_folder)
         buttons.accepted.connect(self.accept)
         layout.addWidget(buttons)
+        self._fit_to_screen(page)
+
+    def _fit_to_screen(self, page: QWidget) -> None:
+        """Open tall enough for every part where the screen allows.
+
+        The width leaves room for the scroll bar, so a page that scrolls is
+        not cut on the right. The bar's own width is used: the style metric
+        gave 14 px for a bar drawn 19 px wide.
+        """
+        margins = self.layout().contentsMargins()
+        width = (self.PLOT_WIDTH + margins.left() + margins.right()
+                 + self.scroll.verticalScrollBar().sizeHint().width())
+        self.scroll.setMinimumHeight(page.layout().totalHeightForWidth(self.PLOT_WIDTH))
+        self.layout().invalidate()
+        wanted = self.layout().totalHeightForWidth(width)
+        self.scroll.setMinimumHeight(0)
+        screen = self.screen().availableGeometry().height() if self.screen() else 800
+        self.resize(width, min(wanted, int(screen * 0.9)))
 
     def _open_folder(self) -> None:
         """Show the output folder in the system file browser."""

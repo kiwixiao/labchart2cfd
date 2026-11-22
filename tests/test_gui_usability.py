@@ -1082,7 +1082,7 @@ def test_the_landmark_status_names_the_image_the_export_will_cut(win, mat_file):
 def test_a_ready_cycle_export_is_not_refused_afterwards(win, qapp, mat_file, tmp_path, monkeypatch):
     """With Start typed after labelling, the line said Ready and Export then
     answered 'Grid Out of Sync', naming a button that no longer exists."""
-    import time
+    from PyQt5.QtWidgets import QDialog
     _two_cycle_labels(win, mat_file)
     win._set_output_dir(tmp_path / "out")
     win.start_spin.setValue(2.4)                   # labels follow: images 5, 6 from 3.2 s
@@ -1093,15 +1093,19 @@ def test_a_ready_cycle_export_is_not_refused_afterwards(win, qapp, mat_file, tmp
     )
     assert win.export_hint.text().startswith("Ready to export")
 
-    win._export()
-    deadline = time.time() + 30
-    while win._last_export_report is None and not refused and time.time() < deadline:
-        qapp.processEvents()
-        time.sleep(0.01)
+    shown = []
+    monkeypatch.setattr("labchart2cfd.gui.dialogs.AssemblyPreviewDialog.exec_",
+                        lambda dialog: shown.append(dialog) or QDialog.Accepted)
 
-    assert refused == [] and win._last_export_report is not None
-    if win._result_dialog is not None:
-        win._result_dialog.close()
+    win._export()
+
+    # Nothing refused it: the composed breath reached the preview. Its two
+    # frames lie wholly above zero, so in and out cannot be matched (design
+    # 2026-11-22, 4.7); the preview offers no Export and the status says why.
+    assert refused == []
+    assert [f.original_image for f in shown[0].asm.frames] == [5, 6]
+    assert shown[0].balances == {} and win._last_export_report is None
+    assert "one side of zero" in win.status_bar.currentMessage()
 
 
 # ------------------------------------------------------ cautions that were missing

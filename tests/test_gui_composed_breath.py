@@ -4,7 +4,10 @@ The fixture recording has a scan step from 2 s to 5 s on the trigger channel.
 """
 from pathlib import Path
 
+import numpy as np
 import pytest
+from PyQt5.QtWidgets import QDialog
+from scipy.integrate import trapezoid
 
 from labchart2cfd.gui import app as gui_app
 from tests.gui_helpers import ClickEvent, choose_ct_method, open_block
@@ -142,33 +145,74 @@ def _values(path):
     return [line.split(",")[1] for line in Path(path).read_text().splitlines()[1:]]
 
 
+def _times(path):
+    """The time column of a profile CSV, as written (exact text)."""
+    return [line.split(",")[0] for line in Path(path).read_text().splitlines()[1:]]
+
+
+def _fmt(values):
+    """Values as the profile writer prints them."""
+    return ["%.9e" % v for v in values]
+
+
+def _capture_preview(monkeypatch, choose=None, answer=QDialog.Accepted):
+    """Stand in for the user at the preview: keep the dialog, optionally
+    choose the complete half, then press Export (or Cancel)."""
+    shown = []
+
+    def fake_exec(dialog):
+        shown.append(dialog)
+        if choose is not None:
+            dialog.keep_buttons[choose].click()
+        return answer
+    monkeypatch.setattr("labchart2cfd.gui.dialogs.AssemblyPreviewDialog.exec_", fake_exec)
+    return shown
+
+
+def _chosen_flow(dialog):
+    return dialog.balances[dialog.chosen_keep].flow
+
+
 @pytest.mark.parametrize("dt_ms", [200.0, 100.0])
-def test_cycle_export_matches_the_old_route_sample_by_sample(win, qapp, mat_file, tmp_path, dt_ms):
+def test_cycle_export_matches_the_old_route_sample_by_sample(
+        win, qapp, mat_file, tmp_path, dt_ms, monkeypatch):
     """The old route cut each run of images with a floating point time mask
     and took one sample wrong at a run edge. At 200 ms it kept the first
     sample of image 5 after the last run (0.8 s fell just under the bound).
     At 100 ms it also dropped the first sample of image 4, because 3 x 0.1 is
     0.30000000000000004 in floating point. The new route cuts whole slices
     by sample index, as Reorder parts always did. Every other sample is the
-    same text, value for value, in flow and pressure."""
-    _cycle_export(win, qapp, mat_file, tmp_path, dt_ms)
+    same text, value for value, in flow and pressure.
 
-    for name, golden in (("FlowProfile", "flow"), ("PressureProfile", "pressure")):
-        new = _values(tmp_path / f"S1{name}.csv")
-        old = _values(_REFERENCE / f"composed_cycle_{dt_ms:.0f}ms_{golden}.csv")
+    The flow compared is the composed array before in equals out scales a
+    half (4.7); the written flow is that array with one half scaled."""
+    shown = _capture_preview(monkeypatch)
+    _cycle_export(win, qapp, mat_file, tmp_path, dt_ms)
+    composed = _fmt(shown[0].asm.flow)
+
+    for name, new in (("flow", composed), ("pressure", _values(tmp_path / "S1PressureProfile.csv"))):
+        old = _values(_REFERENCE / f"composed_cycle_{dt_ms:.0f}ms_{name}.csv")
         if dt_ms == 200.0:
             assert len(new) == 16 * 20 and new == old[:-1]
         else:
             assert len(new) == 16 * 10
             assert new[1:120] == old[:119] and new[120:] == old[119:-1]
+    assert _values(tmp_path / "S1FlowProfile.csv") == _fmt(_chosen_flow(shown[0]))
 
 
-def test_parts_export_flow_is_byte_identical(win, qapp, mat_file, tmp_path):
+def test_parts_export_flow_is_byte_identical(win, qapp, mat_file, tmp_path, monkeypatch):
+    """Pressure is byte identical. The composed flow before in equals out is
+    the old route's flow, value for value; the written flow is it with the
+    named half scaled (4.7, the scale always runs)."""
+    shown = _capture_preview(monkeypatch)
     _parts_export(win, qapp, mat_file, tmp_path)
 
-    for name, golden in (("FlowProfile", "flow"), ("PressureProfile", "pressure")):
-        written = (tmp_path / f"S1{name}.csv").read_bytes()
-        assert written == (_REFERENCE / f"composed_parts_200ms_{golden}.csv").read_bytes()
+    written = (tmp_path / "S1PressureProfile.csv").read_bytes()
+    assert written == (_REFERENCE / "composed_parts_200ms_pressure.csv").read_bytes()
+    golden_flow = _REFERENCE / "composed_parts_200ms_flow.csv"
+    assert _fmt(shown[0].asm.flow) == _values(golden_flow)
+    assert _times(tmp_path / "S1FlowProfile.csv") == _times(golden_flow)
+    assert _values(tmp_path / "S1FlowProfile.csv") == _fmt(_chosen_flow(shown[0]))
     old = (_REFERENCE / "composed_parts_200ms_reorder_map.csv").read_text().splitlines()
     new = (tmp_path / "S1ImageReorderMap.csv").read_text().splitlines()
     assert [",".join(line.split(",")[:3]) for line in new] == old
@@ -187,7 +231,7 @@ def test_cycle_export_writes_the_frame_table_and_keeps_its_old_files(win, qapp, 
 
     names = {p.name for p in report["files"]}
     assert names == {"S1FlowProfile.csv", "S1PressureProfile.csv", "S1ImageReorderMap.csv",
-                     "S1_trigger_info.txt", "S1_sanity_check.png"}
+                     "S1_trigger_info.txt", "S1_frame_order.png", "S1_sanity_check.png"}
     assert all(p.exists() for p in report["files"])
     header = (tmp_path / "S1ImageReorderMap.csv").read_text().splitlines()[0]
     assert header.endswith("profile_start_s,profile_end_s,extra_flow_s,extra_flow_until_s")
@@ -601,3 +645,145 @@ def test_a_redraw_names_the_extra_flow(win, mat_file):
     win.extra_until_spin.setValue(3.8)
 
     assert "the extra flow after frame 12" in win._marks_at_risk(include_parts=True)
+
+
+# ----------------------------------- 4.5 to 4.7: preview, picture, in equals out
+
+def _texts(dialog, gid):
+    return [t.get_text() for t in dialog.figure.axes[0].texts if t.get_gid() == gid]
+
+
+def test_preview_labels_new_and_original_numbers(win, qapp, mat_file, tmp_path, monkeypatch):
+    shown = _capture_preview(monkeypatch)
+    _cycle_export(win, qapp, mat_file, tmp_path, 100.0)
+
+    assert {"1", "12", "13", "16"} <= set(_texts(shown[0], "frame"))
+    assert {"4", "15", "1"} <= set(_texts(shown[0], "image"))
+
+
+def test_the_preview_curve_is_the_written_array(win, qapp, mat_file, tmp_path, monkeypatch):
+    shown = _capture_preview(monkeypatch)
+    _parts_export(win, qapp, mat_file, tmp_path)
+
+    (curve,) = [line for line in shown[0].figure.axes[0].lines if line.get_gid() == "flow"]
+    assert _fmt(curve.get_ydata()) == _values(tmp_path / "S1FlowProfile.csv")
+
+
+def test_preview_shades_extra_flow(win, qapp, mat_file, tmp_path, monkeypatch):
+    shown = _capture_preview(monkeypatch)
+    _label_cycle(win, mat_file)
+    win.extra_frame_spin.setValue(12)
+    win.extra_until_spin.setValue(3.8)
+    win.subject_edit.setText("S1")
+    win._set_output_dir(tmp_path)
+
+    win._export()
+    _wait_for_report(win, qapp)
+
+    axes = shown[0].figure.axes[0]
+    assert [p for p in axes.patches if p.get_gid() == "extra"]
+    (label,) = _texts(shown[0], "extra_label")
+    assert "0.300 s" in label and "no image" in label
+
+
+def test_the_written_flow_has_zero_net_volume(win, qapp, mat_file, tmp_path):
+    report = _parts_export(win, qapp, mat_file, tmp_path)
+
+    data = np.loadtxt(tmp_path / "S1FlowProfile.csv", delimiter=",", skiprows=1)
+    net_ml = trapezoid(data[:, 1], data[:, 0]) / 1.2 * 1e6
+    assert abs(net_ml) < 0.01
+    summary = dict(report["summary"])
+    assert summary["Net volume"].startswith("0.000 mL")
+    info = _info(tmp_path / "S1_trigger_info.txt")
+    assert {"complete_half", "volume_above_zero_mL_before_scaling",
+            "volume_below_zero_mL_before_scaling", "composed_half_scale_factor",
+            "volume_above_zero_mL", "volume_below_zero_mL", "net_volume_mL"} <= set(info)
+    assert info["complete_half"] == "above zero"
+    assert abs(float(info["net_volume_mL"])) < 0.01
+
+
+@pytest.mark.parametrize("keep", ["positive", "negative"])
+def test_the_complete_half_is_written_unchanged(win, qapp, mat_file, tmp_path, monkeypatch, keep):
+    shown = _capture_preview(monkeypatch, choose=keep)
+    _parts_export(win, qapp, mat_file, tmp_path)
+
+    composed = shown[0].asm.flow
+    kept = composed > 0 if keep == "positive" else composed < 0
+    written = np.array(_values(tmp_path / "S1FlowProfile.csv"))
+    assert list(written[kept]) == _fmt(composed[kept])
+    assert list(written[~kept & (composed != 0)]) != _fmt(composed[~kept & (composed != 0)])
+    side = "above zero" if keep == "positive" else "below zero"
+    assert _info(tmp_path / "S1_trigger_info.txt")["complete_half"] == side
+
+
+def test_the_frame_order_picture_is_saved(win, qapp, mat_file, tmp_path):
+    report = _parts_export(win, qapp, mat_file, tmp_path)
+
+    picture = tmp_path / "S1_frame_order.png"
+    assert picture in report["files"]
+    assert picture.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert report["plot"] == picture
+
+
+def test_a_read_back_that_is_not_zero_is_red(win, qapp, mat_file, tmp_path, monkeypatch):
+    """A writer that changed the values after the balance is caught, and named
+    in red: the file is wrong, which is more than a caution."""
+    from labchart2cfd.io import csv_export
+    real = csv_export.export_flow_csv
+    monkeypatch.setattr(csv_export, "export_flow_csv",
+                        lambda path, time, flow, *a, **k: real(path, time, flow + 1e-5, *a, **k))
+
+    report = _parts_export(win, qapp, mat_file, tmp_path)
+
+    assert any("net volume" in e and "read back" in e for e in report["errors"])
+    shown = win._result_dialog.error_label
+    assert shown.objectName() == "errorBox" and not shown.isHidden()
+    assert "net volume" in shown.text()
+
+
+def _composed(offset):
+    """A 2 s breath on a 200 ms grid, shifted by offset (kg/s)."""
+    from labchart2cfd.processing.profile_assembly import ProfilePart, assemble_parts
+    t = np.arange(0, 2.0, 0.01)
+    flow = 4e-4 * np.sin(2 * np.pi * 0.5 * t) + offset
+    return assemble_parts(flow, [ProfilePart(1, 10)], dt=0.2, sample_rate=100.0, total_images=10)
+
+
+def test_a_factor_far_from_one_is_cautioned(qapp):
+    from labchart2cfd.gui.dialogs import AssemblyPreviewDialog
+    from labchart2cfd.processing.volume_balance import balance_choices
+    near, far = _composed(0.0), _composed(1e-4)
+
+    calm = AssemblyPreviewDialog(near, balance_choices(near.flow, 100.0), "positive", [])
+    loud = AssemblyPreviewDialog(far, balance_choices(far.flow, 100.0), "positive", [])
+
+    assert calm.caution_label.isHidden()
+    assert not loud.caution_label.isHidden()
+    assert "10 percent" in loud.caution_label.text()
+
+
+def test_a_half_with_no_volume_is_named_not_crashed(qapp):
+    from labchart2cfd.gui.dialogs import AssemblyPreviewDialog
+    from labchart2cfd.processing.volume_balance import balance_choices
+    one_sided = _composed(1e-3)                       # every sample above zero
+
+    dialog = AssemblyPreviewDialog(one_sided, balance_choices(one_sided.flow, 100.0),
+                                   "positive", [])
+
+    assert not dialog.export_button.isEnabled()
+    assert "one side of zero" in dialog.caution_label.text()
+    assert not dialog.caution_label.isHidden()
+
+
+def test_choosing_the_other_half_redraws_the_curve(qapp):
+    from labchart2cfd.gui.dialogs import AssemblyPreviewDialog
+    from labchart2cfd.processing.volume_balance import balance_choices
+    asm = _composed(1e-5)
+    choices = balance_choices(asm.flow, 100.0)
+    dialog = AssemblyPreviewDialog(asm, choices, "positive", [])
+
+    dialog.keep_buttons["negative"].click()
+
+    assert dialog.chosen_keep == "negative"
+    (curve,) = [line for line in dialog.figure.axes[0].lines if line.get_gid() == "flow"]
+    assert np.array_equal(curve.get_ydata(), choices["negative"].flow)

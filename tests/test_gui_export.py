@@ -240,6 +240,22 @@ def test_result_dialog_hides_the_warning_box_when_there_are_none(qapp, tmp_path)
     dialog = ExportResultDialog(report)
 
     assert dialog.warning_label.isHidden()
+    assert dialog.error_label.isHidden()
+
+
+def test_result_dialog_shows_errors_in_red_above_the_warnings(qapp, tmp_path):
+    report = {"folder": tmp_path, "files": [], "summary": [],
+              "errors": ["The net volume read back is 0.020 mL."],
+              "warnings": ["No pressure profile was produced."], "plot": None}
+
+    dialog = ExportResultDialog(report)
+    dialog.show()
+    qapp.processEvents()
+
+    assert dialog.error_label.objectName() == "errorBox"
+    assert not dialog.error_label.isHidden() and "0.020 mL" in dialog.error_label.text()
+    assert dialog.error_label.y() < dialog.warning_label.y()
+    dialog.close()
 
 
 # ---------------------------------------------------------------- readiness
@@ -295,13 +311,17 @@ def test_export_hint_asks_for_a_part_in_the_parts_method(win, mat_file):
 
 def test_preview_offers_export_and_cancel(qapp):
     """The preview had only Close, and the export ran after it regardless."""
-    t = np.linspace(0.0, 1.0, 101)
+    from labchart2cfd.processing.profile_assembly import ProfilePart, assemble_parts
+    from labchart2cfd.processing.volume_balance import balance_choices
+    t = np.arange(0.0, 2.0, 0.01)
+    asm = assemble_parts(np.sin(np.pi * t), [ProfilePart(1, 10)], dt=0.2,
+                         sample_rate=100.0, total_images=10)
 
-    accepted = AssemblyPreviewDialog(t, np.sin(t), 5)
+    accepted = AssemblyPreviewDialog(asm, balance_choices(asm.flow, 100.0), "positive", [])
     accepted.export_button.click()
     assert accepted.result() == QDialog.Accepted
 
-    rejected = AssemblyPreviewDialog(t, np.sin(t), 5)
+    rejected = AssemblyPreviewDialog(asm, balance_choices(asm.flow, 100.0), "positive", [])
     rejected.cancel_button.click()
     assert rejected.result() == QDialog.Rejected
 
@@ -340,7 +360,7 @@ def test_accepting_the_preview_writes_the_profile_and_the_reorder_map(
     # The details file is written by every CT export (design 2026-11-22, 4.3).
     assert [p.name for p in report["files"]] == [
         "S1FlowProfile.csv", "S1PressureProfile.csv", "S1ImageReorderMap.csv",
-        "S1_trigger_info.txt",
+        "S1_trigger_info.txt", "S1_frame_order.png",
     ]
     assert all(p.exists() for p in report["files"])
     assert win._result_dialog is not None
@@ -365,3 +385,58 @@ def test_export_asks_when_a_channel_name_contradicts_its_role(
     _answer_question(monkeypatch, QMessageBox.Yes, asked)
     win._export()
     assert calls == ["execute"]
+
+
+
+def test_a_long_result_panel_fits_the_screen_and_nothing_overlaps(qapp, tmp_path):
+    """The composed breath panel (its frame order picture, the balance rows
+    and a long folder path) was taller than the screen. It opened at its
+    layout minimum, which counts a wrapped folder path as one line, so the
+    picture covered the last summary row."""
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+    from matplotlib.figure import Figure
+
+    picture = tmp_path / "S1_frame_order.png"
+    fig = Figure(figsize=(10, 5.5), dpi=150)
+    FigureCanvasAgg(fig)
+    fig.add_subplot().plot([0, 1], [0, 1])
+    fig.savefig(str(picture))
+    folder = tmp_path.joinpath(*["CT exports of the study"] * 5)   # wraps at its spaces
+    previous = qapp.style().objectName()
+    qapp.setStyle("Fusion")                  # the application's style (apply_theme)
+    try:
+        _check_long_result_panel(qapp, picture, folder)
+    finally:
+        qapp.setStyle(previous)
+
+
+def _check_long_result_panel(qapp, picture, folder):
+    from PyQt5.QtCore import QPoint
+    rows = [(f"Row {i}", "a value long enough to wrap onto a second line in the "
+                         "summary table of the export result panel") for i in range(20)]
+    dialog = ExportResultDialog({
+        "folder": folder, "files": [folder / f"S1_{i}.csv" for i in range(6)],
+        "summary": rows, "warnings": ["A warning that stays in view."], "plot": picture,
+    })
+    dialog.show()
+    qapp.processEvents()
+
+    assert dialog.height() <= dialog.screen().availableGeometry().height()
+    # The page scrolls, and its scroll bar does not cut it on the right.
+    assert dialog.scroll.widget().width() <= dialog.scroll.viewport().width()
+
+    def span(widget, ref):
+        top = widget.mapTo(ref, QPoint(0, 0)).y()
+        return top, top + widget.height()
+
+    # Each part ends before the next begins: in the dialog for the parts that
+    # stay in view, in the scrolled page for the long ones.
+    outside = [dialog.folder_label, dialog.warning_label, dialog.scroll, dialog.close_button]
+    inside = [dialog.file_list, dialog.summary_label, dialog.plot_label]
+    for parts, ref in ((outside, dialog), (inside, dialog.scroll.widget())):
+        spans = [span(w, ref) for w in parts]
+        assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:])), spans
+    assert span(dialog.close_button, dialog)[1] <= dialog.height()
+    label = dialog.summary_label
+    assert label.height() >= label.heightForWidth(label.width())
+    dialog.close()

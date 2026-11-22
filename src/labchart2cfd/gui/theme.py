@@ -72,6 +72,10 @@ QLabel#warningBox {{
     background: #fff4d6; color: #6b4e00;
     border: 1px solid #e0a100; border-radius: 4px; padding: 8px;
 }}
+QLabel#errorBox {{
+    background: #fde8e6; color: #8c1d18; font-weight: bold;
+    border: 1px solid {EXPORT_HINT_COLORS['blocked']}; border-radius: 4px; padding: 8px;
+}}
 
 QFrame#exportFooter {{ background: #e1e5ec; border-top: 1px solid {BORDER}; }}
 QPushButton#primaryButton {{

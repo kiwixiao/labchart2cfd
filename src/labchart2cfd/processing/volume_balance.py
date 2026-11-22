@@ -16,6 +16,7 @@ stays between the same two samples, and no time is changed.
 """
 
 from dataclasses import dataclass
+from typing import Dict, List, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
@@ -84,6 +85,67 @@ def balance_halves(flow: NDArray[np.float64], sample_rate: float, keep: str) -> 
         kept_volume=kept_volume,
         scaled_volume_before=scaled_volume,
     )
+
+
+def balance_choices(flow: NDArray[np.float64], sample_rate: float) -> Dict[str, BalanceResult]:
+    """Both balances the preview offers, keyed by the half kept, or none.
+
+    When one half holds no volume, keeping the other would scale nothing and
+    keeping the empty one would scale the other to zero. Neither is a breath
+    with in equal to out, so no choice is offered.
+
+    Args:
+        flow: Uniformly sampled flow of one breath.
+        sample_rate: Samples per second of ``flow``.
+
+    Returns:
+        {"positive": ..., "negative": ...}, or {} when a half holds no volume.
+    """
+    try:
+        return {keep: balance_halves(flow, sample_rate, keep) for keep in _HALVES}
+    except ValueError:
+        return {}
+
+
+def default_keep(
+    flow: NDArray[np.float64], sample_rate: float, extra_spans: List[Tuple[float, float]]
+) -> str:
+    """The complete half to offer first: the one the extra flow is not in.
+
+    The extra flow belongs to the composed half. Its side of zero is the sign
+    of the mean flow over the extra flow samples. With no extra flow, the
+    half above zero.
+
+    Args:
+        flow: The composed breath.
+        sample_rate: Samples per second of ``flow``.
+        extra_spans: (start, end) in profile time of each extra flow.
+
+    Returns:
+        "positive" or "negative".
+    """
+    flow = np.asarray(flow, dtype=float)
+    samples = [flow[int(round(a * sample_rate)):int(round(b * sample_rate))]
+               for a, b in extra_spans]
+    samples = [chunk for chunk in samples if chunk.size]
+    if not samples:
+        return "positive"
+    return "negative" if float(np.mean(np.concatenate(samples))) > 0 else "positive"
+
+
+def half_volumes(time: NDArray[np.float64], flow: NDArray[np.float64]) -> Tuple[float, float]:
+    """Signed trapezoid volumes of the samples above and below zero.
+
+    Integrated over the given time column, so a file read back is measured
+    on its own time axis.
+
+    Returns:
+        (above, below); below is zero or negative.
+    """
+    flow = np.asarray(flow, dtype=float)
+    above = float(trapezoid(np.where(flow > 0, flow, 0.0), time))
+    below = float(trapezoid(np.where(flow < 0, flow, 0.0), time))
+    return above, below
 
 
 def mass_volume_to_ml(volume_kg: float, density: float = AIR_DENSITY_KG_M3) -> float:

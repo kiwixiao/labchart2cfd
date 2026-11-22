@@ -65,8 +65,12 @@ from labchart2cfd.gui.widgets import (
 )
 from labchart2cfd.io.labchart import LabChartData
 from labchart2cfd.io.recording import RECORDING_SUFFIXES, load_recording
+from labchart2cfd.gui.frame_order_plot import SIDE_NAMES, draw_frame_order
 from labchart2cfd.processing.profile_assembly import (
     ProfilePart, assemble_parts, extra_flow_problems,
+)
+from labchart2cfd.processing.volume_balance import (
+    balance_choices, default_keep, half_volumes, mass_volume_to_ml,
 )
 from labchart2cfd.processing.rearrangement import (
     compute_image_count,
@@ -2774,7 +2778,8 @@ class FlowProfileApp(QMainWindow):
                 and not self.data.is_block_empty(pressure_row, self.col_spin.value())):
             names.append(f"{subject}PressureProfile.csv")
         if self._exports_by_assembly():
-            names += [f"{subject}ImageReorderMap.csv", f"{subject}_trigger_info.txt"]
+            names += [f"{subject}ImageReorderMap.csv", f"{subject}_trigger_info.txt",
+                      f"{subject}_frame_order.png"]
             if self._ct_method() == "cycle":
                 names.append(f"{subject}_sanity_check.png")
         else:
@@ -5397,6 +5402,20 @@ class FlowProfileApp(QMainWindow):
         return [dataclasses.replace(part, extra_until_s=self._ct_cycle_extra.get(frame))
                 for part, frame in zip(parts, self._part_end_frames(parts))]
 
+    @staticmethod
+    def _composed_notes(drift_source, drift_range, drift_error, asm) -> List[str]:
+        """The lines under the preview: where the drift came from, and each
+        extra flow. The balance lines are added by the preview itself."""
+        where = "your breath" if drift_source == "your breath" else "the image grid"
+        notes = [f"Drift measured on {where}, {drift_range[0]:.3f} s to "
+                 f"{drift_range[1]:.3f} s; {drift_error:.6f} L/s removed."]
+        for frame in asm.frames:
+            if frame.extra_flow_until_s is not None:
+                notes.append(
+                    f"Extra flow after frame {frame.new_frame}: {frame.extra_flow_s:.3f} s "
+                    f"of recorded flow, to {frame.extra_flow_until_s:.3f} s.")
+        return notes
+
     def _ct_details_entries(self, *, subject, method, result, asm, grid, processed,
                             drift_range, drift_source):
         """Every fact of a composed CT export, for the details file.
@@ -5583,20 +5602,41 @@ class FlowProfileApp(QMainWindow):
 
         # Preview. Nothing is written unless Export is pressed there; the
         # preview used to have only Close and the export ran regardless.
+        # In equals out (4.7): the user names the complete half, the other is
+        # scaled, and the preview shows the array that will be written.
+        balances = balance_choices(asm.flow, result.sample_rate)
         preview = AssemblyPreviewDialog(
-            asm.time, asm.flow, len(asm.reorder_map), parent=self
+            asm, balances, default_keep(asm.flow, result.sample_rate, asm.extra_spans),
+            self._composed_notes(drift_source, drift_range, result.drift_error, asm),
+            parent=self,
         )
-        if preview.exec_() != QDialog.Accepted:
+        accepted = preview.exec_() == QDialog.Accepted
+        if not balances:
+            # Known only once the breath is composed, so it is named here and
+            # in the preview, whose Export is disabled for it.
+            self.status_bar.showMessage(
+                "Nothing was written: every sample of the composed breath lies on "
+                "one side of zero, so in and out cannot be matched.")
+            return
+        if not accepted:
             self.status_bar.showMessage("Export cancelled. No file was written.")
             return
+        keep = preview.chosen_keep
+        balance = balances[keep]
+        flow_out = balance.flow
 
         # Export
         plot_file = None
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
             flow_file = output_dir / f"{subject}FlowProfile.csv"
-            export_flow_csv(flow_file, asm.time, asm.flow)
+            export_flow_csv(flow_file, asm.time, flow_out)
             written = [flow_file]
+            # Read the written file back: in, out and net are measured on
+            # what the CFD will read, not on the array in memory.
+            back = np.loadtxt(flow_file, delimiter=",", skiprows=1, ndmin=2)
+            above_ml, below_ml = (mass_volume_to_ml(v) for v in half_volumes(back[:, 0], back[:, 1]))
+            net_ml = round(above_ml + below_ml, 3) + 0.0
             if asm.pressure is not None:
                 pfile = output_dir / f"{subject}PressureProfile.csv"
                 export_pressure_csv(pfile, asm.time, asm.pressure)
@@ -5609,15 +5649,34 @@ class FlowProfileApp(QMainWindow):
                 grid=meta, processed=(start_t, process_end), drift_range=drift_range,
                 drift_source=drift_source,
             )
+            kept_ml = mass_volume_to_ml(balance.kept_volume)
+            scaled_ml = mass_volume_to_ml(balance.scaled_volume_before)
+            above_before, below_before = (
+                (kept_ml, scaled_ml) if keep == "positive" else (scaled_ml, kept_ml))
+            picture = output_dir / f"{subject}_frame_order.png"
+            details += [
+                ("complete_half", SIDE_NAMES[keep]),
+                ("volume_above_zero_mL_before_scaling", f"{abs(above_before):.6f}"),
+                ("volume_below_zero_mL_before_scaling", f"{abs(below_before):.6f}"),
+                ("composed_half_scale_factor", f"{balance.factor:.9f}"),
+                ("volume_above_zero_mL", f"{above_ml:.6f}"),
+                ("volume_below_zero_mL", f"{abs(below_ml):.6f}"),
+                ("net_volume_mL", f"{above_ml + below_ml:.6f}"),
+                ("frame_order_picture", picture.name),
+            ]
             info_file = output_dir / f"{subject}_trigger_info.txt"
             write_ct_details(info_file, details)
             written.append(info_file)
+            read_back = (f"Read back from {flow_file.name}: above zero {above_ml:.1f} mL, "
+                         f"below zero {abs(below_ml):.1f} mL, net {net_ml:.3f} mL.")
+            write_frame_order_picture(picture, asm, flow_out, preview.shown_notes + [read_back])
+            written.append(picture)
+            plot_file = picture
             if method == "cycle":
-                plot_file = write_sanity_plot(
+                written.append(write_sanity_plot(
                     output_dir / f"{subject}_sanity_check.png", subject,
-                    asm.time, asm.flow, asm.pressure,
-                )
-                written.append(plot_file)
+                    asm.time, flow_out, asm.pressure,
+                ))
         except Exception as exc:
             QMessageBox.critical(self, "Export Failed", str(exc))
             return
@@ -5632,6 +5691,14 @@ class FlowProfileApp(QMainWindow):
                 include_pressure, result.metadata.get("pressure_note"),
                 output_dir / f"{subject}PressureProfile.csv",
             )
+        errors = []
+        if abs(net_ml) > 0.01:
+            errors.append(
+                f"The net volume read back from {flow_file.name} is {net_ml:.3f} mL, "
+                "above the 0.01 mL tolerance. In and out do not match, so do not "
+                "use this file."
+            )
+        other = SIDE_NAMES["negative" if keep == "positive" else "positive"]
         self._show_export_result({
             "folder": output_dir,
             "files": written,
@@ -5644,9 +5711,18 @@ class FlowProfileApp(QMainWindow):
                 ("Sample rate", f"{rate:.0f} Hz"),
                 ("Samples", str(len(asm.flow))),
                 ("Drift error", f"{result.drift_error:.6f}"),
+                ("Drift measured on",
+                 f"{'your breath' if drift_source == 'your breath' else 'the image grid'}, "
+                 f"{drift_range[0]:.3f} s to {drift_range[1]:.3f} s"),
+                ("Complete half", f"{SIDE_NAMES[keep]}, kept as recorded; the half "
+                                  f"{other} scaled by {balance.factor:.4f}"),
+                ("Volume above zero", f"{above_ml:.1f} mL"),
+                ("Volume below zero", f"{abs(below_ml):.1f} mL"),
+                ("Net volume", f"{net_ml:.3f} mL, read back from the written file"),
                 ("Time", "starts at 0 in the profile; the reorder map keeps "
                          "recording time"),
             ],
+            "errors": errors,
             "warnings": warnings,
             "plot": plot_file,
         })
@@ -6009,6 +6085,22 @@ class FlowProfileApp(QMainWindow):
                 self._processing_failed.emit(f"{type(e).__name__}: {e}")
 
         Thread(target=_run, daemon=True).start()
+
+
+def write_frame_order_picture(picture: Path, asm, flow, notes: List[str]) -> Path:
+    """Save the preview's drawing of the composed breath as a PNG (4.5).
+
+    The same function draws the preview, so the saved picture is what the
+    user saw, plus the read back line.
+    """
+    from matplotlib.figure import Figure as MplFigure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    fig = MplFigure(figsize=(10, 5.5), dpi=150)
+    FigureCanvasAgg(fig)
+    draw_frame_order(fig, asm.time, flow, asm.frames, asm.extra_spans, notes)
+    fig.savefig(str(picture))
+    return picture
 
 
 def write_sanity_plot(plot_file: Path, subject: str, time, mass_flow, pressure) -> Path:
