@@ -32,6 +32,7 @@ Goals:
 - **G4** A drift correction breath picked by hand, used by all three CT methods.
 - **G5** A labeled preview of the composed profile before any file is written, saved with the export as a picture.
 - **G6** The net volume of the exported breath is shown, so the user can judge the extra flow and the picked breath together.
+- **G7** The exported breath has in = out: the half the user names as complete is kept as recorded, and the composed half is made to match its volume (decided with the user, 2026-11-22; section 4.7).
 
 Non goals:
 
@@ -70,6 +71,8 @@ Effect: the Start to End range is exactly the image grid, so `_ct_grid()` and th
 Grid offset (user's decision, 2026-11-22): it stays in Reorder parts. There the cut grid starts at Start + Grid offset, as today, and the existing amber note says when it differs from the scan window. Cycle frames and Landmarks always use the grid from Start (`_ct_grid()`); the Grid offset box sits on the parts page only and never affects them. Window offset in the parts page stays as it is. In Reorder parts, extra flow, frame times and the drift fallback range (4.4) follow the parts grid, offset included.
 
 ### 4.1a Cutting images when Temporal Res is not a whole number of samples (designer's call)
+
+Temporal Res itself does not change (the user, 2026-11-22): it shows the standard value until the user types one, and any value typed is allowed and used as typed. This section is only about where the program places each cut on its internal samples.
 
 The export resamples to 100 Hz. A Temporal Res such as 275 ms or 66.67 ms is not a whole number of samples. Today Reorder parts snaps it to 10 ms steps (`_synth_grid()`: 275 ms becomes 280 ms), so its cuts drift from the real images by 5 ms per image (75 ms by image 15). Cycle frames cuts by time masks on the typed value. The user's rule is that Temporal Res is used exactly as typed.
 
@@ -150,7 +153,9 @@ Both Cycle frames and Reorder parts show the preview before any file is written 
         ~~~~~~~ flow curve ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         0.0                1.2             1.73               2.13   profile time (s)
  Drift: your breath, 970.72 to 973.05 s, 0.012 L/s removed.
- Net volume of this breath: +3 mL.                      [Export] [Cancel]
+ Complete half: (o) inhale  ( ) exhale         [Fit extra flow]
+ In 412 mL   Out 395 mL before scaling   exhale x 1.043   Net 0.0 mL
+                                                        [Export] [Cancel]
 ```
 
 (Numbers in the sketch are placeholders, not measurements.)
@@ -165,6 +170,26 @@ Both Cycle frames and Reorder parts show the preview before any file is written 
 ### 4.6 Net volume (G6)
 
 The net volume of the exported profile in mL: the time integral of the exported flow converted back to L/s. Shown in the preview and in the result panel, next to the drift source and the removed drift.
+
+### 4.7 In equals out (G7)
+
+Why: the CFD repeats the profile breath after breath, so any net volume left accumulates every cycle. A composed breath has one complete half and one composed half. In the ENT005 case the inhale is complete (inside images 4 to 15); the exhale is composed (the end of image 15, the extra flow, images 1 to 3). The user accepts the limit this sets: the composed half is matched to the complete half, not measured.
+
+Order of operations, on the composed profile:
+
+1. Drift is removed with the picked breath (4.4), or the fallback range. This sets where zero flow is, so it decides what counts as in and what counts as out.
+2. The user names the complete half in the preview: inhale (default) or exhale.
+3. **Fit extra flow** (a button in the preview, optional): moves the end of the extra flow in the composed half until its volume is closest to the complete half's volume, using recorded flow only. The user can accept the suggested time or keep their own. Available only when the composed half contains extra flow.
+4. **Scale** (always): the samples of the composed half's sign are multiplied by one factor k so that the net volume is exactly zero. Write the profile as q = p + n, where p holds the inhale direction samples and n the exhale direction samples (each with the other direction set to 0; directions as in the recorded flow, before the export's sign inversion). With the volume taken as the trapezoid integral and the exhale as the composed half, net(k) = trapz(p) + k trapz(n), which is linear in k, so k = -trapz(p) / trapz(n) gives zero exactly. With the inhale as the composed half the roles swap. The trapezoid integral is the volume a solver sees when it interpolates the table linearly between samples. The sign of every sample is unchanged, so each zero crossing stays between the same two samples.
+
+How it is made sure:
+
+- By construction: k is computed from the same array that is written, after every other step (resampling, smoothing, assembly, unit conversion are all done before it, and unit conversion is linear).
+- On the written file: after writing, the export reads `{subject}FlowProfile.csv` back, integrates it, and shows in, out and net in the result panel. A net volume above a rounding tolerance (0.01 mL) is shown in red **(designer's call for the tolerance)**. This guards against any later change to the array or the writer.
+- Shown: the preview and the details file show the complete half, in, out before scaling, k, and the fitted or chosen extra flow end. A k outside 0.9 to 1.1 gets an amber caution, not a block **(designer's call)**: it means the composed half differed by more than 10 percent before scaling, so the extra flow or the picked breath is probably off.
+- Tests: engine tests on synthetic flows with known volumes (net zero after scaling, complete half unchanged sample by sample, zero crossings between the same samples); the ENT005 case by hand.
+
+Details file keys **(designer's call for the names)**: `complete_half`, `volume_in_mL_before_scaling`, `volume_out_mL_before_scaling`, `composed_half_scale_factor`, `extra_flow_fitted` (yes or no), and `volume_in_mL`, `volume_out_mL`, `net_volume_mL` as read back from the written file.
 
 ## 5. Constraints
 
@@ -195,6 +220,7 @@ Test first for every unit (red, green, refactor), small units, each committed wi
 5. Drift correction breath on screen (G4).
 6. Extra flow on screen (G2).
 7. Labeled preview, saved picture, net volume (G5, G6).
+8. In equals out: scaling in the engine, then the complete half choice, Fit extra flow and the read back check (G7).
 
 ## 8. Left to the builder
 
