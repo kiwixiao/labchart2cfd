@@ -27,6 +27,17 @@ A part (a, b) therefore means images a..b:
 
 Flow and map agree by construction (one map row per image, spi samples each),
 and because the slices are disjoint there is no seam to double-count.
+
+Any Temporal Res (design 2026-11-22, 4.1a). dt is used as typed. Line k is
+the sample nearest k x dt, rounded half up on its own, so a dt that is not a
+whole number of samples (275 ms at 100 Hz is 27.5) gives slices of 28 and 27
+samples that never drift from the grid. The frame table names the samples
+actually used. At 100 and 200 ms every line falls on a sample and nothing
+changes.
+
+Extra flow (4.2). A part may keep the recorded flow after its last image up
+to ``extra_until_s`` before the next part starts. No image belongs to that
+flow; the frame table says how long it is and where it ends.
 """
 
 from dataclasses import dataclass, field
@@ -46,11 +57,41 @@ class ProfilePart:
             which selects that single image (one dt of signal).
         label: Optional descriptive tag ("inhale", "exhale tail"); not used
             by the math.
+        extra_until_s: Optional time in the recording. The recorded flow
+            after the last image of the part is kept up to this time, before
+            the next part starts. None keeps no extra flow.
     """
 
     start_image: int
     end_image: int
     label: str = ""
+    extra_until_s: Optional[float] = None
+
+
+@dataclass
+class FrameRow:
+    """One frame of the composed profile, for the frame table.
+
+    Attributes:
+        new_frame: 1-based position in the composed profile.
+        original_image: 1-based image number in the scan.
+        original_time_s: Where the image starts in the recording (the sample
+            actually used).
+        profile_start_s: Where the frame starts in the composed profile.
+        profile_end_s: Where the frame ends in the composed profile.
+        extra_flow_s: Length of the recorded flow kept after this frame
+            before the next one, 0 when there is none.
+        extra_flow_until_s: Time in the recording where that extra flow
+            ends (the sample actually used), None when there is none.
+    """
+
+    new_frame: int
+    original_image: int
+    original_time_s: float
+    profile_start_s: float
+    profile_end_s: float
+    extra_flow_s: float
+    extra_flow_until_s: Optional[float]
 
 
 @dataclass
@@ -66,12 +107,17 @@ class AssemblyResult:
             image sits in the ORIGINAL recording, while ``time`` above is the
             synthetic profile's own axis starting at 0; the two clocks are
             deliberately different.
+        frames: One FrameRow per frame, the full frame table.
+        extra_spans: (start, end) in profile time of each stretch of extra
+            flow, for drawing.
     """
 
     time: NDArray[np.float64]
     flow: NDArray[np.float64]
     pressure: Optional[NDArray[np.float64]]
     reorder_map: List[Tuple[int, int, float]] = field(default_factory=list)
+    frames: List[FrameRow] = field(default_factory=list)
+    extra_spans: List[Tuple[float, float]] = field(default_factory=list)
 
 
 def assemble_parts(
@@ -89,8 +135,8 @@ def assemble_parts(
     Args:
         flow: Processed mass-flow over the full window (uniform sample rate).
         parts: Ordered parts; list order is the assembly order.
-        dt: Seconds per image (e.g. 0.2). One image owns exactly this much
-            signal.
+        dt: Seconds per image as typed (e.g. 0.2 or 0.275). Each grid line
+            is rounded to the nearest sample on its own.
         sample_rate: Sample rate of ``flow`` in Hz (e.g. 100.0).
         total_images: Number of images in the window (1..N).
         pressure: Optional processed pressure aligned with ``flow``.
@@ -106,9 +152,12 @@ def assemble_parts(
 
     Raises:
         ValueError: if ``parts`` is empty, ``dt``/``sample_rate`` are
-            non-positive, ``grid_offset_s`` is negative, a part violates
+            non-positive, an image is shorter than one sample,
+            ``grid_offset_s`` is negative, a part violates
             ``1 <= start <= end <= total_images``, a part would read past the
-            end of ``flow``, or the assembled flow is empty.
+            end of ``flow``, extra flow does not end after its image, reaches
+            past ``flow``, or is followed by the next image, or the assembled
+            flow is empty.
     """
     if not parts:
         raise ValueError("No parts to assemble; label at least one part.")
@@ -119,22 +168,10 @@ def assemble_parts(
     if grid_offset_s < 0:
         raise ValueError("grid_offset_s must not be negative.")
 
-    # The flow is sliced on whole samples while the reorder map's time column
-    # is computed from dt directly, so the two only describe the same instants
-    # when dt and the offset land on whole samples. Validate rather than round
-    # silently: a dt of 0.205 s at 100 Hz drifted the map 95 ms from the chunk
-    # it names. The GUI already quantises dt, so this guards direct callers.
     exact_spi = dt * sample_rate
-    spi = int(round(exact_spi))
-    if abs(exact_spi - spi) > 1e-9:
+    if exact_spi < 1:
         raise ValueError(
-            f"dt*sample_rate is {exact_spi:.9f}, not a whole number of "
-            "samples; the reorder map would name times the flow chunks do not "
-            "start at. Quantise dt to a multiple of 1/sample_rate."
-        )
-    if spi < 1:
-        raise ValueError(
-            f"samples-per-image is {spi}; dt*sample_rate must be >= 1."
+            f"samples-per-image is {exact_spi:.3f}; dt*sample_rate must be >= 1."
         )
 
     exact_off = grid_offset_s * sample_rate
@@ -146,37 +183,85 @@ def assemble_parts(
             "1/sample_rate."
         )
 
-    for p in parts:
+    def line(k: int) -> int:
+        """Sample index of grid line k (line 0 starts image 1)."""
+        return off + int(np.floor(k * exact_spi + 0.5 + 1e-9))
+
+    def sample_at(t: float) -> int:
+        """Sample index of a recording time, rounded half up."""
+        return int(np.floor((t - window_start_s) * sample_rate + 0.5 + 1e-9))
+
+    for i, p in enumerate(parts):
         if not (1 <= p.start_image <= p.end_image <= total_images):
             raise ValueError(
                 "Each part must satisfy 1 <= start_image <= end_image <= "
                 f"{total_images}; got {p.start_image}..{p.end_image}."
             )
-        if off + p.end_image * spi > len(flow):
+        if line(p.end_image) > len(flow):
             raise ValueError(
                 f"Part {p.start_image}..{p.end_image} needs samples up to "
-                f"{off + p.end_image * spi} but the processed window only has "
+                f"{line(p.end_image)} but the processed window only has "
                 f"{len(flow)}. Shorten the part, or widen the window."
+            )
+        if p.extra_until_s is None:
+            continue
+        image_end_s = window_start_s + line(p.end_image) / sample_rate
+        if sample_at(p.extra_until_s) <= line(p.end_image):
+            raise ValueError(
+                f"Extra flow after image {p.end_image} must end after that "
+                f"image ends at {image_end_s:.3f} s; it ends at "
+                f"{p.extra_until_s:.3f} s."
+            )
+        if sample_at(p.extra_until_s) > len(flow):
+            flow_end_s = window_start_s + len(flow) / sample_rate
+            raise ValueError(
+                f"Extra flow after image {p.end_image} runs to "
+                f"{p.extra_until_s:.3f} s, past the end of the processed "
+                f"recording at {flow_end_s:.3f} s."
+            )
+        if i + 1 < len(parts) and parts[i + 1].start_image == p.end_image + 1:
+            raise ValueError(
+                f"Extra flow after image {p.end_image} is not possible: the "
+                f"next part starts at the next image, {p.end_image + 1}, which "
+                "already follows it in the recording."
             )
 
     flow_chunks: List[NDArray[np.float64]] = []
     pressure_chunks: List[NDArray[np.float64]] = []
-    reorder_map: List[Tuple[int, int, float]] = []
-    new_frame = 0
+    frames: List[FrameRow] = []
+    extra_spans: List[Tuple[float, float]] = []
+    cursor = 0  # samples written to the composed profile so far
 
     for p in parts:
-        # Image i is the slice [line_i, line_i+1), so images a..b span from
-        # line a up to line b+1. Slices are disjoint: no seam to double-count.
-        lo = off + (p.start_image - 1) * spi
-        stop = off + p.end_image * spi
-        flow_chunks.append(flow[lo:stop])
+        # Image i is the slice [line i-1, line i), so images a..b span from
+        # line a-1 up to line b. Slices are disjoint: no seam to double-count.
+        lo = line(p.start_image - 1)
+        stop = line(p.end_image)
+        if p.extra_until_s is not None:
+            stop_with_extra = sample_at(p.extra_until_s)
+        else:
+            stop_with_extra = stop
+        flow_chunks.append(flow[lo:stop_with_extra])
         if pressure is not None:
-            pressure_chunks.append(pressure[lo:stop])
+            pressure_chunks.append(pressure[lo:stop_with_extra])
         for img in range(p.start_image, p.end_image + 1):
-            new_frame += 1
-            reorder_map.append(
-                (new_frame, img, window_start_s + grid_offset_s + (img - 1) * dt)
-            )
+            first, last = line(img - 1), line(img)
+            frames.append(FrameRow(
+                new_frame=len(frames) + 1,
+                original_image=img,
+                original_time_s=window_start_s + first / sample_rate,
+                profile_start_s=cursor / sample_rate,
+                profile_end_s=(cursor + last - first) / sample_rate,
+                extra_flow_s=0.0,
+                extra_flow_until_s=None,
+            ))
+            cursor += last - first
+        if stop_with_extra > stop:
+            extra = stop_with_extra - stop
+            frames[-1].extra_flow_s = extra / sample_rate
+            frames[-1].extra_flow_until_s = window_start_s + stop_with_extra / sample_rate
+            extra_spans.append((cursor / sample_rate, (cursor + extra) / sample_rate))
+            cursor += extra
 
     assembled_flow = np.concatenate(flow_chunks)
     if assembled_flow.size == 0:
@@ -185,10 +270,13 @@ def assemble_parts(
         np.concatenate(pressure_chunks) if pressure is not None else None
     )
     time = np.arange(assembled_flow.size) / sample_rate
+    reorder_map = [(f.new_frame, f.original_image, f.original_time_s) for f in frames]
 
     return AssemblyResult(
         time=time,
         flow=assembled_flow,
         pressure=assembled_pressure,
         reorder_map=reorder_map,
+        frames=frames,
+        extra_spans=extra_spans,
     )

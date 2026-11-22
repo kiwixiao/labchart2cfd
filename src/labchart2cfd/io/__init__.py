@@ -4,6 +4,7 @@ from labchart2cfd.io.labchart import load_labchart_mat, LabChartData
 from labchart2cfd.io.csv_export import (
     export_flow_csv,
     export_pressure_csv,
+    export_frame_table_csv,
     export_reorder_map_csv,
 )
 
@@ -12,5 +13,6 @@ __all__ = [
     "LabChartData",
     "export_flow_csv",
     "export_pressure_csv",
+    "export_frame_table_csv",
     "export_reorder_map_csv",
 ]

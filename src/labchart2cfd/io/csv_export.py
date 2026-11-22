@@ -156,3 +156,55 @@ def export_reorder_map_csv(filepath, reorder_map):
         f.write("\r\n".join(lines) + "\r\n")
 
     return filepath
+
+
+FRAME_TABLE_HEADER = (
+    "new_frame,original_image,original_time_s,profile_start_s,"
+    "profile_end_s,extra_flow_s,extra_flow_until_s"
+)
+
+
+def export_frame_table_csv(filepath, frames):
+    # type: (Union[str, Path], list) -> Path
+    """Export the CT frame table: the reorder map plus where each frame sits.
+
+    The first three columns are the reorder map's, unchanged. The others say
+    where each frame starts and ends in the composed profile, and how long
+    the recorded flow kept after it is (0 when none) and where in the
+    recording that flow ends (empty when none). Registration can then align
+    each image to its exact stretch of the breathing profile.
+
+    Args:
+        filepath: Output file path.
+        frames: List of FrameRow (labchart2cfd.processing.profile_assembly).
+
+    Returns:
+        Path to the created file.
+
+    Raises:
+        ValueError: If the table is empty or contains a non-finite time.
+    """
+    if not frames:
+        raise ValueError("The frame table is empty; nothing to write.")
+
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+
+    lines = [FRAME_TABLE_HEADER]
+    for f in frames:
+        times = [f.original_time_s, f.profile_start_s, f.profile_end_s, f.extra_flow_s]
+        if f.extra_flow_until_s is not None:
+            times.append(f.extra_flow_until_s)
+        if not all(np.isfinite(t) for t in times):
+            raise ValueError(f"The frame table has a non-finite time for frame {f.new_frame}.")
+        until = "" if f.extra_flow_until_s is None else "%.6f" % f.extra_flow_until_s
+        lines.append("{},{},{},{},{},{},{}".format(
+            int(f.new_frame), int(f.original_image),
+            "%.6f" % f.original_time_s, "%.6f" % f.profile_start_s,
+            "%.6f" % f.profile_end_s, "%.6f" % f.extra_flow_s, until,
+        ))
+
+    with open(str(filepath), "w", newline="", encoding="ascii") as f:
+        f.write("\r\n".join(lines) + "\r\n")
+
+    return filepath

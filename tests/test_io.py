@@ -133,6 +133,31 @@ class TestCSVExport:
             assert lines[3] == "3,1,0.000000"
             assert b"\r\r\n" not in content
 
+    def test_export_frame_table_csv_writes_seven_columns(self):
+        """The frame table keeps the map's first three columns and adds where
+        each frame sits in the profile and any extra flow after it."""
+        from labchart2cfd.io.csv_export import export_frame_table_csv
+        from labchart2cfd.processing.profile_assembly import FrameRow
+        with tempfile.TemporaryDirectory() as tmpdir:
+            filepath = Path(tmpdir) / "map.csv"
+            frames = [
+                FrameRow(1, 4, 0.6, 0.0, 0.2, 0.0, None),
+                FrameRow(2, 5, 0.8, 0.2, 0.4, 0.3, 1.3),
+            ]
+
+            export_frame_table_csv(filepath, frames)
+
+            with open(filepath, "rb") as f:
+                content = f.read()
+            lines = content.decode().split("\r\n")
+            assert lines[0] == (
+                "new_frame,original_image,original_time_s,profile_start_s,"
+                "profile_end_s,extra_flow_s,extra_flow_until_s"
+            )
+            assert lines[1] == "1,4,0.600000,0.000000,0.200000,0.000000,"
+            assert lines[2] == "2,5,0.800000,0.200000,0.400000,0.300000,1.300000"
+            assert b"\r\r\n" not in content
+
     def test_export_generic_csv_custom_header(self):
         """Generic CSV export should use custom header."""
         with tempfile.TemporaryDirectory() as tmpdir:

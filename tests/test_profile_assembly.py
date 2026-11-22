@@ -131,3 +131,66 @@ def test_part_past_end_of_flow_raises():
     """A slice must not read past the processed window."""
     with pytest.raises(ValueError):
         _assemble([ProfilePart(10, 10)], flow=_flow(150))
+
+
+# ------------- design 2026-11-22: any Temporal Res, extra flow, frame times
+
+def test_fractional_dt_rounds_each_boundary_on_its_own():
+    """275 ms is 27.5 samples at 100 Hz. Each line goes to the sample nearest
+    k x dt, so the slices are 28, 27, 28, 27 samples and never drift."""
+    r = _assemble([ProfilePart(1, 4)], flow=_flow(200), dt=0.275, total_images=4)
+
+    starts = [round(f.profile_start_s * 100) for f in r.frames]
+    ends = [round(f.profile_end_s * 100) for f in r.frames]
+    assert starts == [0, 28, 55, 83]
+    assert ends == [28, 55, 83, 110]
+    assert len(r.flow) == 110
+    assert r.flow[28] == 28.0 and r.flow[-1] == 109.0
+
+
+def test_frame_times_name_the_samples_used():
+    r = _assemble([ProfilePart(3, 4), ProfilePart(1, 2)], flow=_flow(200),
+                  dt=0.275, total_images=4, window_start_s=10.0)
+
+    boundaries = [0, 28, 55, 83, 110]
+    for f in r.frames:
+        assert f.original_time_s == pytest.approx(10.0 + boundaries[f.original_image - 1] / 100)
+    assert [m[2] for m in r.reorder_map] == [f.original_time_s for f in r.frames]
+
+
+def test_extra_flow_follows_its_part():
+    """Images 4..6, then recorded flow until 1.5 s, then images 1..3."""
+    r = _assemble([ProfilePart(4, 6, extra_until_s=1.5), ProfilePart(1, 3)],
+                  flow=_flow(300), total_images=6)
+
+    expected = np.concatenate([np.arange(60, 150), np.arange(0, 60)]).astype(float)
+    assert np.array_equal(r.flow, expected)
+    third, fourth = r.frames[2], r.frames[3]
+    assert third.original_image == 6
+    assert third.profile_end_s == pytest.approx(0.6)
+    assert third.extra_flow_s == pytest.approx(0.3)
+    assert third.extra_flow_until_s == pytest.approx(1.5)
+    assert fourth.profile_start_s == pytest.approx(0.9)
+    assert r.frames[0].extra_flow_s == 0.0 and r.frames[0].extra_flow_until_s is None
+    assert r.extra_spans == [(pytest.approx(0.6), pytest.approx(0.9))]
+
+
+def test_extra_flow_after_the_last_part_is_allowed():
+    r = _assemble([ProfilePart(1, 3, extra_until_s=1.0)], flow=_flow(300), total_images=6)
+
+    assert len(r.flow) == 100
+    assert r.frames[-1].extra_flow_s == pytest.approx(0.4)
+
+
+def test_extra_flow_before_the_next_image_is_refused():
+    """Image 4 follows image 3 in the recording: extra flow after 3 would
+    play the start of image 4 twice."""
+    with pytest.raises(ValueError, match="next image"):
+        _assemble([ProfilePart(1, 3, extra_until_s=0.8), ProfilePart(4, 6)],
+                  flow=_flow(300), total_images=6)
+
+
+@pytest.mark.parametrize("until, message", [(0.5, "after"), (3.5, "recording")])
+def test_extra_flow_must_end_after_its_image_and_inside_the_flow(until, message):
+    with pytest.raises(ValueError, match=message):
+        _assemble([ProfilePart(1, 3, extra_until_s=until)], flow=_flow(300), total_images=6)
