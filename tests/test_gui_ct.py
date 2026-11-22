@@ -165,20 +165,6 @@ def test_grid_offset_can_slide_the_grid_earlier(win):
     assert origin + n_images * dt == pytest.approx(7.7)
 
 
-def test_dt_is_quantized_to_whole_flow_samples(win):
-    """Slicing happens in whole samples, so the grid must use the same dt.
-
-    Regression for 'Part 9..15 needs samples up to 300 but the window has 297',
-    which came from drawing at a fractional dt and slicing at a rounded one.
-    """
-    _set_window(win, 0.0, 4.0)
-    win.synth_dt_spin.setValue(198.6)   # not a whole number of 100 Hz samples
-
-    _origin, dt, _n = win._synth_grid()
-
-    assert dt == pytest.approx(0.20)    # snapped to 20 samples
-
-
 def test_click_snaps_to_the_slice_it_landed_in(win):
     _set_window(win, 0.0, 4.0)
 

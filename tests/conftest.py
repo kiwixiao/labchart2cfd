@@ -55,6 +55,13 @@ def no_modal_dialogs(monkeypatch):
 
     for kind in ("warning", "critical", "information", "question"):
         monkeypatch.setattr(f"labchart2cfd.gui.app.QMessageBox.{kind}", _refuse(kind))
+    # The preview before a CT export is modal by design. It is answered with
+    # Export; a test about Cancel patches it again itself.
+    from PyQt5.QtWidgets import QDialog
+    monkeypatch.setattr(
+        "labchart2cfd.gui.dialogs.AssemblyPreviewDialog.exec_",
+        lambda self: QDialog.Accepted,
+    )
 
 
 @pytest.fixture

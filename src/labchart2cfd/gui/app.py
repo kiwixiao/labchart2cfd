@@ -1994,6 +1994,15 @@ class FlowProfileApp(QMainWindow):
         """True when Export assembles ordered parts (CT, parts method)."""
         return self._workflow_name() == "CT" and self._ct_method() == "parts"
 
+    def _exports_by_assembly(self) -> bool:
+        """True when Export composes the breath from images: CT with Reorder
+        parts or Cycle frames. Both go through _assemble_and_export, so extra
+        flow, the frame table and the preview exist once (design 2026-11-22,
+        approach A). _uses_assembly() stays the Reorder parts method, which
+        its on screen checks are about.
+        """
+        return self._workflow_name() == "CT" and self._ct_method() in ("parts", "cycle")
+
     def _export_blockers(self) -> List[str]:
         """What is still missing before an export can run, in plain words."""
         blockers = []
@@ -2291,8 +2300,10 @@ class FlowProfileApp(QMainWindow):
                 and self.data is not None
                 and not self.data.is_block_empty(pressure_row, self.col_spin.value())):
             names.append(f"{subject}PressureProfile.csv")
-        if self._uses_assembly():
-            names.append(f"{subject}ImageReorderMap.csv")
+        if self._exports_by_assembly():
+            names += [f"{subject}ImageReorderMap.csv", f"{subject}_trigger_info.txt"]
+            if self._ct_method() == "cycle":
+                names.append(f"{subject}_sanity_check.png")
         else:
             names += [f"{subject}_trigger_info.txt", f"{subject}_sanity_check.png"]
         return [folder / name for name in names]
@@ -2348,7 +2359,7 @@ class FlowProfileApp(QMainWindow):
         if not self._confirm_overwrite(self._export_targets()):
             self.status_bar.showMessage("Export cancelled. No file was changed.")
             return
-        if self._uses_assembly():
+        if self._exports_by_assembly():
             self._assemble_and_export()
         else:
             self._execute_processing()
@@ -4389,18 +4400,15 @@ class FlowProfileApp(QMainWindow):
         anchor and give visual reference only, so the grid is free to extend
         past the step end.
 
-        ``dt`` is quantised to whole flow samples, because the export slices in
-        samples. Drawing at a fractional dt while slicing at a rounded one is
-        what produced "needs samples up to 300 but the window only has 297".
+        ``dt`` is used as typed. The export puts each grid line on the flow
+        sample nearest to it, rounded on its own, so the slices never drift
+        from the grid (design 2026-11-22, 4.1a). It used to be rounded to whole
+        samples, so 275 ms was cut as 280 ms.
         """
-        dt_typed = self.synth_dt_spin.value() / 1000.0
+        dt = self.synth_dt_spin.value() / 1000.0
         n_images = self.synth_images_spin.value()
-        if dt_typed <= 0 or n_images < 1:
-            return None
-        spi = int(round(dt_typed * self._SYNTH_SAMPLE_RATE))
-        if spi < 1:
-            return None
-        dt = spi / self._SYNTH_SAMPLE_RATE
+        if dt * self._SYNTH_SAMPLE_RATE < 1 or n_images < 1:
+            return None  # shorter than one flow sample, or no image
         origin = self.start_spin.value() + self.synth_grid_offset_spin.value() / 1000.0
         return origin, dt, n_images
 
@@ -4496,13 +4504,6 @@ class FlowProfileApp(QMainWindow):
             f"grid spans {n_images * dt:.3f} s  ({origin:.3f} s to {end:.3f} s) "
             f"= the exported range"
         )
-        typed = self.synth_dt_spin.value() / 1000.0
-        if abs(typed - dt) > 1e-9:
-            note += (
-                f"   |  dt snapped {typed * 1000:.2f} -> {dt * 1000:.2f} ms "
-                f"({int(round(dt * self._SYNTH_SAMPLE_RATE))} samples "
-                f"at {self._SYNTH_SAMPLE_RATE:.0f} Hz)"
-            )
         self.synth_dt_warn_label.setText(note)
 
     def _refresh_synth_grid_if_active(self) -> None:
@@ -4817,19 +4818,131 @@ class FlowProfileApp(QMainWindow):
         self.canvas.draw_idle()
         self.status_bar.showMessage("Cleared parts, image grid, and plot markers.")
 
+    def _assembly_grid(self) -> Optional[tuple]:
+        """(start, dt, image count) of the grid the export cuts, or None.
+
+        Cycle frames cut the CT grid itself (_ct_grid). Reorder parts cut the
+        parts grid, which starts at Start plus Grid offset.
+        """
+        if self._ct_method() == "cycle":
+            return self._ct_grid()
+        return self._synth_grid()
+
+    def _export_parts(self) -> List[ProfilePart]:
+        """The parts the export joins, in order.
+
+        Reorder parts: the user's parts. Cycle frames: the labels split into
+        runs of consecutive images, each run a part (the rule the old export
+        used); with no labels, every image in order, which is what it
+        exported then.
+        """
+        if self._ct_method() != "cycle":
+            return list(self._parts)
+        frames = list(self._ct_cycle_frames)
+        if not frames:
+            grid = self._ct_grid()
+            return [ProfilePart(1, grid[2])] if grid is not None and grid[2] >= 1 else []
+        runs = [[frames[0]]]
+        for image in frames[1:]:
+            if image == runs[-1][-1] + 1:
+                runs[-1].append(image)
+            else:
+                runs.append([image])
+        return [ProfilePart(run[0], run[-1]) for run in runs]
+
+    def _ct_details_entries(self, *, subject, method, result, asm, grid, processed, drift_range):
+        """Every fact of a composed CT export, for the details file.
+
+        The keys the old cycle frames file had come first, with their old
+        meaning, so a script reading them still works. The rest says what was
+        cut, where the drift was measured and where each frame came from
+        (design 2026-11-22, 4.3).
+        """
+        start_t, dt, n_images = grid
+        grid_end = start_t + n_images * dt
+        order = [f.original_image for f in asm.frames]
+        listed = ",".join(str(i) for i in order)
+        mapping = ";".join(f"{f.new_frame}->{f.original_image}" for f in asm.frames)
+        step = self._ct_selected_step
+        entries = [
+            ("workflow", "CT"),
+            ("step_start_time", f"{start_t:.3f}"),
+            ("step_end_time", f"{grid_end:.3f}"),
+            ("step_duration", f"{grid_end - start_t:.3f}"),
+            ("inhale_start_time", "N/A"),
+            ("exhale_end_time", "N/A"),
+            ("temporal_resolution_s", f"{dt:.5f}"),
+            ("total_images", str(n_images)),
+            ("cut_image_index", "1"),
+            ("rearranged_image_indices", ",".join(str(i) for i in range(1, n_images + 1))),
+            ("inhale_image", str(order[0])),
+            ("exhale_image", str(order[-1])),
+            ("selected_num_images", str(len(order))),
+            ("selected_image_indices", listed),
+            ("cycle_mode", "true" if method == "cycle" else "false"),
+        ]
+        if method == "cycle":
+            entries += [
+                ("cycle_frame_count", str(len(order))),
+                ("cycle_original_indices", listed),
+                ("cycle_new_to_original", mapping),
+            ]
+        entries += [
+            ("start_time_exported", "0.000"),
+            ("end_time_exported", f"{asm.time[-1]:.3f}"),
+            ("ct_method", "cycle frames" if method == "cycle" else "reorder parts"),
+            ("image_count", str(n_images)),
+            ("grid_start_time", f"{start_t:.6f}"),
+            ("grid_offset_s", f"{self.synth_grid_offset_spin.value() / 1000.0:.6f}"
+             if method == "parts" else "0.000000"),
+            ("start_shift_ms", f"{self._ct_applied_shift:g}"),
+            ("detected_step_start_time", f"{step['start_time']:.6f}" if step else "N/A"),
+            ("detected_step_end_time", f"{step['end_time']:.6f}" if step else "N/A"),
+            ("window_start_time", f"{self.start_spin.value():.6f}"),
+            ("window_end_time", f"{self.end_spin.value():.6f}"),
+            ("processed_start_time", f"{processed[0]:.6f}"),
+            ("processed_end_time", f"{processed[1]:.6f}"),
+            ("drift_source", "image grid"),
+            ("drift_range_start", f"{drift_range[0]:.6f}"),
+            ("drift_range_end", f"{drift_range[1]:.6f}"),
+            ("drift_removed_L_per_s", f"{result.drift_error:.6f}"),
+        ]
+        for f in asm.frames:
+            if f.extra_flow_until_s is not None:
+                begins = f.extra_flow_until_s - f.extra_flow_s
+                entries.append((
+                    "extra_flow",
+                    f"after frame {f.new_frame} (image {f.original_image}), "
+                    f"recording {begins:.6f} s to {f.extra_flow_until_s:.6f} s, "
+                    f"{f.extra_flow_s:.6f} s",
+                ))
+        entries += [
+            ("frame_order_new_to_original", mapping),
+            ("profile_duration_s", f"{len(asm.flow) / self._SYNTH_SAMPLE_RATE:.6f}"),
+            ("frame_table_file", f"{subject}ImageReorderMap.csv"),
+        ]
+        return entries
+
     def _assemble_and_export(self) -> None:
-        """Process the window, assemble parts, preview, and export 3 CSVs."""
+        """Compose the breath from images, preview it, and write its files.
+
+        One route for Reorder parts and Cycle frames: process the image grid
+        (and any extra flow after it), cut and join the parts, show the
+        preview, then write the profile, the frame table and the details file.
+        """
         if self.data is None:
             QMessageBox.warning(self, "No Data", "Open a recording first.")
             return
-        if not self._parts:
+        method = "cycle" if self._ct_method() == "cycle" else "parts"
+        parts = self._export_parts()
+        if not parts:
             QMessageBox.warning(self, "No Parts", "Add at least one part.")
             return
         subject = self.subject_edit.text().strip()
         if not subject:
             QMessageBox.warning(self, "Missing Subject", "Enter a Subject ID.")
             return
-        meta = self._synth_grid()
+        meta = self._assembly_grid()
         if meta is None:
             QMessageBox.warning(
                 self, "Bad Grid", "Set a positive Temporal Res and at least one image."
@@ -4857,7 +4970,7 @@ class FlowProfileApp(QMainWindow):
             short_s = max(0.0, grid_end - float(t_axis[-1]))
             QMessageBox.critical(
                 self, "Grid Outside Recording",
-                f"The grid needs {n_images} x {dt * 1000:.0f} ms = "
+                f"The grid needs {n_images} x {dt * 1000:g} ms = "
                 f"{n_images * dt:.3f} s starting at {start_t:.3f} s, "
                 f"so it runs to {grid_end:.3f} s.\n\n"
                 f"The recording covers {float(t_axis[0]):.3f} s to "
@@ -4873,29 +4986,43 @@ class FlowProfileApp(QMainWindow):
         include_pressure = pressure_row > 0
         output_dir = Path(self.outdir_edit.text())
 
+        # Process the image grid, and as far as the latest extra flow. When
+        # the last grid line rounds up to a sample past the grid, one more
+        # sample is processed so that sample exists. The drift is always
+        # measured on the image grid, so extra flow never moves the level of
+        # the profile (design 2026-11-22, 4.4).
+        rate = self._SYNTH_SAMPLE_RATE
+        process_end = grid_end
+        exact = n_images * dt * rate
+        if abs(exact - round(exact)) > 1e-9:
+            process_end += 1.0 / rate
+        extras = [p.extra_until_s for p in parts if p.extra_until_s is not None]
+        if extras:
+            process_end = max(process_end, max(extras) + 1.0 / rate)
+        drift_range = (start_t, grid_end)
+
         try:
             from labchart2cfd.io.csv_export import (
-                export_flow_csv, export_pressure_csv, export_reorder_map_csv,
+                export_flow_csv, export_frame_table_csv, export_pressure_csv,
             )
+            from labchart2cfd.io.ct_details import write_ct_details
             from labchart2cfd.workflows.factory import build_workflow
 
             wf = build_workflow(
-                "ct", density=1.2, target_sample_rate=100.0,
+                "ct", density=1.2, target_sample_rate=rate,
                 pressure_row=pressure_row if include_pressure else 1,
             )
-            # Process exactly the grid's range, so the sample count always
-            # matches what the parts need. Start/End are reference only.
             result = wf.process(
-                self.data, flow_row, col, start_t, grid_end,
+                self.data, flow_row, col, start_t, process_end,
                 inhale_start_time=None, exhale_end_time=None,
                 temporal_resolution=dt, include_pressure=include_pressure,
+                drift_range=drift_range,
             )
-            # Validate against the grid's own slice count, not the workflow's
-            # fencepost count: a part must name an image that has a slice.
-            total_images = n_images
+            # Validate against the grid's own slice count: a part must name
+            # an image that has a slice.
             asm = assemble_parts(
-                result.mass_flow, self._parts, dt=dt,
-                sample_rate=result.sample_rate, total_images=total_images,
+                result.mass_flow, parts, dt=dt,
+                sample_rate=result.sample_rate, total_images=n_images,
                 pressure=result.pressure,
                 grid_offset_s=0.0,  # the processed array already starts at the anchor
                 window_start_s=start_t,  # so the map reads in recording time
@@ -4914,6 +5041,7 @@ class FlowProfileApp(QMainWindow):
             return
 
         # Export
+        plot_file = None
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
             flow_file = output_dir / f"{subject}FlowProfile.csv"
@@ -4924,15 +5052,29 @@ class FlowProfileApp(QMainWindow):
                 export_pressure_csv(pfile, asm.time, asm.pressure)
                 written.append(pfile)
             map_file = output_dir / f"{subject}ImageReorderMap.csv"
-            export_reorder_map_csv(map_file, asm.reorder_map)
+            export_frame_table_csv(map_file, asm.frames)
             written.append(map_file)
+            details = self._ct_details_entries(
+                subject=subject, method=method, result=result, asm=asm,
+                grid=meta, processed=(start_t, process_end), drift_range=drift_range,
+            )
+            info_file = output_dir / f"{subject}_trigger_info.txt"
+            write_ct_details(info_file, details)
+            written.append(info_file)
+            if method == "cycle":
+                plot_file = write_sanity_plot(
+                    output_dir / f"{subject}_sanity_check.png", subject,
+                    asm.time, asm.flow, asm.pressure,
+                )
+                written.append(plot_file)
         except Exception as exc:
             QMessageBox.critical(self, "Export Failed", str(exc))
             return
 
-        order = ",".join(str(m[1]) for m in asm.reorder_map)
-        if len(order) > 120:
-            order = order[:117] + "..."
+        order = [f.original_image for f in asm.frames]
+        listed = ",".join(str(i) for i in order)
+        if len(listed) > 80:
+            listed = listed[:77] + "..."
         warnings = []
         if asm.pressure is None:
             warnings = self._pressure_warnings(
@@ -4943,16 +5085,21 @@ class FlowProfileApp(QMainWindow):
             "folder": output_dir,
             "files": written,
             "summary": self._export_provenance() + [
+                ("Images in the scan", str(n_images)),
+                ("First frame is image", str(order[0])),
+                ("Last frame is image", str(order[-1])),
+                ("Images selected", f"{len(order)} ({listed})"),
+                ("Duration", f"{len(asm.flow) / rate:.2f} s"),
+                ("Sample rate", f"{rate:.0f} Hz"),
                 ("Samples", str(len(asm.flow))),
-                ("Images", str(len(asm.reorder_map))),
-                ("Image order (original numbers)", order),
+                ("Drift error", f"{result.drift_error:.6f}"),
                 ("Time", "starts at 0 in the profile; the reorder map keeps "
                          "recording time"),
             ],
             "warnings": warnings,
-            "plot": None,
+            "plot": plot_file,
         })
-        self.status_bar.showMessage(f"Exported synthetic profile + reorder map for {subject}.")
+        self.status_bar.showMessage(f"Exported the composed breath and its frame table for {subject}.")
 
     def _execute_processing(self) -> None:
         """Run the processing pipeline in a background thread."""
@@ -5223,34 +5370,8 @@ class FlowProfileApp(QMainWindow):
                         tf.write(f"start_time_exported: 0.000\n")
                         tf.write(f"end_time_exported: {exported_duration:.3f}\n")
 
-                # Generate sanity-check PNG plot of exported data
-                # Use Figure + FigureCanvasAgg directly to avoid backend switching
-                from matplotlib.figure import Figure as MplFigure
-                from matplotlib.backends.backend_agg import FigureCanvasAgg
-
                 plot_file = output_dir / f"{subject}_sanity_check.png"
-                n_plots = 2 if result.pressure is not None else 1
-                fig_export = MplFigure(figsize=(10, 3 * n_plots), dpi=150)
-                FigureCanvasAgg(fig_export)
-                axes = fig_export.subplots(n_plots, 1, squeeze=False)[:, 0]
-
-                axes[0].plot(result.time, result.mass_flow, "b-", linewidth=0.5)
-                axes[0].axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
-                axes[0].set_xlabel("Time (s)")
-                axes[0].set_ylabel("Mass Flow Rate (kg/s)")
-                axes[0].set_title(f"{subject} — Exported Flow Profile (zeroed time)")
-                axes[0].grid(True, alpha=0.3)
-
-                if result.pressure is not None:
-                    axes[1].plot(result.time, result.pressure, "r-", linewidth=0.5)
-                    axes[1].axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
-                    axes[1].set_xlabel("Time (s)")
-                    axes[1].set_ylabel("Pressure (Pa)")
-                    axes[1].set_title(f"{subject} — Exported Pressure Profile (zeroed time)")
-                    axes[1].grid(True, alpha=0.3)
-
-                fig_export.tight_layout()
-                fig_export.savefig(str(plot_file))
+                write_sanity_plot(plot_file, subject, result.time, result.mass_flow, result.pressure)
 
                 # Update status on main thread
                 msg = f"Done! Saved: {flow_file}"
@@ -5323,6 +5444,40 @@ class FlowProfileApp(QMainWindow):
                 self._processing_failed.emit(f"{type(e).__name__}: {e}")
 
         Thread(target=_run, daemon=True).start()
+
+
+def write_sanity_plot(plot_file: Path, subject: str, time, mass_flow, pressure) -> Path:
+    """Save the picture of the exported flow (and pressure) next to the files.
+
+    Uses Figure and FigureCanvasAgg directly, so it runs on a worker thread
+    and never switches the window's backend.
+    """
+    from matplotlib.figure import Figure as MplFigure
+    from matplotlib.backends.backend_agg import FigureCanvasAgg
+
+    n_plots = 2 if pressure is not None else 1
+    fig_export = MplFigure(figsize=(10, 3 * n_plots), dpi=150)
+    FigureCanvasAgg(fig_export)
+    axes = fig_export.subplots(n_plots, 1, squeeze=False)[:, 0]
+
+    axes[0].plot(time, mass_flow, "b-", linewidth=0.5)
+    axes[0].axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
+    axes[0].set_xlabel("Time (s)")
+    axes[0].set_ylabel("Mass Flow Rate (kg/s)")
+    axes[0].set_title(f"{subject} — Exported Flow Profile (zeroed time)")
+    axes[0].grid(True, alpha=0.3)
+
+    if pressure is not None:
+        axes[1].plot(time, pressure, "r-", linewidth=0.5)
+        axes[1].axhline(y=0, color="gray", linestyle="--", linewidth=0.5)
+        axes[1].set_xlabel("Time (s)")
+        axes[1].set_ylabel("Pressure (Pa)")
+        axes[1].set_title(f"{subject} — Exported Pressure Profile (zeroed time)")
+        axes[1].grid(True, alpha=0.3)
+
+    fig_export.tight_layout()
+    fig_export.savefig(str(plot_file))
+    return Path(plot_file)
 
 
 def report_unhandled_exception(exc_type, exc, tb) -> None:

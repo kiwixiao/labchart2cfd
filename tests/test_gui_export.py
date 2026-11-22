@@ -337,8 +337,10 @@ def test_accepting_the_preview_writes_the_profile_and_the_reorder_map(
     win._export()
 
     report = win._last_export_report
+    # The details file is written by every CT export (design 2026-11-22, 4.3).
     assert [p.name for p in report["files"]] == [
         "S1FlowProfile.csv", "S1PressureProfile.csv", "S1ImageReorderMap.csv",
+        "S1_trigger_info.txt",
     ]
     assert all(p.exists() for p in report["files"])
     assert win._result_dialog is not None

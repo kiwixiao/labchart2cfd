@@ -123,3 +123,135 @@ def _parts_export(win, qapp, mat_file, out_dir, dt_ms=200.0, parts=((6, 15), (1,
     win._export()
     _wait_for_report(win, qapp)
     return win._last_export_report
+
+
+def _info(path):
+    """The details file as a dict of key: value."""
+    pairs = (line.split(": ", 1) for line in Path(path).read_text().splitlines() if ": " in line)
+    return {k: v for k, v in pairs}
+
+
+def _values(path):
+    """The value column of a profile CSV, as written (exact text)."""
+    return [line.split(",")[1] for line in Path(path).read_text().splitlines()[1:]]
+
+
+@pytest.mark.parametrize("dt_ms", [200.0, 100.0])
+def test_cycle_export_matches_the_old_route_sample_by_sample(win, qapp, mat_file, tmp_path, dt_ms):
+    """The old route cut each run of images with a floating point time mask
+    and took one sample wrong at a run edge. At 200 ms it kept the first
+    sample of image 5 after the last run (0.8 s fell just under the bound).
+    At 100 ms it also dropped the first sample of image 4, because 3 x 0.1 is
+    0.30000000000000004 in floating point. The new route cuts whole slices
+    by sample index, as Reorder parts always did. Every other sample is the
+    same text, value for value, in flow and pressure."""
+    _cycle_export(win, qapp, mat_file, tmp_path, dt_ms)
+
+    for name, golden in (("FlowProfile", "flow"), ("PressureProfile", "pressure")):
+        new = _values(tmp_path / f"S1{name}.csv")
+        old = _values(_REFERENCE / f"composed_cycle_{dt_ms:.0f}ms_{golden}.csv")
+        if dt_ms == 200.0:
+            assert len(new) == 16 * 20 and new == old[:-1]
+        else:
+            assert len(new) == 16 * 10
+            assert new[1:120] == old[:119] and new[120:] == old[119:-1]
+
+
+def test_parts_export_flow_is_byte_identical(win, qapp, mat_file, tmp_path):
+    _parts_export(win, qapp, mat_file, tmp_path)
+
+    for name, golden in (("FlowProfile", "flow"), ("PressureProfile", "pressure")):
+        written = (tmp_path / f"S1{name}.csv").read_bytes()
+        assert written == (_REFERENCE / f"composed_parts_200ms_{golden}.csv").read_bytes()
+    old = (_REFERENCE / "composed_parts_200ms_reorder_map.csv").read_text().splitlines()
+    new = (tmp_path / "S1ImageReorderMap.csv").read_text().splitlines()
+    assert [",".join(line.split(",")[:3]) for line in new] == old
+
+
+_NEW_DETAIL_KEYS = {
+    "ct_method", "image_count", "grid_start_time", "grid_offset_s", "start_shift_ms",
+    "window_start_time", "window_end_time", "drift_source", "drift_range_start",
+    "drift_range_end", "drift_removed_L_per_s", "frame_order_new_to_original",
+    "profile_duration_s", "frame_table_file",
+}
+
+
+def test_cycle_export_writes_the_frame_table_and_keeps_its_old_files(win, qapp, mat_file, tmp_path):
+    report = _cycle_export(win, qapp, mat_file, tmp_path, 200.0)
+
+    names = {p.name for p in report["files"]}
+    assert names == {"S1FlowProfile.csv", "S1PressureProfile.csv", "S1ImageReorderMap.csv",
+                     "S1_trigger_info.txt", "S1_sanity_check.png"}
+    assert all(p.exists() for p in report["files"])
+    header = (tmp_path / "S1ImageReorderMap.csv").read_text().splitlines()[0]
+    assert header.endswith("profile_start_s,profile_end_s,extra_flow_s,extra_flow_until_s")
+    info = _info(tmp_path / "S1_trigger_info.txt")
+    old_keys = set(_info(_REFERENCE / "composed_cycle_200ms_trigger_info.txt"))
+    assert old_keys <= set(info)
+    assert _NEW_DETAIL_KEYS <= set(info)
+    assert info["ct_method"] == "cycle frames"
+    assert info["cycle_original_indices"] == ",".join(str(i) for i in _USER_ORDER)
+    assert info["frame_table_file"] == "S1ImageReorderMap.csv"
+    assert info["drift_source"] == "image grid"
+
+
+def test_parts_export_writes_the_details_file(win, qapp, mat_file, tmp_path):
+    report = _parts_export(win, qapp, mat_file, tmp_path)
+
+    assert "S1_trigger_info.txt" in {p.name for p in report["files"]}
+    info = _info(tmp_path / "S1_trigger_info.txt")
+    assert _NEW_DETAIL_KEYS <= set(info)
+    assert info["ct_method"] == "reorder parts"
+    assert info["frame_order_new_to_original"].startswith("1->6;2->7;")
+    assert info["image_count"] == "15"
+
+
+def test_parts_export_at_275_ms_succeeds_and_the_table_names_the_samples_used(
+        win, qapp, mat_file, tmp_path):
+    """275 ms is 27.5 samples at 100 Hz. It used to be rounded to 280 ms."""
+    _parts_export(win, qapp, mat_file, tmp_path, dt_ms=275.0, parts=((6, 11), (1, 5)))
+
+    assert win._synth_grid()[1] == pytest.approx(0.275)
+    rows = [line.split(",") for line in (tmp_path / "S1ImageReorderMap.csv").read_text().splitlines()[1:]]
+    for row in rows:
+        image = int(row[1])
+        first_sample = int((image - 1) * 27.5 + 0.5)
+        assert float(row[2]) == pytest.approx(2.0 + first_sample / 100, abs=1e-6)
+    assert [int(r[1]) for r in rows] == [6, 7, 8, 9, 10, 11, 1, 2, 3, 4, 5]
+
+
+def test_extra_flow_does_not_move_the_drift_level_without_a_breath(
+        win, qapp, mat_file, tmp_path, monkeypatch):
+    """Without a picked breath the drift is measured on the image grid, so
+    keeping extra flow after a part leaves the level of the profile alone."""
+    from labchart2cfd.workflows.ct import CTWorkflow
+    calls = []
+    original = CTWorkflow.process
+
+    def spy(self, *args, **kwargs):
+        result = original(self, *args, **kwargs)
+        calls.append((args[4], kwargs.get("drift_range"), result.drift_error))
+        return result
+    monkeypatch.setattr(CTWorkflow, "process", spy)
+
+    _parts_export(win, qapp, mat_file, tmp_path / "a")
+    win._parts[-1].extra_until_s = 7.0
+    win._last_export_report = None
+    win._set_output_dir(tmp_path / "b")
+    win._export()
+    _wait_for_report(win, qapp)
+
+    (end_a, range_a, drift_a), (end_b, range_b, drift_b) = calls
+    assert range_a == range_b == (pytest.approx(2.0), pytest.approx(5.0))
+    assert drift_a == drift_b
+    assert end_b >= 7.0 > end_a
+
+
+@pytest.mark.parametrize("method", ["cycle", "parts"])
+def test_export_targets_lists_the_files_written(win, qapp, mat_file, tmp_path, method):
+    if method == "cycle":
+        report = _cycle_export(win, qapp, mat_file, tmp_path, 200.0)
+    else:
+        report = _parts_export(win, qapp, mat_file, tmp_path)
+
+    assert {p.name for p in win._export_targets()} == {p.name for p in report["files"]}
