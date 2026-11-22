@@ -212,15 +212,8 @@ def test_the_ct_scan_section_says_what_its_controls_do(win):
     assert "time one image covers" in text.lower()          # Temporal Res
     assert "Images in step" in text                         # not a second 'Images'
     assert "Apply Correction" not in text
-    assert "Apply shift and image count" in text
+    assert "Apply shift" in text and "Apply shift and image count" not in text
     assert "earlier" in text.lower() and "later" in text.lower()   # what the shift does
-
-
-def test_the_two_image_counts_have_different_names(win):
-    win.workflow_combo.setCurrentText("CT")
-
-    assert "Images in step" in _visible_text(win.ct_scan_section)
-    assert "Images in grid" in _visible_text(win.parts_page)
 
 
 def test_the_parts_page_says_which_numbers_on_the_plot_are_which(win):
@@ -493,23 +486,11 @@ def test_a_shift_shown_but_not_applied_holds_the_export_back(win, mat_file):
     win.ct_shift_slider.setValue(300)
 
     hint = win.export_hint.text()
-    assert hint.startswith("Before export") and "Apply shift and image count" in hint
+    assert hint.startswith("Before export") and "press Apply shift (4 CT scan)" in hint
 
     win._apply_ct_correction()
     assert win.export_hint.text().startswith("Ready to export")
     assert win.start_spin.value() == pytest.approx(2.3)
-
-
-def test_an_image_count_typed_but_not_applied_holds_the_export_back(win, mat_file):
-    _ct_step_selected(win, mat_file, "landmarks")
-    win.subject_edit.setText("S1")
-
-    win.ct_total_images_spin.setValue(12)
-
-    assert "Apply shift and image count" in win.export_hint.text()
-
-    win.ct_total_images_spin.setValue(15)          # put back: nothing is pending
-    assert win.export_hint.text().startswith("Ready to export")
 
 
 def test_changing_temporal_res_is_not_a_pending_correction(win, mat_file):
@@ -794,7 +775,7 @@ def test_a_previewed_shift_holds_a_parts_export_back_too(win, mat_file):
 
     win.ct_shift_slider.setValue(300)
 
-    assert "Apply shift and image count" in win.export_hint.text()
+    assert "press Apply shift (4 CT scan)" in win.export_hint.text()
 
 
 def test_the_pending_blocker_says_what_is_in_force_and_where_the_button_is(win, mat_file):
@@ -1140,8 +1121,8 @@ def test_focus_leaving_the_box_does_not_confirm_temporal_res(win, mat_file):
 
 
 def test_a_parts_grid_that_is_not_the_scan_is_amber(win, mat_file):
-    """The grid's image count is the user's own and may differ from the scan
-    on purpose. But a grid of 2.25 s over a 3 s scan passed in green."""
+    """The grid may sit off the scan on purpose (Grid offset). But a grid
+    that did not cover the scan passed in green."""
     from labchart2cfd.processing.profile_assembly import ProfilePart
     _ct_step_selected(win, mat_file, "parts")
     win.subject_edit.setText("S1")
@@ -1150,11 +1131,11 @@ def test_a_parts_grid_that_is_not_the_scan_is_amber(win, mat_file):
     win._refresh_parts_list()
     assert win.export_hint.property("state") == "ready"
 
-    win.synth_images_spin.setValue(11)             # 2.2 s of a 3 s scan
+    win.synth_grid_offset_spin.setValue(200)       # the grid 0.2 s later than the scan
 
     hint = win.export_hint.text()
     assert win.export_hint.property("state") == "caution"
-    assert "2.000 s to 4.200 s" in hint and "2.000 s to 5.000 s" in hint
+    assert "2.200 s to 5.200 s" in hint and "2.000 s to 5.000 s" in hint
 
 
 def test_selecting_another_step_counts_its_images_for_the_parts_grid(win, mat_file, tmp_path):
@@ -1170,18 +1151,6 @@ def test_selecting_another_step_counts_its_images_for_the_parts_grid(win, mat_fi
     win._select_ct_step()
 
     assert win.synth_images_spin.value() == 5
-
-
-def test_a_grid_count_typed_by_the_user_survives_another_step(win, mat_file, tmp_path):
-    from tests.test_gui_view import _recording_with_steps
-    two_steps = _recording_with_steps(mat_file, tmp_path, [(1.0, 3.0), (6.0, 7.0)])
-    _ct_step_selected(win, two_steps, "parts")
-    win.synth_images_spin.setValue(8)              # the user's own number
-
-    win.ct_step_spin.setValue(2)
-    win._select_ct_step()
-
-    assert win.synth_images_spin.value() == 8
 
 
 def test_landmarks_on_the_same_image_are_amber_and_say_so(win, mat_file):
@@ -1537,7 +1506,7 @@ def test_no_cycle_label_can_be_placed_on_a_grid_that_is_only_previewed(win, mat_
     win._on_click(ClickEvent(win.ax_top, 2.95))
 
     assert win._ct_cycle_frames == []
-    assert "Apply shift and image count" in win.status_bar.currentMessage()
+    assert "Press Apply shift (4 CT scan)" in win.status_bar.currentMessage()
 
 
 def test_the_blocker_about_lost_cycle_labels_names_the_way_out(win, mat_file):
@@ -1584,3 +1553,95 @@ def test_a_long_result_summary_is_given_the_height_it_needs(qapp, tmp_path):
     assert label.height() >= label.heightForWidth(label.width())
     assert label.minimumHeight() >= label.heightForWidth(dialog.PLOT_WIDTH)
     dialog.close()
+
+
+# -------- the user's choice (2026-11-21): one image count, in force at once
+
+def _hand_window(win, mat_file):
+    """A recording read with no trigger: the window is set by two clicks."""
+    win.workflow_combo.setCurrentText("CT")
+    win.trigger_row_spin.setValue(0)
+    open_block(win, mat_file)
+    win._on_click(ClickEvent(win.ax_bottom, 2.0))
+    win._on_click(ClickEvent(win.ax_bottom, 5.0))
+
+
+def test_a_typed_image_count_takes_effect_at_once(win, mat_file):
+    """The user typed 6 into a step of 9 and the plot kept 9. The count was
+    only pending until Apply shift and image count, a button out of view."""
+    _ct_step_selected(win, mat_file, "landmarks")   # 2.0 s to 5.0 s at 200 ms: 15 images
+    win.subject_edit.setText("S1")
+
+    _type_images(win, 9)
+
+    assert win.end_spin.value() == pytest.approx(3.8)
+    assert len(_grid_starts(win)) == 10                 # 9 images drawn, 10 lines
+    hint = win.export_hint.text()
+    assert hint.startswith("Ready to export") and "Apply" not in hint
+
+
+def test_the_parts_grid_holds_the_same_count(win, mat_file):
+    """Reorder parts cut its own count, set once from the step. After 6 was
+    applied in section 4 the export still processed and cut 9 images."""
+    _ct_step_selected(win, mat_file, "parts")
+
+    _type_images(win, 9)
+
+    assert win.synth_images_spin.value() == 9
+    assert win._synth_export_window() == pytest.approx((2.0, 3.8))
+
+
+def test_a_count_typed_under_build_the_breath_is_the_same_count(win, mat_file):
+    _ct_step_selected(win, mat_file, "parts")
+
+    win.synth_images_spin.setValue(6)
+
+    assert win.ct_total_images_spin.value() == 6
+    assert win.end_spin.value() == pytest.approx(3.2)
+    assert len(_grid_starts(win)) == 7
+
+
+def test_both_boxes_carry_one_name_and_one_range(win):
+    win.workflow_combo.setCurrentText("CT")
+
+    assert "Images in grid" not in _visible_text(win.parts_page)
+    assert "Images in step" in _visible_text(win.parts_page)
+    assert (win.synth_images_spin.minimum(), win.synth_images_spin.maximum()) == (
+        win.ct_total_images_spin.minimum(), win.ct_total_images_spin.maximum())
+
+
+def test_selecting_a_step_counts_both_boxes_afresh(win, mat_file, tmp_path):
+    from tests.test_gui_view import _recording_with_steps
+    two_steps = _recording_with_steps(mat_file, tmp_path, [(1.0, 3.0), (6.0, 7.0)])
+    _ct_step_selected(win, two_steps, "parts")
+    win.synth_images_spin.setValue(8)
+
+    win.ct_step_spin.setValue(2)
+    win._select_ct_step()
+
+    assert win.ct_total_images_spin.value() == 5
+    assert win.synth_images_spin.value() == 5
+    assert (win.start_spin.value(), win.end_spin.value()) == (6.0, 7.0)
+
+
+def test_a_typed_count_sets_the_length_of_a_hand_window(win, mat_file):
+    """With no step on the trigger the window is set by hand. It has the
+    same one count: typed, End moves to fit it."""
+    _hand_window(win, mat_file)
+    assert win.ct_total_images_spin.value() == 15
+
+    _type_images(win, 9)
+
+    assert win.end_spin.value() == pytest.approx(3.8)
+    assert win.synth_images_spin.value() == 9
+    assert len(_grid_starts(win)) == 10
+
+
+def test_a_typed_end_hands_the_count_of_a_hand_window_back(win, mat_file):
+    _hand_window(win, mat_file)
+    _type_images(win, 9)
+
+    win.end_spin.setValue(5.0)
+
+    assert win.ct_total_images_spin.value() == 15
+    assert win.synth_images_spin.value() == 15

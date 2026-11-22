@@ -1,7 +1,7 @@
 # PROGRESS
 
 ## NEXT STEP
-Building has stopped at the user's word (2026-11-20, `78863f0`). Asked directly how the window feels, the user answered: done for now, not final. They will use it on real recordings and come back with a list if something bothers them. Do not start further review rounds or changes on this branch until they do. The user tries `feature/gui-pro-redesign` by hand on ENT005 and then merges it (the user merges). Relaunch `labchart2cfd` first: a window opened before 15:26 runs older code. Still wanted: one real MRI recording driven by hand.
+The user checks the one image count change (2026-11-21) by hand on ENT005: relaunch `labchart2cfd` (a window opened before this commit runs older code), open block 2, select step 2, type 6 in Images in step, and see both number rows read 1 to 6 and End move to 971.727 s. Then the user merges `feature/gui-pro-redesign` (the user merges). Otherwise building stays stopped at the user's word of 2026-11-20 (done for now, not final): change only what they report from real recordings, and do not start review rounds. Still wanted: one real MRI recording driven by hand.
 
 Left open on purpose, from the third retest (`c44adee`), all narrow: a half image window draws an image the file only half holds (amber); Temporal Res is cautioned, not blocked; `Mark triggers` replaces a hand window without asking; the trigger info file reports trigger numbers for a hand window. One test logs matplotlib's constrained layout notice. No reviewer has retested since `c44adee`.
 
@@ -10,6 +10,9 @@ Decided by the user on 2026-11-20 (asked directly, after two usability reviews r
 2. **Phase contrast calibration: leave as it is.** No xenon imaging has been done yet, so there is nothing to decide it against. Revisit when the first xenon study exists (the engine has Bag1, Bag2 and Bag4 presets the window does not offer, and the calibration factor is not shown).
 3. **Channel roles: not remembered.** The user repicks them for each recording, by choice.
 4. **CT default method: unchanged** (reorder image parts). The user asked what label cycle frames does instead of choosing; that was answered from the export code.
+
+Decided by the user on 2026-11-21 (asked directly, after two figures on ENT005):
+5. **One image count, in force at once.** Images in step (section 4) and the parts grid count (section 5, now also named Images in step) are one value. A typed count moves End to Start + count x Temporal Res at once; only Start Shift waits for its button, now Apply shift.
 
 Still open, smaller: the trigger info file in MRI and CPAP reports start_trigger and num_triggers also for a window clicked by hand (engine output, not touched); question boxes answer Yes and No instead of naming the action; the pressure channel is never drawn; Mark triggers replaces a hand window without asking.
 
@@ -61,7 +64,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 | Work item | Stage |
 |---|---|
-| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 502 tests, two review passes, two usability reviews and three CT retests acted on, four design questions decided by the user, checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
+| GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 506 tests, two review passes, two usability reviews and three CT retests acted on, five design questions decided by the user (one image count, 2026-11-21), checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
 | Read native LabChart `.adicht` files without LabChart (`io/adicht.py`, `io/recording.py`, GUI open, `convert-adicht` command) | done on `feature/gui-pro-redesign`; equals LabChart's export bit for bit on ENT005 (user's manual export) and on 72 recording pairs; refuses what it was not checked on |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
@@ -80,6 +83,8 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 | Windows packaging / CI | not started; see notes on PyInstaller freeze |
 
 ## SESSION LOG
+
+- 2026-11-21: the user reported from the window on ENT005 (block 2, step 2, 9 images at 200 ms): a 6 typed in Images in step left the image numbers at 9. Root cause in two parts. The count was only pending until Apply shift and image count, a button below the visible part of the sidebar, and nothing redrew the plot when the count was typed. In Reorder parts the export used a second count (Images in grid, copied once from the step), so even after Apply it processed and cut 9 images (970.527 to 972.327 s) while the window ended at 971.727 s, and the line above Export did not say so. Shown on ENT005 with the export's own engine calls, parts flipped (4 to 6, then 1 to 3): drift correction subtracts the mean flow of the processed range, 0.186 L/s over 6 images and 0.022 L/s over 9, and the exported breath's net volume was -2.8 mL against +192.4 mL. The user chose one count, in force at once: the two boxes hold one value under one name and one range; a typed count moves End for a selected step and for a hand window; only Start Shift waits for its button (Apply shift); selecting a step counts it afresh; a typed or clicked End hands the count back. 506 tests (7 new, 6 reworded, 3 that pinned the old design removed; baseline 502). Checked on ENT005: typed 6 gives 6 in both boxes, 6 blue images, window and parts export both 970.527 to 971.727 s. Offscreen screenshots and the native display check: no clipped control in 9 states.
 
 - 2026-11-20: third retest by the usability reviewer on `c44adee`, the first with a yes for all three CT methods for a user who reads the screen. It read the exported files independently (a pressure ramp shows which seconds were cut) and found every green cycle and parts export matching the plot. Its remaining narrow findings are fixed in `78863f0` (502 tests): a landmark outside a changed window blocks the export; a window set by hand gets an image grid and works with cycle frames and reorder parts; selecting another step asks before dropping parts, and a part past the grid blocks; the export line follows the grid offset; a window or grid outside the recording is named before Export; no cycle label on a previewed grid; moved labels are announced; the result summary gets the height it needs. On `78863f0`: byte comparison against `main` 11 of 11 identical with and without comments, the two real recording tests pass (25 passed), the real display check reports no clipped control in 9 states. The user then asked whether the work was done, and building stopped here.
 

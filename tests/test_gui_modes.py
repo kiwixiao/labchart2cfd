@@ -153,9 +153,10 @@ def test_choosing_ct_with_a_block_open_looks_for_scan_steps(win, mat_file):
     assert win._plot_mode == "selected"
 
 
-def test_selecting_a_step_seeds_the_parts_image_count_once(win, mat_file):
-    """Manual mode is now on before a step exists, so the seed that used to
-    happen on ticking the switch has to happen when the step is selected."""
+def test_selecting_a_step_sets_the_parts_image_count(win, mat_file):
+    """Manual mode is now on before a step exists, so the count has to be
+    set when the step is selected. Selecting it again counts it afresh: the
+    parts count is the one image count (the user's choice, 2026-11-21)."""
     win.workflow_combo.setCurrentText("CT")
     open_block(win, mat_file)
 
@@ -164,7 +165,7 @@ def test_selecting_a_step_seeds_the_parts_image_count_once(win, mat_file):
 
     win.synth_images_spin.setValue(12)
     win._select_ct_step()
-    assert win.synth_images_spin.value() == 12   # yours now; never rewritten
+    assert win.synth_images_spin.value() == 15
 
 
 def test_switching_method_disarms_the_previous_methods_click_mode(win, mat_file):
