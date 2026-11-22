@@ -244,3 +244,64 @@ def test_phase_contrast_calibration_uses_peak_cumulative():
     cal = wf._get_voltage_calibration(t, data)
 
     assert cal == pytest.approx(expected_peak, rel=1e-6)
+
+
+# ---------------- the drift correction breath (design 2026-11-22, 4.4 engine)
+
+def _offset_sine(offset, duration_s=10.0, raw_rate_hz=1000.0):
+    """A 0.5 Hz sinusoid plus a constant offset: the offset is the drift."""
+    n = int(duration_s * raw_rate_hz) + 1
+    t = np.linspace(0.0, duration_s, n)
+    flow = np.sin(2 * np.pi * 0.5 * t) + offset
+    return LabChartData(data_cell=[[flow]], time_cell=[[t]], num_channels=1, num_blocks=1)
+
+
+def _ct(data, start, end, **kwargs):
+    wf = CTWorkflow(target_sample_rate=100.0, density=1.2)
+    return wf.process(
+        data, row=1, column=1, start_time=start, end_time=end,
+        temporal_resolution=0.2, include_pressure=False, **kwargs,
+    )
+
+
+def test_ct_drift_range_removes_the_offset_measured_on_that_range():
+    """Two whole breaths (2 s to 6 s) hold no net flow, so their mean is the
+    offset alone. A half breath window (1.0 s to 1.5 s) measured on itself
+    would report the sine's mean as drift."""
+    result = _ct(_offset_sine(0.05), 1.0, 1.5, drift_range=(2.0, 6.0))
+
+    assert result.drift_error == pytest.approx(0.05, abs=1e-4)
+    assert result.metadata["drift_range"] == (2.0, 6.0)
+
+
+def test_ct_without_drift_range_measures_the_window():
+    from labchart2cfd.processing.drift_correction import calculate_drift_error
+    data = _offset_sine(0.05)
+    t, f = data.get_time(1, 1), data.get_data(1, 1)
+    mask = (t >= 1.0) & (t <= 1.5)
+
+    result = _ct(data, 1.0, 1.5)
+
+    assert result.drift_error == calculate_drift_error(t[mask], f[mask])
+    assert result.metadata["drift_range"] is None
+
+
+def test_ct_drift_range_equal_to_the_window_changes_nothing():
+    data = _offset_sine(0.05)
+
+    plain = _ct(data, 1.0, 3.0)
+    ranged = _ct(data, 1.0, 3.0, drift_range=(1.0, 3.0))
+
+    assert np.array_equal(plain.mass_flow, ranged.mass_flow)
+    assert plain.drift_error == ranged.drift_error
+
+
+@pytest.mark.parametrize("drift_range", [
+    (8.0, 12.0), (-1.0, 2.0), (3.0, 3.0), (4.0, 2.0),
+    (2.0, 2.0005),   # one sample at 1000 Hz: no integral to take
+])
+def test_ct_drift_range_outside_the_recording_or_empty_raises(drift_range):
+    """A breath partly outside the recording would measure part of a breath
+    and report it as the drift, a silent wrong number."""
+    with pytest.raises(ValueError, match="drift"):
+        _ct(_offset_sine(0.05), 1.0, 1.5, drift_range=drift_range)

@@ -15,12 +15,16 @@ Pipeline:
 8. Compute image mapping and store in metadata
 """
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import numpy as np
 
 from labchart2cfd.io.labchart import LabChartData
-from labchart2cfd.processing.drift_correction import correct_flow_drift
+from labchart2cfd.processing.drift_correction import (
+    apply_drift_correction,
+    calculate_drift_error,
+    correct_flow_drift,
+)
 from labchart2cfd.processing.rearrangement import (
     rearrange_at_landmark,
     compute_image_count,
@@ -77,6 +81,7 @@ class CTWorkflow(BaseWorkflow):
         exhale_end_time: Optional[float] = None,
         temporal_resolution: float = 0.2,
         include_pressure: bool = True,
+        drift_range: Optional[Tuple[float, float]] = None,
         **kwargs,
     ) -> WorkflowResult:
         """Process flow profile using CT workflow.
@@ -93,12 +98,33 @@ class CTWorkflow(BaseWorkflow):
                 Stored in metadata for reference.
             temporal_resolution: CT temporal resolution in seconds (default 0.2s = 200ms)
             include_pressure: Whether to process pressure data
+            drift_range: (t0, t1) in recording time. When given, the drift is
+                the mean of the raw flow over this range (one whole breath the
+                user picked), subtracted from the window. When None, the mean
+                over the window itself, as before.
 
         Returns:
             WorkflowResult with processed and rearranged data
+
+        Raises:
+            ValueError: If drift_range is empty or reaches outside the
+                recording. Part of a breath would be measured and reported
+                as the drift without a word.
         """
         full_flow = data.get_data(row, column)
         full_time = data.get_time(row, column)
+        if drift_range is not None:
+            d0, d1 = float(drift_range[0]), float(drift_range[1])
+            if not d1 > d0:
+                raise ValueError(
+                    f"The drift breath must end after it starts ({d0:.3f} s to {d1:.3f} s)."
+                )
+            if d0 < full_time[0] - 1e-9 or d1 > full_time[-1] + 1e-9:
+                raise ValueError(
+                    f"The drift breath {d0:.3f} s to {d1:.3f} s reaches outside "
+                    f"the recording ({full_time[0]:.3f} s to {full_time[-1]:.3f} s)."
+                )
+            drift_range = (d0, d1)
 
         # Step 1: Extract step window
         time_windowed, flow_windowed = self._extract_time_window(
@@ -142,10 +168,23 @@ class CTWorkflow(BaseWorkflow):
                 time_windowed, flow_windowed, cut_time
             )
 
-        # Step 3: Drift correction on rearranged signal
-        corrected_flow, drift_error = correct_flow_drift(
-            time_windowed, flow_windowed
-        )
+        # Step 3: Drift correction on rearranged signal, or with the error
+        # measured on the breath the user picked.
+        if drift_range is None:
+            corrected_flow, drift_error = correct_flow_drift(
+                time_windowed, flow_windowed
+            )
+        else:
+            t_breath, f_breath = self._extract_time_window(
+                full_time, full_flow, drift_range[0], drift_range[1]
+            )
+            if len(t_breath) < 2:
+                raise ValueError(
+                    f"The drift breath {drift_range[0]:.3f} s to "
+                    f"{drift_range[1]:.3f} s holds fewer than 2 samples."
+                )
+            drift_error = calculate_drift_error(t_breath, f_breath)
+            corrected_flow = apply_drift_correction(flow_windowed, drift_error)
 
         # Step 4: Convert to mass flow (L/s → kg/s)
         mass_flow = liters_per_second_to_kg_per_second(
@@ -214,6 +253,7 @@ class CTWorkflow(BaseWorkflow):
             "total_images": total_images,
             "cut_image_index": cut_image_idx,
             "pressure_note": pressure_note,
+            "drift_range": drift_range,
             "rearranged_image_indices": rearranged_indices.tolist(),
         }
 
