@@ -116,6 +116,27 @@ def test_help_menu_opens_a_quick_guide_without_blocking(win):
     assert not win._guide_dialog.isModal()
 
 
+def test_the_quick_guide_names_every_section_and_ct_method_on_screen(win):
+    """The guide still described CT as one step, "4. CT only", after the
+    window gained 4 CT scan, 5 Build the breath, the drift correction
+    breath, extra flow and a preview where the complete half is chosen.
+    The names come from the window, so a new section or method the guide
+    leaves out fails here."""
+    from labchart2cfd.gui.app import _CT_METHODS
+    from labchart2cfd.gui.widgets import CollapsibleSection
+
+    win.guide_action.trigger()
+    text = " ".join(win._guide_dialog.guide_label.text().split())
+    sections = [" ".join(s.header.text().split()[1:])
+                for s in win.findChildren(CollapsibleSection)]
+
+    assert len(sections) == 6
+    for name in sections + [shown for shown, _key, _tip in _CT_METHODS]:
+        assert name in text, name
+    for words in ("Drift correction breath", "Extra flow", "Complete half"):
+        assert words in text, words
+
+
 # --------------------------------------------------------------------- theme
 
 def test_the_window_carries_the_theme_style_sheet(win):
