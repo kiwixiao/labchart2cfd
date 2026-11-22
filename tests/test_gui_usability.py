@@ -515,14 +515,19 @@ def test_the_export_line_states_the_temporal_res_it_will_use(win, mat_file):
     assert "15 images" in win.export_hint.text()
 
 
-def test_the_export_line_says_when_the_window_is_not_whole_images(win, mat_file):
+def test_the_export_line_names_the_window_rounded_to_whole_images(win, mat_file):
+    """3 s at 180 ms is 16.67 images. The line used to say so while the
+    export cut 17. The window now grows to the 17 whole images it holds
+    (design 2026-11-22, 4.1), and the line names that window."""
     _ct_step_selected(win, mat_file, "landmarks")
     win.subject_edit.setText("S1")
 
-    win.ct_temporal_res_spin.setValue(180.0)       # 3 s is 16.67 images
+    win.ct_temporal_res_spin.setValue(180.0)
 
-    assert "16.67 images long" in win.export_hint.text()
-    assert "17 images" in win.export_hint.text()
+    hint = win.export_hint.text()
+    assert "2.000 s to 5.060 s" in hint
+    assert "17 images" in hint
+    assert "images long" not in hint
 
 
 def test_the_ct_section_says_temporal_res_is_the_users_to_supply(win):
@@ -741,10 +746,12 @@ def test_the_step_grid_follows_a_typed_start(win, mat_file):
 
     win.start_spin.setValue(3.0)
 
+    # A new Start keeps the count and moves End (design 2026-11-22, 4.1).
     grid = _grid_starts(win)
-    assert grid[0] == pytest.approx(3.0) and grid[-1] == pytest.approx(5.0)
-    assert win.ct_total_images_spin.value() == 10
-    assert "10 images" in win.export_hint.text()
+    assert grid[0] == pytest.approx(3.0) and grid[-1] == pytest.approx(6.0)
+    assert win.end_spin.value() == pytest.approx(6.0)
+    assert win.ct_total_images_spin.value() == 15
+    assert "15 images" in win.export_hint.text()
 
 
 def test_a_step_number_that_is_not_the_selected_step_holds_the_export_back(win, tmp_path, mat_file):
@@ -791,9 +798,10 @@ def test_the_pending_blocker_says_what_is_in_force_and_where_the_button_is(win, 
 
 # ------------------------------------------------ warnings are not shown in green
 
-def test_a_window_that_is_not_whole_images_is_amber_not_green(win, mat_file):
+def test_a_new_temporal_res_leaves_no_partial_image_to_caution_about(win, mat_file):
     """'(the window is 26.67 images long)' was printed in the colour that
-    means go."""
+    means go. The window now grows to whole images (design 2026-11-22, 4.1),
+    so there is no partial image left to caution about."""
     _ct_step_selected(win, mat_file, "landmarks")
     win.subject_edit.setText("S1")
     win._ct_dt_confirmed = True
@@ -804,8 +812,9 @@ def test_a_window_that_is_not_whole_images_is_amber_not_green(win, mat_file):
 
     win.ct_temporal_res_spin.setValue(180.0)
 
-    assert win.export_hint.property("state") == "caution"
-    assert win.export_hint.text().startswith("Ready to export")    # still allowed
+    assert win.end_spin.value() == pytest.approx(5.06)              # 17 whole images
+    assert win.export_hint.property("state") == "ready"
+    assert "images long" not in win.export_hint.text()
 
 
 def test_a_ct_export_with_nothing_marked_is_amber(win, mat_file):

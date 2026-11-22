@@ -300,6 +300,11 @@ class FlowProfileApp(QMainWindow):
         # tell a value that is only previewed from one that is in force.
         self._ct_applied_shift = 0
         self._ct_applied_images: Optional[int] = None
+        # The length of the window as the step or the user gave it, before it
+        # was rounded to whole images. A new Temporal Res counts the images
+        # from this length, not from the rounded window, so the count does
+        # not creep up with each change (design 2026-11-22, 4.1).
+        self._ct_raw_span_s: Optional[float] = None
         # The channel name warnings the user has already accepted for this
         # recording, so the same question is not asked at every export.
         self._accepted_channel_warnings: Optional[tuple] = None
@@ -879,7 +884,7 @@ class FlowProfileApp(QMainWindow):
         self._ct_images_user_set = True
         if self._ct_grid() is not None:
             self._ct_applied_images = value
-            self._keep_user_image_count()
+            self._fit_end_to_count()
             self._redraw_ct_intervals_if_active()
         self._update_export_hint()
 
@@ -893,17 +898,39 @@ class FlowProfileApp(QMainWindow):
         finally:
             self._syncing_count = False
 
-    def _keep_user_image_count(self) -> None:
-        """With the user's own count in force, the window is that many images.
+    def _ct_window_count(self) -> Optional[int]:
+        """The number of images the CT window holds, or None without a grid.
 
-        Called when the count, Start or Temporal Res changes. The count stays
-        as typed and End moves to Start plus count times Temporal Res.
-        Without this a change of Temporal Res turned an applied 9 into 11.
+        A count the user typed wins. Otherwise the images are counted from
+        the length the step or the user gave (_ct_raw_span_s), and only
+        without one from the window itself.
         """
+        grid = self._ct_grid()
+        if grid is None:
+            return None
+        _start, dt, from_window = grid
         count = self.ct_total_images_spin.value()
-        if not (self._ct_images_user_set and self._ct_grid() is not None
-                and count == self._ct_applied_images):
-            return  # the program's count, or no window to fit it to
+        if self._ct_images_user_set and count == self._ct_applied_images:
+            return count
+        if self._ct_raw_span_s is not None:
+            # Half up, with a tolerance far below one image: a typed 2.1 s at
+            # 200 ms is 10.5 images, but 2.1 / 0.2 is 10.4999... in floating
+            # point and rounded down. The engine's compute_image_count stays
+            # as it is (MATLAB parity).
+            return int(np.floor(self._ct_raw_span_s / dt + 0.5 + 1e-9))
+        return from_window
+
+    def _fit_end_to_count(self) -> None:
+        """Make the CT window whole images: End = Start + count x Temporal Res.
+
+        Called when Start, End, Temporal Res or the count changes. The export
+        cuts whole images, so a window with part of an image left over showed
+        a time on screen that no file held (design 2026-11-22, 4.1). A count
+        the user typed stays as typed, as before.
+        """
+        count = self._ct_window_count()
+        if count is None or count < 1:
+            return  # no grid, or a Temporal Res longer than the window
         end = self.start_spin.value() + count * self.ct_temporal_res_spin.value() / 1000.0
         if abs(end - self.end_spin.value()) > 1e-9:
             self._setting_window = True
@@ -913,21 +940,24 @@ class FlowProfileApp(QMainWindow):
                 self._setting_window = False
 
     def _on_ct_window_edge_changed(self, edge: str) -> None:
-        """Start or End changed: keep the user's count, or hand it back.
+        """Start or End changed: the window stays whole images.
 
-        A new Start moves the whole window when the count is the user's. An
-        End typed by the user defines the window itself, so the count shows
-        what that window holds again: the last thing set wins. A window set
-        by hand (no step on the trigger) follows the same rule, and there a
-        clicked End is set by the user as much as a typed one.
+        A new Start moves the whole window and keeps the count. An End typed
+        by the user defines the window itself: its length becomes the length
+        the images are counted from, and End is rounded to whole images. The
+        last thing set wins. A window set by hand (no step on the trigger)
+        follows the same rule, and there a clicked End is set by the user as
+        much as a typed one. Edges the program writes are fitted by the code
+        that writes them.
         """
-        if self._workflow_name() == "CT":
+        if self._workflow_name() == "CT" and not self._setting_window:
             hand = self._ct_selected_step is None and not self._ct_steps
             if self._ct_selected_step is not None or hand:
-                if edge == "start":
-                    self._keep_user_image_count()
-                elif not self._setting_window and (hand or not self._placing_marker):
+                if edge == "end" and (hand or not self._placing_marker):
                     self._ct_images_user_set = False
+                    span = self.end_spin.value() - self.start_spin.value()
+                    self._ct_raw_span_s = span if span > 0 else None
+                self._fit_end_to_count()
         self._redraw_ct_intervals_if_active()
 
     def _confirm_temporal_res(self) -> None:
@@ -2369,6 +2399,7 @@ class FlowProfileApp(QMainWindow):
         self._ct_applied_shift = 0
         self._ct_applied_images = None
         self._ct_images_user_set = False
+        self._ct_raw_span_s = None
         self._window_spans = {}
         self._trigger_times = np.array([])
         self._trigger_count = 0
@@ -3713,12 +3744,14 @@ class FlowProfileApp(QMainWindow):
         # Auto-fill start/end time from step boundaries. A newly selected
         # step is counted afresh, so a count typed for the last one is dropped.
         self._ct_images_user_set = False
+        self._ct_raw_span_s = step["end_time"] - step["start_time"]
         self._setting_window = True
         try:
             self.start_spin.setValue(step["start_time"])
             self.end_spin.setValue(step["end_time"])
         finally:
             self._setting_window = False
+        self._fit_end_to_count()
 
         # Highlight selected step more prominently
         self._clear_ct_step_markers()
@@ -4410,7 +4443,7 @@ class FlowProfileApp(QMainWindow):
             self.synth_dt_spin.setValue(float(dt_ms))
         finally:
             self._syncing_grid = False
-        self._keep_user_image_count()
+        self._fit_end_to_count()
         self._redraw_ct_intervals_if_active()
         self._refresh_synth_grid_if_active()
         self._update_grid_readout()
@@ -4488,8 +4521,14 @@ class FlowProfileApp(QMainWindow):
         if new_start < 0:
             QMessageBox.warning(self, "Bad Offset", "That offset puts Start before 0 s.")
             return
-        self.start_spin.setValue(new_start)
-        self.end_spin.setValue(self.end_spin.value() + off)
+        self._setting_window = True   # a slide, not a new window length
+        try:
+            self.start_spin.setValue(new_start)
+            self.end_spin.setValue(self.end_spin.value() + off)
+        finally:
+            self._setting_window = False
+        if self._workflow_name() == "CT":
+            self._fit_end_to_count()
         self.synth_window_offset_spin.setValue(0)
         self._refresh_synth_grid_if_active()
         self.status_bar.showMessage(f"Window shifted by {off * 1000:.0f} ms.")
