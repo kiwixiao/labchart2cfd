@@ -1,7 +1,7 @@
 # PROGRESS
 
 ## NEXT STEP
-CT composed breath (branch `feature/ct-composed-breath`, from `feature/gui-pro-redesign` at `1bcd9bd`): the design (`docs/superpowers/specs/2026-11-22-ct-composed-breath-design.md`) was approved by the user on 2026-11-22. The plan is `docs/superpowers/plans/2026-11-22-ct-composed-breath.md` (9 tasks). Tasks 1 to 3 are done. Next: Task 4 (in equals out in the engine). The user tests it when it is done.
+CT composed breath (branch `feature/ct-composed-breath`, from `feature/gui-pro-redesign` at `1bcd9bd`): the design (`docs/superpowers/specs/2026-11-22-ct-composed-breath-design.md`) was approved by the user on 2026-11-22. The plan is `docs/superpowers/plans/2026-11-22-ct-composed-breath.md` (9 tasks). Tasks 1 to 4 are done. Next: Task 5 (Cycle frames on the assembly route, details file). The user tests it when it is done.
 
 Before that, on `feature/gui-pro-redesign`: the user checks the one image count change (2026-11-21) by hand on ENT005: relaunch `labchart2cfd` (a window opened before this commit runs older code), open block 2, select step 2, type 6 in Images in step, and see both number rows read 1 to 6 and End move to 971.727 s. Then the user merges `feature/gui-pro-redesign` (the user merges). Otherwise building stays stopped at the user's word of 2026-11-20 (done for now, not final): change only what they report from real recordings, and do not start review rounds. Still wanted: one real MRI recording driven by hand.
 
@@ -68,7 +68,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 |---|---|
 | GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 506 tests, two review passes, two usability reviews and three CT retests acted on, five design questions decided by the user (one image count, 2026-11-21), checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
 | Read native LabChart `.adicht` files without LabChart (`io/adicht.py`, `io/recording.py`, GUI open, `convert-adicht` command) | done on `feature/gui-pro-redesign`; equals LabChart's export bit for bit on ENT005 (user's manual export) and on 72 recording pairs; refuses what it was not checked on |
-| CT composed breath (whole image window, extra flow after a frame, frame times in the reorder map, drift breath picked by hand, labeled preview, in = out, all details exported) | designed on `feature/ct-composed-breath` (`docs/superpowers/specs/2026-11-22-ct-composed-breath-design.md`), approved 2026-11-22, plan written (9 tasks), building: Tasks 1 to 3 done |
+| CT composed breath (whole image window, extra flow after a frame, frame times in the reorder map, drift breath picked by hand, labeled preview, in = out, all details exported) | designed on `feature/ct-composed-breath` (`docs/superpowers/specs/2026-11-22-ct-composed-breath-design.md`), approved 2026-11-22, plan written (9 tasks), building: Tasks 1 to 4 done |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
 | Landmark cut snapped to image start | done, on main |
@@ -87,6 +87,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 
 ## SESSION LOG
 
+- 2026-11-22: composed breath Task 4. processing/volume_balance.py: balance_halves keeps the complete half (above or below zero) sample by sample and multiplies the other half by k = -trapz(kept) / trapz(other), so the trapezoid net volume is zero; no sample changes sign and no time moves. A half with no volume is refused by name. mass_volume_to_ml converts a mass volume to mL.
 - 2026-11-22: composed breath Task 3. assemble_parts uses Temporal Res as typed: each grid line is the sample nearest k x dt, rounded half up on its own (275 ms gives slices of 28 and 27 samples that never drift). ProfilePart.extra_until_s keeps the recorded flow after a part's last image; it must end after that image, inside the processed flow, and is refused when the next part starts at the next image. AssemblyResult.frames is the frame table (seven columns, the map's first three unchanged), written by export_frame_table_csv.
 - 2026-11-22: composed breath Task 2. CTWorkflow.process takes drift_range=(t0, t1): the drift is the mean raw flow over the breath the user picks, subtracted from the window. It refuses a breath that is empty, holds fewer than 2 samples, or reaches outside the recording. Without it nothing changes.
 - 2026-11-22: composed breath Task 1. The CT window always holds whole images: End = Start + count x Temporal Res. The count comes from the step (or the typed End) before rounding, so a new Temporal Res does not creep the count up; a typed Start keeps the count and moves End; a typed count wins as before. A typed half (2.1 s at 200 ms) rounds up (GUI tolerance of 1e-9 image; the engine's count rule is unchanged). Three tests that pinned a partial window were updated to the new rule.
