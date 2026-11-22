@@ -1,7 +1,7 @@
 # PROGRESS
 
 ## NEXT STEP
-CT composed breath (branch `feature/ct-composed-breath`, from `feature/gui-pro-redesign` at `1bcd9bd`): the design is written in `docs/superpowers/specs/2026-11-22-ct-composed-breath-design.md` and waits for the user's approval. After approval: write the plan, then build it test first in the order of its section 7. Nothing is built yet.
+CT composed breath (branch `feature/ct-composed-breath`, from `feature/gui-pro-redesign` at `1bcd9bd`): the design (`docs/superpowers/specs/2026-11-22-ct-composed-breath-design.md`) was approved by the user on 2026-11-22. The plan is `docs/superpowers/plans/2026-11-22-ct-composed-breath.md` (9 tasks). Build it test first, task by task, starting with Task 1 (whole image window). The user tests it when it is done.
 
 Before that, on `feature/gui-pro-redesign`: the user checks the one image count change (2026-11-21) by hand on ENT005: relaunch `labchart2cfd` (a window opened before this commit runs older code), open block 2, select step 2, type 6 in Images in step, and see both number rows read 1 to 6 and End move to 971.727 s. Then the user merges `feature/gui-pro-redesign` (the user merges). Otherwise building stays stopped at the user's word of 2026-11-20 (done for now, not final): change only what they report from real recordings, and do not start review rounds. Still wanted: one real MRI recording driven by hand.
 
@@ -68,7 +68,7 @@ Before that (2026-08-19): deep review of the whole codebase and a fix batch, mer
 |---|---|
 | GUI redesign (sidebar, named pickers, click banner, CT method chooser, single Export, result panel, theme) | done on `feature/gui-pro-redesign`, 506 tests, two review passes, two usability reviews and three CT retests acted on, five design questions decided by the user (one image count, 2026-11-21), checked on the real display, y scale controls and LabChart comments added; the user is trying it on ENT005, then merge |
 | Read native LabChart `.adicht` files without LabChart (`io/adicht.py`, `io/recording.py`, GUI open, `convert-adicht` command) | done on `feature/gui-pro-redesign`; equals LabChart's export bit for bit on ENT005 (user's manual export) and on 72 recording pairs; refuses what it was not checked on |
-| CT composed breath (whole image window, extra flow after a frame, frame times in the reorder map, drift breath picked by hand, labeled preview, in = out, all details exported) | designed on `feature/ct-composed-breath` (`docs/superpowers/specs/2026-11-22-ct-composed-breath-design.md`), builder check done, waiting for the user's approval |
+| CT composed breath (whole image window, extra flow after a frame, frame times in the reorder map, drift breath picked by hand, labeled preview, in = out, all details exported) | designed on `feature/ct-composed-breath` (`docs/superpowers/specs/2026-11-22-ct-composed-breath-design.md`), approved 2026-11-22, plan written (9 tasks), building |
 | PhaseContrast calibration (peak of cumulative integral) | done, on main |
 | CT image counting unified on slices | done, on main |
 | Landmark cut snapped to image start | done, on main |
