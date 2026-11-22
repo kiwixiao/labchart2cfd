@@ -95,8 +95,8 @@ def _wait_for_report(win, qapp, seconds=30):
     assert win._last_export_report is not None, win.status_bar.currentMessage()
 
 
-def _cycle_export(win, qapp, mat_file, out_dir, dt_ms, order=_USER_ORDER):
-    """Label the cycle on the fixture step (2 s to 5 s) and export it."""
+def _label_cycle(win, mat_file, dt_ms=100.0, order=_USER_ORDER):
+    """Label the cycle on the fixture step (2 s to 5 s), clicking mid image."""
     _step_selected(win, mat_file, "cycle")
     win.ct_temporal_res_spin.setValue(dt_ms)
     win.cycle_mode_btn.setChecked(True)
@@ -104,6 +104,11 @@ def _cycle_export(win, qapp, mat_file, out_dir, dt_ms, order=_USER_ORDER):
     for image in order:
         win._on_click(ClickEvent(win.ax_top, 2.0 + (image - 0.5) * dt))
     assert win._ct_cycle_frames == order
+
+
+def _cycle_export(win, qapp, mat_file, out_dir, dt_ms, order=_USER_ORDER):
+    """Label the cycle on the fixture step (2 s to 5 s) and export it."""
+    _label_cycle(win, mat_file, dt_ms, order)
     win.subject_edit.setText("S1")
     win._set_output_dir(out_dir)
     win._export()
@@ -398,3 +403,201 @@ def test_drift_controls_are_hidden_outside_ct(win):
     win.workflow_combo.setCurrentText("MRI")
 
     assert win.drift_box.isHidden()
+
+
+# ------------------------------------------------ 4.2: extra flow after a frame
+# At 100 ms, frame 12 of the user's order is image 15, the last image of the
+# run 4 to 15. It ends at 2.0 + 15 x 0.1 = 3.5 s. The recording ends at 9.999 s.
+
+def _ask_recorder(monkeypatch, answer):
+    asked = []
+    monkeypatch.setattr(
+        "labchart2cfd.gui.app.QMessageBox.question",
+        staticmethod(lambda _p, _title, text, *a, **k: asked.append(text) or answer),
+    )
+    return asked
+
+
+def test_extra_flow_after_frame_12_is_set_by_typing(win, mat_file):
+    _label_cycle(win, mat_file)
+
+    win.extra_frame_spin.setValue(12)
+    win.extra_until_spin.setValue(3.8)
+
+    assert win._ct_cycle_extra == {12: pytest.approx(3.8)}
+    assert [(p.start_image, p.end_image, p.extra_until_s) for p in win._export_parts()] == [
+        (4, 15, pytest.approx(3.8)), (1, 4, None),
+    ]
+
+
+def test_extra_flow_is_drawn_as_a_band_labelled_with_its_frame(win, mat_file):
+    _label_cycle(win, mat_file)
+    win.extra_frame_spin.setValue(12)
+
+    win.extra_until_spin.setValue(3.8)
+
+    bands = [a for a in win._extra_artists if hasattr(a, "get_hatch")]
+    assert {a.axes for a in bands} >= {win.ax_top, win.ax_bottom}
+    assert all(a.get_hatch() for a in bands)
+    labels = [a.get_text() for a in win._extra_artists if hasattr(a, "get_text")]
+    assert any("extra after frame 12" in text for text in labels)
+    win.extra_clear_btn.click()
+    assert win._ct_cycle_extra == {} and win._extra_artists == []
+
+
+def test_extra_flow_is_picked_on_the_plot(win, mat_file):
+    _label_cycle(win, mat_file)
+    win.extra_frame_spin.setValue(12)
+
+    win.extra_pick_btn.click()
+    assert win._click_mode() == "extra_until"
+    win._on_click(ClickEvent(win.ax_bottom, 3.8))
+
+    assert win._ct_cycle_extra == {12: pytest.approx(3.8)}
+    assert win.extra_until_spin.value() == pytest.approx(3.8)
+    assert win._click_mode() != "extra_until"
+    assert win._ct_cycle_frames == _USER_ORDER          # the click labelled nothing
+
+
+def test_right_click_cancels_picking_extra_flow(win, mat_file):
+    _label_cycle(win, mat_file)
+    win.extra_frame_spin.setValue(12)
+    win.extra_pick_btn.click()
+
+    win._on_click(ClickEvent(win.ax_bottom, 3.8, button=3))
+
+    assert win._ct_cycle_extra == {} and win._ct_cycle_frames == _USER_ORDER
+    assert win._click_mode() != "extra_until"
+
+
+def _ready_to_export(win):
+    win.subject_edit.setText("S1")
+    win._ct_dt_confirmed = True
+    win._update_export_hint()
+    return win.export_hint.text()
+
+
+def test_extra_flow_before_the_next_image_is_named_above_export(win, mat_file):
+    """Parts 1 to 5, then 6 to 10: image 6 already follows image 5."""
+    _step_selected(win, mat_file, "parts")
+    for first, last in ((1, 5), (6, 10)):
+        win.part_from_spin.setValue(first)
+        win.part_to_spin.setValue(last)
+        win._add_part_from_spins()
+    win.parts_list.setCurrentRow(0)
+
+    win.extra_until_spin.setValue(3.2)                  # image 5 ends at 3.0 s
+
+    assert win._parts[0].extra_until_s == pytest.approx(3.2)
+    hint = _ready_to_export(win)
+    assert hint.startswith("Before export")
+    assert "extra flow after frame 5" in hint and "next image, 6" in hint
+
+
+def test_extra_flow_before_its_image_ends_is_named_above_export(win, mat_file):
+    _label_cycle(win, mat_file)
+    win.extra_frame_spin.setValue(12)
+
+    win.extra_until_spin.setValue(3.4)
+
+    hint = _ready_to_export(win)
+    assert hint.startswith("Before export")
+    assert "extra flow after frame 12" in hint and "ends at 3.500 s" in hint
+
+
+def test_extra_flow_past_the_recording_is_named_above_export(win, mat_file):
+    _label_cycle(win, mat_file)
+    win.extra_frame_spin.setValue(16)                   # the last frame: allowed
+
+    win.extra_until_spin.setValue(10.5)
+
+    hint = _ready_to_export(win)
+    assert hint.startswith("Before export")
+    assert "extra flow after frame 16" in hint and "9.989 s" in hint
+
+
+def test_extra_flow_on_a_frame_inside_a_run_is_named_above_export(win, mat_file):
+    """Frame 5 is image 8, inside the run 4 to 15: the next frame is image 9."""
+    _label_cycle(win, mat_file)
+    win.extra_frame_spin.setValue(5)
+
+    win.extra_until_spin.setValue(3.0)
+
+    hint = _ready_to_export(win)
+    assert hint.startswith("Before export")
+    assert "extra flow after frame 5" in hint and "next image, 9" in hint
+
+
+def test_parts_extra_flow_is_set_on_the_selected_part(win, mat_file):
+    _step_selected(win, mat_file, "parts")
+    for first, last in ((6, 15), (1, 5)):
+        win.part_from_spin.setValue(first)
+        win.part_to_spin.setValue(last)
+        win._add_part_from_spins()
+    win.parts_list.setCurrentRow(0)
+
+    win.extra_until_spin.setValue(5.3)                  # image 15 ends at 5.0 s
+
+    assert [p.extra_until_s for p in win._parts] == [pytest.approx(5.3), None]
+    assert "extra flow to 5.300 s" in win.parts_list.item(0).text()
+    assert win.parts_list.currentRow() == 0
+    win.parts_list.setCurrentRow(1)
+    assert win.extra_until_spin.value() == 0.0           # the box shows that part's own
+
+
+def test_extra_flow_reaches_the_export(win, qapp, mat_file, tmp_path):
+    _label_cycle(win, mat_file)
+    win.extra_frame_spin.setValue(12)
+    win.extra_until_spin.setValue(3.8)
+    win.subject_edit.setText("S1")
+    win._set_output_dir(tmp_path)
+
+    win._export()
+    _wait_for_report(win, qapp)
+
+    rows = (tmp_path / "S1ImageReorderMap.csv").read_text().splitlines()
+    frame_12 = dict(zip(rows[0].split(","), rows[12].split(",")))
+    assert frame_12["new_frame"] == "12" and frame_12["original_image"] == "15"
+    assert frame_12["extra_flow_s"] == "0.300000"
+    assert frame_12["extra_flow_until_s"] == "3.800000"
+
+
+def test_clearing_labels_asks_before_dropping_extra_flow(win, mat_file, monkeypatch):
+    _label_cycle(win, mat_file)
+    win.extra_frame_spin.setValue(12)
+    win.extra_until_spin.setValue(3.8)
+    asked = _ask_recorder(monkeypatch, gui_app.QMessageBox.No)
+
+    win.clear_cycle_btn.click()
+
+    assert len(asked) == 1 and "extra flow after frame 12" in asked[0]
+    assert win._ct_cycle_frames == _USER_ORDER and win._ct_cycle_extra
+
+    asked = _ask_recorder(monkeypatch, gui_app.QMessageBox.Yes)
+    win.clear_cycle_btn.click()
+
+    assert win._ct_cycle_frames == [] and win._ct_cycle_extra == {}
+
+
+def test_deleting_a_part_asks_before_dropping_its_extra_flow(win, mat_file, monkeypatch):
+    _step_selected(win, mat_file, "parts")
+    for first, last in ((6, 15), (1, 5)):
+        win.part_from_spin.setValue(first)
+        win.part_to_spin.setValue(last)
+        win._add_part_from_spins()
+    win.parts_list.setCurrentRow(0)
+    win.extra_until_spin.setValue(5.3)
+    asked = _ask_recorder(monkeypatch, gui_app.QMessageBox.No)
+
+    win._delete_part()
+
+    assert len(asked) == 1 and "extra flow after frame 10" in asked[0]
+    assert len(win._parts) == 2
+
+
+def test_a_redraw_names_the_extra_flow(win, mat_file):
+    _label_cycle(win, mat_file)
+    win.extra_frame_spin.setValue(12)
+    win.extra_until_spin.setValue(3.8)
+
+    assert "the extra flow after frame 12" in win._marks_at_risk(include_parts=True)

@@ -29,7 +29,8 @@ import sys
 import traceback
 from pathlib import Path
 from threading import Thread
-from typing import Optional, List, Tuple
+import dataclasses
+from typing import Dict, Optional, List, Tuple
 
 import numpy as np
 import matplotlib
@@ -64,7 +65,9 @@ from labchart2cfd.gui.widgets import (
 )
 from labchart2cfd.io.labchart import LabChartData
 from labchart2cfd.io.recording import RECORDING_SUFFIXES, load_recording
-from labchart2cfd.processing.profile_assembly import ProfilePart, assemble_parts
+from labchart2cfd.processing.profile_assembly import (
+    ProfilePart, assemble_parts, extra_flow_problems,
+)
 from labchart2cfd.processing.rearrangement import (
     compute_image_count,
     image_index_to_time,
@@ -191,10 +194,15 @@ _BANNERS = {
     "drift_second": ("active",
                      "Picking the drift correction breath: now click where "
                      "that breath ends. Right click cancels."),
+    "extra_until": ("active",
+                    "Picking the extra flow: click where the recorded flow "
+                    "after the frame should end. Right click cancels."),
 }
 
 # The band of the drift correction breath on both plots.
 _DRIFT_COLOR = "#7d3c98"
+# The hatched band of an extra flow after a frame.
+_EXTRA_COLOR = "#b9770e"
 
 
 # What to do next once a scan step is selected, by CT method. The status
@@ -321,6 +329,13 @@ class FlowProfileApp(QMainWindow):
         self._drift_first_click: Optional[float] = None
         self._drift_artists: list = []
         self._setting_drift = False       # the program is writing From or To
+        # Extra flow after a frame (design 2026-11-22, 4.2). Reorder parts
+        # keeps it on each part; Cycle frames keeps it here, by the frame
+        # number it follows, because its parts are made from the labels.
+        self._ct_cycle_extra: Dict[int, float] = {}
+        self._picking_extra = False
+        self._extra_artists: list = []
+        self._setting_extra = False       # the program is writing the box
         # The channel name warnings the user has already accepted for this
         # recording, so the same question is not asked at every export.
         self._accepted_channel_warnings: Optional[tuple] = None
@@ -834,6 +849,8 @@ class FlowProfileApp(QMainWindow):
             return "overview"
         if self._picking_drift:
             return "drift_second" if self._drift_first_click is not None else "drift_first"
+        if self._picking_extra:
+            return "extra_until"
         if self._capturing_part:
             return "part_second" if self._part_click_buffer else "part_first"
         if self._ct_cycle_mode:
@@ -1335,8 +1352,9 @@ class FlowProfileApp(QMainWindow):
         for ax in (self.ax_top, self.ax_bottom):
             self._drift_artists.append(
                 ax.axvspan(breath[0], breath[1], color=_DRIFT_COLOR, alpha=0.12, zorder=0))
-        self._drift_artists.append(self.ax_top.text(
-            breath[0], 0.97, " drift breath", transform=self.ax_top.get_xaxis_transform(),
+        # On the flow only plot: the top plot's legend sits at its upper right.
+        self._drift_artists.append(self.ax_bottom.text(
+            breath[0], 0.97, " drift breath", transform=self.ax_bottom.get_xaxis_transform(),
             ha="left", va="top", fontsize=8, color=_DRIFT_COLOR, parse_math=False,
         ))
         self.canvas.draw_idle()
@@ -1497,11 +1515,289 @@ class FlowProfileApp(QMainWindow):
         for page in (self.parts_page, self.landmarks_page, self.cycle_page):
             self.ct_method_stack.addWidget(page)
         section.add_widget(self.ct_method_stack)
+        section.add_widget(self._build_extra_box())
+        self._sync_extra_box()
 
         self.ct_method_combo.currentIndexChanged.connect(
             lambda _index: self._on_ct_method_changed()
         )
         return section
+
+    def _build_extra_box(self) -> QWidget:
+        """Extra flow after a frame, for Reorder parts and Cycle frames (4.2).
+
+        One box under both pages. In Reorder parts it edits the part
+        selected in the list; in Cycle frames, the frame chosen in After
+        frame, which must end a run of consecutive images.
+        """
+        box = QWidget()
+        self.extra_box = box
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 6, 0, 0)
+        layout.addWidget(self._hint(
+            "Extra flow: recorded flow kept after a frame, up to the time you "
+            "set, before the next frame. It is drawn hatched on the plot."
+        ))
+        self.extra_parts_hint = self._hint("It follows the part selected in the list above.")
+        layout.addWidget(self.extra_parts_hint)
+        self.extra_frame_row = QWidget()
+        frame_row = QHBoxLayout(self.extra_frame_row)
+        frame_row.setContentsMargins(0, 0, 0, 0)
+        frame_row.addWidget(QLabel("After frame"))
+        self.extra_frame_spin = QSpinBox()
+        self.extra_frame_spin.setRange(1, 1)
+        self.extra_frame_spin.valueChanged.connect(lambda _v: self._show_extra_of_target())
+        frame_row.addWidget(self.extra_frame_spin, 1)
+        layout.addWidget(self.extra_frame_row)
+        self.extra_until_spin = QDoubleSpinBox()
+        self.extra_until_spin.setRange(0, 99999)
+        self.extra_until_spin.setDecimals(3)
+        self.extra_until_spin.setSingleStep(0.001)
+        self.extra_until_spin.setSpecialValueText("none")   # 0 means no extra flow
+        self.extra_until_spin.valueChanged.connect(lambda _v: self._on_extra_until_changed())
+        form = self._form()
+        form.addRow("Until (s)", self.extra_until_spin)
+        layout.addLayout(form)
+        row = QHBoxLayout()
+        self.extra_pick_btn = QPushButton("Pick on plot")
+        self.extra_pick_btn.setToolTip("Click where the extra flow should end.")
+        self.extra_pick_btn.clicked.connect(lambda: self._start_extra_pick())
+        self.extra_clear_btn = QPushButton("Clear")
+        self.extra_clear_btn.clicked.connect(lambda: self._clear_extra())
+        row.addWidget(self.extra_pick_btn)
+        row.addWidget(self.extra_clear_btn)
+        layout.addLayout(row)
+        self.parts_list.currentRowChanged.connect(lambda _row: self._show_extra_of_target())
+        return box
+
+    def _sync_extra_box(self) -> None:
+        """Show the extra flow box for the methods that join parts."""
+        method = self._ct_method()
+        self.extra_box.setVisible(method in ("parts", "cycle"))
+        self.extra_frame_row.setVisible(method == "cycle")
+        self.extra_parts_hint.setVisible(method == "parts")
+        self._picking_extra = False
+        self._show_extra_of_target()
+
+    @staticmethod
+    def _part_end_frames(parts: List[ProfilePart]) -> List[int]:
+        """The new frame number of each part's last image."""
+        ends, total = [], 0
+        for part in parts:
+            total += part.end_image - part.start_image + 1
+            ends.append(total)
+        return ends
+
+    def _extra_target(self) -> Optional[int]:
+        """What the extra flow box edits: the selected part's row (Reorder
+        parts) or the chosen frame number (Cycle frames), or None."""
+        method = self._ct_method()
+        if method == "cycle":
+            frame = self.extra_frame_spin.value()
+            return frame if 1 <= frame <= len(self._ct_cycle_frames) else None
+        if method == "parts":
+            row = self.parts_list.currentRow()
+            return row if 0 <= row < len(self._parts) else None
+        return None
+
+    def _extra_target_frame(self, target: int) -> int:
+        """The frame number an extra flow target follows."""
+        if self._ct_method() == "cycle":
+            return target
+        return self._part_end_frames(self._parts)[target]
+
+    def _show_extra_of_target(self) -> None:
+        """Fill the Until box with the extra flow of what it now edits."""
+        if self._setting_extra:
+            return
+        target = self._extra_target()
+        if target is None:
+            value = None
+        elif self._ct_method() == "cycle":
+            value = self._ct_cycle_extra.get(target)
+        else:
+            value = self._parts[target].extra_until_s
+        self._setting_extra = True
+        try:
+            self.extra_until_spin.setValue(value or 0.0)
+        finally:
+            self._setting_extra = False
+
+    def _on_extra_until_changed(self) -> None:
+        if self._setting_extra:
+            return
+        value = self.extra_until_spin.value()
+        target = self._extra_target()
+        if target is None:
+            if value:
+                self._show_extra_of_target()
+                self.status_bar.showMessage(
+                    "Select a part in the list first." if self._ct_method() == "parts"
+                    else "Label the cycle frames first, then choose After frame."
+                )
+            return
+        self._set_extra(target, value if value > 0 else None)
+
+    def _set_extra(self, target: int, until: Optional[float]) -> None:
+        """Set or clear (None) the extra flow after a part or frame."""
+        self._setting_extra = True
+        try:
+            if self._ct_method() == "cycle":
+                if until is None:
+                    self._ct_cycle_extra.pop(target, None)
+                else:
+                    self._ct_cycle_extra[target] = until
+            else:
+                self._parts[target] = dataclasses.replace(
+                    self._parts[target], extra_until_s=until)
+                self._refresh_parts_list()
+                self.parts_list.setCurrentRow(target)
+            self.extra_until_spin.setValue(until or 0.0)
+        finally:
+            self._setting_extra = False
+        self._draw_extra_flow()
+        self._update_export_hint()
+
+    def _start_extra_pick(self) -> None:
+        """Pick on plot: the next click is where the extra flow ends."""
+        if self._plot_mode != "selected":
+            self.status_bar.showMessage("Open a block first: click it on the overview.")
+            return
+        target = self._extra_target()
+        if target is None:
+            self.status_bar.showMessage(
+                "Select a part in the list first." if self._ct_method() == "parts"
+                else "Label the cycle frames first, then choose After frame.")
+            return
+        self._picking_extra = True
+        self._refresh_banner()
+        self.status_bar.showMessage(
+            f"Click where the extra flow after frame {self._extra_target_frame(target)} "
+            "ends. Right click cancels.")
+
+    def _extra_click(self, x_time: float) -> None:
+        self._picking_extra = False
+        target = self._extra_target()
+        if target is None:
+            return
+        self._set_extra(target, x_time)
+        self.status_bar.showMessage(
+            f"Extra flow after frame {self._extra_target_frame(target)} "
+            f"until {x_time:.3f} s.")
+
+    def _cancel_extra_pick(self) -> None:
+        self._picking_extra = False
+        self.status_bar.showMessage("Extra flow not changed.")
+
+    def _clear_extra(self) -> None:
+        """Clear, from its button: no extra flow after the part or frame."""
+        self._picking_extra = False
+        target = self._extra_target()
+        if target is not None:
+            self._set_extra(target, None)
+        self._refresh_banner()
+
+    def _extra_flow_frames(self, method: str) -> List[int]:
+        """Frame numbers with an extra flow after them, in a method."""
+        if method == "cycle":
+            return sorted(self._ct_cycle_extra)
+        if method == "parts":
+            ends = self._part_end_frames(self._parts)
+            return [ends[i] for i, part in enumerate(self._parts)
+                    if part.extra_until_s is not None]
+        return []
+
+    @staticmethod
+    def _extra_flow_words(frames: List[int]) -> str:
+        """'the extra flow after frame 12', for a question, or ''."""
+        if not frames:
+            return ""
+        if len(frames) == 1:
+            return f"the extra flow after frame {frames[0]}"
+        listed = ", ".join(str(f) for f in frames[:-1])
+        return f"the extra flow after frames {listed} and {frames[-1]}"
+
+    def _confirm_dropping(self, text: str) -> bool:
+        """Ask before a Clear or Delete removes a mark it does not name."""
+        return QMessageBox.question(
+            self, "Remove Extra Flow?", f"{text}\n\nContinue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        ) == QMessageBox.Yes
+
+    def _extra_flow_problems(self) -> List[str]:
+        """Blockers for extra flow the export would refuse (4.2).
+
+        The part rules come from the engine's own function, so this line and
+        the export agree to the sample. The recording end is checked here:
+        the export processes one flow sample past the extra flow.
+        """
+        if self._workflow_name() != "CT" or not self._exports_by_assembly():
+            return []
+        problems: List[str] = []
+        if self._ct_method() == "cycle":
+            frames = self._ct_cycle_frames
+            run_ends = set(self._part_end_frames(self._export_parts()))
+            for frame in sorted(self._ct_cycle_extra):
+                if frame > len(frames):
+                    problems.append(
+                        f"clear the extra flow after frame {frame}: there is "
+                        f"no frame {frame} now")
+                elif frame not in run_ends:
+                    problems.append(
+                        f"extra flow after frame {frame} is not possible: the "
+                        f"next frame is the next image, {frames[frame]}, which "
+                        "already follows it in the recording")
+        parts = self._export_parts()
+        grid = self._assembly_grid()
+        if not parts or grid is None:
+            return problems
+        start_t, dt, _ = grid
+        rate = self._SYNTH_SAMPLE_RATE
+        ends = self._part_end_frames(parts)
+        for i, rule in extra_flow_problems(parts, dt, rate, window_start_s=start_t):
+            problems.append(f"extra flow after frame {ends[i]} {rule}")
+        flow_row, col = self.flow_row_spin.value(), self.col_spin.value()
+        if self.data is not None and not self.data.is_block_empty(flow_row, col):
+            t_end = float(self.data.get_time(flow_row, col)[-1])
+            limit = t_end - 1.0 / rate
+            for i, part in enumerate(parts):
+                if part.extra_until_s is not None and part.extra_until_s > limit + 1e-9:
+                    problems.append(
+                        f"extra flow after frame {ends[i]} ends at "
+                        f"{part.extra_until_s:.3f} s; it can end at {limit:.3f} s "
+                        "at the latest, one flow sample before the recording "
+                        f"ends at {t_end:.3f} s")
+        return problems
+
+    def _draw_extra_flow(self) -> None:
+        """Draw each extra flow as a hatched band from its image end to its
+        end time, on both plots, labelled with the frame it follows."""
+        _remove_all(self._extra_artists)
+        self._extra_artists = []
+        grid = self._assembly_grid() if self._exports_by_assembly() else None
+        if (grid is None or self.ax_top is None or self._plot_mode != "selected"
+                or self._workflow_name() != "CT"):
+            self.canvas.draw_idle()
+            return
+        start_t, dt, _ = grid
+        parts = self._export_parts()
+        for part, frame in zip(parts, self._part_end_frames(parts)):
+            if part.extra_until_s is None:
+                continue
+            x0, x1 = start_t + part.end_image * dt, part.extra_until_s
+            if x1 <= x0:
+                continue  # named above Export; nothing to draw
+            for ax in (self.ax_top, self.ax_bottom):
+                self._extra_artists.append(ax.axvspan(
+                    x0, x1, facecolor="none", edgecolor=_EXTRA_COLOR, hatch="//",
+                    linewidth=0.5, zorder=1))
+            # Below the drift breath label, on the plot without a legend.
+            self._extra_artists.append(self.ax_bottom.text(
+                x0, 0.90, f" extra after frame {frame}",
+                transform=self.ax_bottom.get_xaxis_transform(), ha="left", va="top",
+                fontsize=8, color=_EXTRA_COLOR, parse_math=False,
+            ))
+        self.canvas.draw_idle()
 
     def _build_parts_page(self) -> QWidget:
         """Full manual method: ordered ranges of images assembled into a breath."""
@@ -1628,7 +1924,8 @@ class FlowProfileApp(QMainWindow):
         for position, (_text, _slot) in enumerate([
             ("Move up", self._move_part_up), ("Move down", self._move_part_down),
             ("Edit label", self._edit_part_label), ("Delete", self._delete_part),
-            ("Clear parts", self._clear_parts), ("Clear all", self._clear_synth_all),
+            ("Clear parts", self._user_clear_parts),
+            ("Clear all", self._user_clear_synth_all),
         ]):
             _b = QPushButton(_text)
             _b.clicked.connect(_slot)
@@ -1696,9 +1993,9 @@ class FlowProfileApp(QMainWindow):
         self.cycle_seq_label.setToolTip("Original image indices in click order")
         layout.addWidget(self.cycle_seq_label)
 
-        clear_cycle_btn = QPushButton("Clear cycle labels")
-        clear_cycle_btn.clicked.connect(self._clear_cycle_labels)
-        layout.addWidget(clear_cycle_btn)
+        self.clear_cycle_btn = QPushButton("Clear cycle labels")
+        self.clear_cycle_btn.clicked.connect(lambda: self._user_clear_cycle_labels())
+        layout.addWidget(self.clear_cycle_btn)
         layout.addStretch(1)
         return page
 
@@ -1964,7 +2261,10 @@ class FlowProfileApp(QMainWindow):
             return "the landmarks" if marked else ""
         n = len(self._ct_cycle_frames) if method == "cycle" else len(self._parts)
         noun = "cycle label" if method == "cycle" else "part"
-        return f"{n} {noun}{'s' if n != 1 else ''}" if n else ""
+        if not n:
+            return ""
+        extra = self._extra_flow_words(self._extra_flow_frames(method))
+        return f"{n} {noun}{'s' if n != 1 else ''}" + (f" and {extra}" if extra else "")
 
     def _on_ct_method_changed(self) -> None:
         """Bring the chosen CT method's controls on screen, and only those.
@@ -2001,6 +2301,7 @@ class FlowProfileApp(QMainWindow):
             self.ct_method_combo.itemData(index, Qt.ToolTipRole)
         )
         self.ct_method_stack.setCurrentIndex(index)
+        self._sync_extra_box()
         self._sync_ct_method()
         if self._workflow_name() == "CT" and new != old:
             # Replaces a line about the method just left.
@@ -2212,6 +2513,7 @@ class FlowProfileApp(QMainWindow):
                 )
         blockers += self._window_outside_recording()
         blockers += self._drift_breath_problems()
+        blockers += self._extra_flow_problems()
         if self._workflow_name() == "CT" and not self._uses_assembly():
             blockers += self._landmarks_outside_window()
         if self._workflow_name() == "CT" and self._ct_selected_step is not None:
@@ -2582,8 +2884,12 @@ class FlowProfileApp(QMainWindow):
         self._ct_applied_images = None
         self._ct_images_user_set = False
         self._ct_raw_span_s = None
-        # The drift breath was marked on the plot being replaced. The
-        # question before a redraw names it (_marks_at_risk).
+        # The drift breath and the cycle's extra flow were marked on the plot
+        # being replaced. The question before a redraw names them
+        # (_marks_at_risk).
+        self._ct_cycle_extra = {}
+        self._extra_artists = []
+        self._picking_extra = False
         self._drift_artists = []
         self._picking_drift = False
         self._drift_first_click = None
@@ -2789,6 +3095,11 @@ class FlowProfileApp(QMainWindow):
         n = len(self._parts)
         if include_parts and n:
             marks.append(f"{n} part{'s' if n != 1 else ''}")
+        extra = self._extra_flow_frames("cycle")
+        if include_parts:
+            extra += self._extra_flow_frames("parts")
+        if extra:
+            marks.append(self._extra_flow_words(sorted(extra)))
         if self._drift_breath() is not None:
             marks.append("the drift breath")
         return marks
@@ -3586,6 +3897,8 @@ class FlowProfileApp(QMainWindow):
         if event.button == 1:  # Left click
             if mode in ("drift_first", "drift_second"):
                 self._drift_click(event.xdata)
+            elif mode == "extra_until":
+                self._extra_click(event.xdata)
             elif picking_part:
                 self._capture_part_click(event.xdata)
             elif mode == "cycle":
@@ -3609,6 +3922,8 @@ class FlowProfileApp(QMainWindow):
         elif event.button == 3:  # Right click
             if mode in ("drift_first", "drift_second"):
                 self._cancel_drift_pick()
+            elif mode == "extra_until":
+                self._cancel_extra_pick()
             elif picking_part:
                 self._cancel_part_capture()
             elif mode == "cycle":
@@ -4501,6 +4816,7 @@ class FlowProfileApp(QMainWindow):
             visits = seen.get(img_idx, 0)
             seen[img_idx] = visits + 1
             self._ct_cycle_artists.append(self._draw_cycle_label(number, img_idx, visits))
+        self._draw_extra_flow()
         return _places() != before
 
     def _cycle_moved_note(self) -> str:
@@ -4529,12 +4845,22 @@ class FlowProfileApp(QMainWindow):
         self.canvas.draw_idle()
         self.status_bar.showMessage(f"Removed the cycle label of image {removed}.")
 
+    def _user_clear_cycle_labels(self) -> None:
+        """Clear cycle labels, from its button. The labels go without a
+        question; an extra flow set after one of them is named first."""
+        extra = self._extra_flow_words(self._extra_flow_frames("cycle"))
+        if extra and not self._confirm_dropping(
+                f"Clearing the cycle labels also removes {extra}."):
+            return
+        self._clear_cycle_labels()
+
     def _clear_cycle_labels(self) -> None:
-        """Remove every cycle label and its artists."""
+        """Remove every cycle label, its artists and its extra flow."""
         for drawn in self._ct_cycle_artists:
             _remove_all(drawn)
         self._ct_cycle_artists = []
         self._ct_cycle_frames = []
+        self._ct_cycle_extra = {}
         self._cycle_labels_changed()
         self.canvas.draw_idle()
         self.status_bar.showMessage("Cycle labels cleared.")
@@ -4552,9 +4878,13 @@ class FlowProfileApp(QMainWindow):
             self.cycle_seq_label.setText(f"seq: {seq}")
 
     def _cycle_labels_changed(self) -> None:
-        """After the user adds or removes a cycle label: the readout, then
-        the line above Export, which counts these frames."""
+        """After the user adds or removes a cycle label: the readout, the
+        frames the extra flow can follow, the extra flow bands, then the
+        line above Export, which counts these frames."""
         self._update_cycle_ui()
+        self.extra_frame_spin.setMaximum(max(1, len(self._ct_cycle_frames)))
+        self._show_extra_of_target()
+        self._draw_extra_flow()
         self._update_export_hint()
 
     # ------------------------------------------------------------------
@@ -4930,6 +5260,7 @@ class FlowProfileApp(QMainWindow):
                 bbox=dict(boxstyle="circle,pad=0.2", fc=color, ec="black", lw=0.5),
             )
             self._part_artists.append(ann)
+        self._draw_extra_flow()
 
     def _refresh_parts_list(self) -> None:
         # The step the parts were built on: noted with the first part,
@@ -4944,8 +5275,10 @@ class FlowProfileApp(QMainWindow):
         for idx, part in enumerate(self._parts):
             dur = (part.end_image - part.start_image + 1) * dt
             lbl = f" [{part.label}]" if part.label else ""
+            extra = (f"  + extra flow to {part.extra_until_s:.3f} s"
+                     if part.extra_until_s is not None else "")
             QListWidgetItem(
-                f"{idx + 1}.{lbl} images {part.start_image}-{part.end_image}  ({dur:.2f}s)",
+                f"{idx + 1}.{lbl} images {part.start_image}-{part.end_image}  ({dur:.2f}s){extra}",
                 self.parts_list,
             )
         n = len(self._parts)
@@ -4985,10 +5318,28 @@ class FlowProfileApp(QMainWindow):
     def _delete_part(self) -> None:
         i = self._selected_part_row()
         if 0 <= i < len(self._parts):
+            if self._parts[i].extra_until_s is not None and not self._confirm_dropping(
+                    f"Deleting part {i + 1} also removes the extra flow after "
+                    f"frame {self._part_end_frames(self._parts)[i]}."):
+                return
             self._parts.pop(i)
             self._refresh_parts_list()
             self._draw_parts_overlay()
             self.canvas.draw_idle()
+
+    def _user_clear_parts(self) -> None:
+        """Clear parts, from its button: an extra flow on them is named first."""
+        extra = self._extra_flow_words(self._extra_flow_frames("parts"))
+        if extra and not self._confirm_dropping(f"Clearing the parts also removes {extra}."):
+            return
+        self._clear_parts()
+
+    def _user_clear_synth_all(self) -> None:
+        """Clear all, from its button: an extra flow on the parts is named first."""
+        extra = self._extra_flow_words(self._extra_flow_frames("parts"))
+        if extra and not self._confirm_dropping(f"Clearing all also removes {extra}."):
+            return
+        self._clear_synth_all()
 
     def _clear_parts(self) -> None:
         """Clear only the parts list (the plot keeps its grid and markers)."""
@@ -5040,7 +5391,11 @@ class FlowProfileApp(QMainWindow):
                 runs[-1].append(image)
             else:
                 runs.append([image])
-        return [ProfilePart(run[0], run[-1]) for run in runs]
+        parts = [ProfilePart(run[0], run[-1]) for run in runs]
+        # An extra flow belongs to the frame that ends a run; one set on a
+        # frame inside a run is named above Export (_extra_flow_problems).
+        return [dataclasses.replace(part, extra_until_s=self._ct_cycle_extra.get(frame))
+                for part, frame in zip(parts, self._part_end_frames(parts))]
 
     def _ct_details_entries(self, *, subject, method, result, asm, grid, processed,
                             drift_range, drift_source):
@@ -5181,9 +5536,9 @@ class FlowProfileApp(QMainWindow):
 
         # Process the image grid, and as far as the latest extra flow. When
         # the last grid line rounds up to a sample past the grid, one more
-        # sample is processed so that sample exists. The drift is always
-        # measured on the image grid, so extra flow never moves the level of
-        # the profile (design 2026-11-22, 4.4).
+        # sample is processed so that sample exists. The drift is measured on
+        # the picked breath, or else on the image grid, so extra flow never
+        # moves the level of the profile (design 2026-11-22, 4.4).
         rate = self._SYNTH_SAMPLE_RATE
         process_end = grid_end
         exact = n_images * dt * rate

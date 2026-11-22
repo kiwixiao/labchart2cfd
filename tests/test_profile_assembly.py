@@ -9,7 +9,7 @@ exactly dt of signal. With dt=0.2 at 100 Hz the samples-per-image (spi) is 20.
 import numpy as np
 import pytest
 
-from labchart2cfd.processing.profile_assembly import ProfilePart, assemble_parts
+from labchart2cfd.processing.profile_assembly import ProfilePart, assemble_parts, extra_flow_problems
 
 SPI = 20  # dt=0.2 * 100 Hz
 
@@ -194,3 +194,37 @@ def test_extra_flow_before_the_next_image_is_refused():
 def test_extra_flow_must_end_after_its_image_and_inside_the_flow(until, message):
     with pytest.raises(ValueError, match=message):
         _assemble([ProfilePart(1, 3, extra_until_s=until)], flow=_flow(300), total_images=6)
+
+
+# ---------------------------------------------- the extra flow rules, shared
+# The line above Export calls the same function the engine raises from, so
+# the two can never disagree by a sample (design 2026-11-22, 4.2).
+
+def test_extra_flow_problems_names_each_broken_rule():
+    """The grid starts at 2.0 s; image 15 ends at 3.5 s at 100 ms."""
+    parts = [
+        ProfilePart(4, 15, extra_until_s=3.4),   # before image 15 ends
+        ProfilePart(1, 3, extra_until_s=2.5),    # the next part starts at image 4
+        ProfilePart(4, 5),
+    ]
+
+    problems = extra_flow_problems(parts, dt=0.1, sample_rate=100.0, window_start_s=2.0)
+
+    assert [index for index, _ in problems] == [0, 1]
+    assert "must end after that image ends at 3.500 s; it ends at 3.400 s" in problems[0][1]
+    assert "the next part starts at the next image, 4" in problems[1][1]
+
+
+def test_extra_flow_problems_follow_whole_samples():
+    """3.504 s rounds to the sample where image 15 ends, so no flow is added."""
+    parts = [ProfilePart(4, 15, extra_until_s=3.504), ProfilePart(1, 4)]
+
+    problems = extra_flow_problems(parts, dt=0.1, sample_rate=100.0, window_start_s=2.0)
+
+    assert [index for index, _ in problems] == [0]
+
+
+def test_extra_flow_problems_accepts_a_valid_extra():
+    parts = [ProfilePart(4, 15, extra_until_s=3.8), ProfilePart(1, 4, extra_until_s=2.6)]
+
+    assert extra_flow_problems(parts, dt=0.1, sample_rate=100.0, window_start_s=2.0) == []

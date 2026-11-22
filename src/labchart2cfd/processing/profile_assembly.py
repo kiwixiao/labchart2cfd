@@ -120,6 +120,64 @@ class AssemblyResult:
     extra_spans: List[Tuple[float, float]] = field(default_factory=list)
 
 
+def _grid_line(k: int, off: int, exact_spi: float) -> int:
+    """Sample index of grid line k (line 0 starts image 1), rounded half up."""
+    return off + int(np.floor(k * exact_spi + 0.5 + 1e-9))
+
+
+def _sample_at(t: float, window_start_s: float, sample_rate: float) -> int:
+    """Sample index of a recording time, rounded half up."""
+    return int(np.floor((t - window_start_s) * sample_rate + 0.5 + 1e-9))
+
+
+def extra_flow_problems(
+    parts: List[ProfilePart],
+    dt: float,
+    sample_rate: float,
+    grid_offset_s: float = 0.0,
+    window_start_s: float = 0.0,
+) -> List[Tuple[int, str]]:
+    """The extra flow rules, checked on whole samples as the cut is made.
+
+    One function for the engine and the screen: ``assemble_parts`` raises the
+    first problem, and the line above Export lists them all, so the two
+    cannot disagree by a sample (design 2026-11-22, 4.2). An extra flow must
+    end after its image ends, and is refused when the next part starts at
+    the next image, which already follows it in the recording.
+
+    Args:
+        parts: Ordered parts, as for ``assemble_parts``.
+        dt: Seconds per image as typed.
+        sample_rate: Sample rate of the processed flow in Hz.
+        grid_offset_s: Seconds from the start of the processed flow to grid
+            line 1.
+        window_start_s: Recording time of the first processed sample.
+
+    Returns:
+        (index of the part, rule broken) for each problem, in part order.
+        The rule reads after "Extra flow after image N".
+    """
+    exact_spi = dt * sample_rate
+    off = int(round(grid_offset_s * sample_rate))
+    problems: List[Tuple[int, str]] = []
+    for i, p in enumerate(parts):
+        if p.extra_until_s is None:
+            continue
+        end_line = _grid_line(p.end_image, off, exact_spi)
+        if _sample_at(p.extra_until_s, window_start_s, sample_rate) <= end_line:
+            image_end_s = window_start_s + end_line / sample_rate
+            problems.append((i, (
+                f"must end after that image ends at {image_end_s:.3f} s; it "
+                f"ends at {p.extra_until_s:.3f} s"
+            )))
+        elif i + 1 < len(parts) and parts[i + 1].start_image == p.end_image + 1:
+            problems.append((i, (
+                f"is not possible: the next part starts at the next image, "
+                f"{p.end_image + 1}, which already follows it in the recording"
+            )))
+    return problems
+
+
 def assemble_parts(
     flow: NDArray[np.float64],
     parts: List[ProfilePart],
@@ -184,12 +242,10 @@ def assemble_parts(
         )
 
     def line(k: int) -> int:
-        """Sample index of grid line k (line 0 starts image 1)."""
-        return off + int(np.floor(k * exact_spi + 0.5 + 1e-9))
+        return _grid_line(k, off, exact_spi)
 
     def sample_at(t: float) -> int:
-        """Sample index of a recording time, rounded half up."""
-        return int(np.floor((t - window_start_s) * sample_rate + 0.5 + 1e-9))
+        return _sample_at(t, window_start_s, sample_rate)
 
     for i, p in enumerate(parts):
         if not (1 <= p.start_image <= p.end_image <= total_images):
@@ -205,13 +261,6 @@ def assemble_parts(
             )
         if p.extra_until_s is None:
             continue
-        image_end_s = window_start_s + line(p.end_image) / sample_rate
-        if sample_at(p.extra_until_s) <= line(p.end_image):
-            raise ValueError(
-                f"Extra flow after image {p.end_image} must end after that "
-                f"image ends at {image_end_s:.3f} s; it ends at "
-                f"{p.extra_until_s:.3f} s."
-            )
         if sample_at(p.extra_until_s) > len(flow):
             flow_end_s = window_start_s + len(flow) / sample_rate
             raise ValueError(
@@ -219,12 +268,12 @@ def assemble_parts(
                 f"{p.extra_until_s:.3f} s, past the end of the processed "
                 f"recording at {flow_end_s:.3f} s."
             )
-        if i + 1 < len(parts) and parts[i + 1].start_image == p.end_image + 1:
-            raise ValueError(
-                f"Extra flow after image {p.end_image} is not possible: the "
-                f"next part starts at the next image, {p.end_image + 1}, which "
-                "already follows it in the recording."
-            )
+    problems = extra_flow_problems(
+        parts, dt, sample_rate, grid_offset_s=grid_offset_s, window_start_s=window_start_s
+    )
+    if problems:
+        i, rule = problems[0]
+        raise ValueError(f"Extra flow after image {parts[i].end_image} {rule}.")
 
     flow_chunks: List[NDArray[np.float64]] = []
     pressure_chunks: List[NDArray[np.float64]] = []
