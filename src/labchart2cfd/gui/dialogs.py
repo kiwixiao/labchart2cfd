@@ -13,6 +13,9 @@ from PyQt5.QtWidgets import (
 )
 
 from labchart2cfd.gui.frame_order_plot import SIDE_NAMES, balance_notes, draw_frame_order
+from labchart2cfd.processing.volume_balance import (
+    MIN_HALF_SHARE, half_volumes, mass_volume_to_ml,
+)
 
 
 class AssemblyPreviewDialog(QDialog):
@@ -99,9 +102,13 @@ class AssemblyPreviewDialog(QDialog):
         caution = ""
         if self.chosen_keep is None:
             notes = list(self._notes)
+            above, below = (mass_volume_to_ml(v)
+                            for v in half_volumes(self.asm.time, self.asm.flow))
             caution = (
-                "Every sample lies on one side of zero, so in and out cannot "
-                "be matched and nothing can be written. Check the drift "
+                f"One half holds no volume or almost none: above zero {above:.1f} mL, "
+                f"below zero {abs(below):.1f} mL. The smaller must be at least "
+                f"{MIN_HALF_SHARE * 100:g} percent of the larger, so in and out "
+                "cannot be matched and nothing can be written. Check the drift "
                 "correction breath and the frames, then export again."
             )
         else:

@@ -1105,7 +1105,7 @@ def test_a_ready_cycle_export_is_not_refused_afterwards(win, qapp, mat_file, tmp
     assert refused == []
     assert [f.original_image for f in shown[0].asm.frames] == [5, 6]
     assert shown[0].balances == {} and win._last_export_report is None
-    assert "one side of zero" in win.status_bar.currentMessage()
+    assert "no volume or almost none" in win.status_bar.currentMessage()
 
 
 # ------------------------------------------------------ cautions that were missing

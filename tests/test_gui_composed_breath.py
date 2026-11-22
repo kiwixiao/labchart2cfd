@@ -453,6 +453,38 @@ def test_drift_controls_are_hidden_outside_ct(win):
 # At 100 ms, frame 12 of the user's order is image 15, the last image of the
 # run 4 to 15. It ends at 2.0 + 15 x 0.1 = 3.5 s. The recording ends at 9.999 s.
 
+def test_changing_the_study_type_asks_before_dropping_the_breath(win, mat_file, monkeypatch):
+    """The question was asked after the box already named the new study
+    type, where no drift breath exists, so the breath went without one."""
+    _step_selected(win, mat_file, "landmarks")
+    _type_breath(win, 2.0, 4.0)
+    asked = _ask_recorder(monkeypatch, gui_app.QMessageBox.No)
+
+    win.workflow_combo.setCurrentText("MRI")
+
+    assert len(asked) == 1 and "the drift breath" in asked[0]
+    assert win.workflow_combo.currentText() == "CT"
+    assert (win.drift_from_spin.value(), win.drift_to_spin.value()) == (2.0, 4.0)
+
+
+def test_opening_the_same_block_asks_before_dropping_a_breath_typed_on_the_overview(
+        win, mat_file, monkeypatch):
+    """Only another block asked; the same block was opened and the breath
+    typed on the overview was cleared without a question."""
+    win.workflow_combo.setCurrentText("CT")
+    open_block(win, mat_file)
+    win._user_show_overview()                  # nothing placed yet: no question
+    _type_breath(win, 2.0, 4.0)
+    asked = _ask_recorder(monkeypatch, gui_app.QMessageBox.No)
+
+    assert win.col_spin.value() == 1           # the tile below opens the same block
+    win._on_overview_click(ClickEvent(win._overview_axes[(2, 1)]))
+
+    assert len(asked) == 1 and "the drift breath" in asked[0]
+    assert win._plot_mode == "overview"
+    assert (win.drift_from_spin.value(), win.drift_to_spin.value()) == (2.0, 4.0)
+
+
 def _ask_recorder(monkeypatch, answer):
     asked = []
     monkeypatch.setattr(
@@ -623,6 +655,28 @@ def test_clearing_labels_asks_before_dropping_extra_flow(win, mat_file, monkeypa
     assert win._ct_cycle_frames == [] and win._ct_cycle_extra == {}
 
 
+@pytest.mark.parametrize("answer", ["No", "Yes"])
+def test_removing_the_label_of_a_frame_asks_before_dropping_its_extra_flow(
+        win, mat_file, monkeypatch, answer):
+    """Right click removed the labels one by one and left the extra flow
+    after frame 12 behind, attached to whatever became frame 12 next."""
+    _label_cycle(win, mat_file)
+    win.extra_frame_spin.setValue(12)
+    win.extra_until_spin.setValue(3.8)
+    asked = _ask_recorder(monkeypatch, getattr(gui_app.QMessageBox, answer))
+    for _ in range(4):                         # frames 16 to 13 carry nothing
+        win._remove_last_cycle_label()
+    assert asked == []
+
+    win._remove_last_cycle_label()             # frame 12 carries the extra flow
+
+    assert len(asked) == 1 and "extra flow after frame 12" in asked[0]
+    if answer == "No":
+        assert len(win._ct_cycle_frames) == 12 and 12 in win._ct_cycle_extra
+    else:
+        assert len(win._ct_cycle_frames) == 11 and win._ct_cycle_extra == {}
+
+
 def test_deleting_a_part_asks_before_dropping_its_extra_flow(win, mat_file, monkeypatch):
     _step_selected(win, mat_file, "parts")
     for first, last in ((6, 15), (1, 5)):
@@ -771,7 +825,7 @@ def test_a_half_with_no_volume_is_named_not_crashed(qapp):
                                    "positive", [])
 
     assert not dialog.export_button.isEnabled()
-    assert "one side of zero" in dialog.caution_label.text()
+    assert "no volume or almost none" in dialog.caution_label.text()
     assert not dialog.caution_label.isHidden()
 
 
@@ -787,3 +841,28 @@ def test_choosing_the_other_half_redraws_the_curve(qapp):
     assert dialog.chosen_keep == "negative"
     (curve,) = [line for line in dialog.figure.axes[0].lines if line.get_gid() == "flow"]
     assert np.array_equal(curve.get_ydata(), choices["negative"].flow)
+
+
+def test_a_breath_with_a_residue_half_is_refused_not_written(win, qapp, mat_file, tmp_path,
+                                                             monkeypatch):
+    """Reorder parts 1 to 3 with the breath 2 to 4 s composes 59 samples below
+    zero and one at +2.3e-19. It was written as all zeros keeping the half
+    above, or with an 81 L/s spike keeping the half below, and passed the
+    read back both times."""
+    from tests.gui_helpers import pick_drift_breath
+    shown = _capture_preview(monkeypatch)
+    _step_selected(win, mat_file, "parts")
+    pick_drift_breath(win, 2.0, 4.0)
+    win.ct_temporal_res_spin.setValue(200.0)
+    win.part_from_spin.setValue(1)
+    win.part_to_spin.setValue(3)
+    win._add_part_from_spins()
+    win.subject_edit.setText("S1")
+    win._set_output_dir(tmp_path)
+
+    win._export()
+
+    assert shown[0].balances == {} and not shown[0].export_button.isEnabled()
+    assert "no volume or almost none" in shown[0].caution_label.text()
+    assert not (tmp_path / "S1FlowProfile.csv").exists()
+    assert "no volume or almost none" in win.status_bar.currentMessage()

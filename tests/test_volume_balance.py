@@ -112,3 +112,31 @@ def test_half_volumes_integrate_over_the_time_column():
     assert above == pytest.approx(trapezoid(np.where(flow > 0, flow, 0.0), time))
     assert below == pytest.approx(trapezoid(np.where(flow < 0, flow, 0.0), time))
     assert below < 0 < above
+
+
+def _blocks(ratio):
+    """50 samples at -1 and 50 at +ratio, each block starting and ending at
+    zero, so the half below zero holds 50 dx and the half above 50 dx x ratio."""
+    return np.r_[0.0, -np.ones(50), 0.0, ratio * np.ones(50), 0.0]
+
+
+@pytest.mark.parametrize("keep", ["positive", "negative"])
+def test_a_half_with_almost_no_volume_is_refused(keep):
+    """Resampling leaves residue samples across zero. One sample at +2.3e-19
+    in a breath below zero gave a factor of 0 (a file of zeros) keeping the
+    half above, or about 1e17 (a spike of 81 L/s) keeping the half below,
+    and both passed the read back of the written file."""
+    flow = -4e-4 * np.sin(np.linspace(0.0, np.pi, 61))[1:-1]
+    flow[30] = 2.3e-19
+
+    with pytest.raises(ValueError, match="almost no volume"):
+        balance_halves(flow, RATE, keep=keep)
+    assert balance_choices(flow, RATE) == {}
+
+
+def test_a_half_of_two_percent_is_still_balanced():
+    """The refusal starts below 1 percent of the other half."""
+    result = balance_halves(_blocks(0.02), RATE, keep="negative")
+    assert result.factor == pytest.approx(50.0)
+    with pytest.raises(ValueError, match="almost no volume"):
+        balance_halves(_blocks(0.005), RATE, keep="negative")

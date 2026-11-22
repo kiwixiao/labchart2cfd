@@ -26,6 +26,12 @@ from labchart2cfd.processing.unit_conversion import AIR_DENSITY_KG_M3
 
 _HALVES = ("positive", "negative")
 
+# A half under this share of the other is residue, not a half. Resampling and
+# smoothing leave samples a hair across zero (one at 2.3e-19 kg/s in a breath
+# of 4e-4), and scaling by such a volume gave a factor of 0 (a file of zeros)
+# or about 1e17 (a spike), both with a net of zero.
+MIN_HALF_SHARE = 0.01
+
 
 @dataclass
 class BalanceResult:
@@ -60,7 +66,8 @@ def balance_halves(flow: NDArray[np.float64], sample_rate: float, keep: str) -> 
 
     Raises:
         ValueError: If ``keep`` is not "positive" or "negative", the sample
-            rate is not positive, or the half to scale holds no volume.
+            rate is not positive, or either half holds less than
+            ``MIN_HALF_SHARE`` of the other's volume.
     """
     if keep not in _HALVES:
         raise ValueError(f"keep must be 'positive' or 'negative', got {keep!r}.")
@@ -73,10 +80,13 @@ def balance_halves(flow: NDArray[np.float64], sample_rate: float, keep: str) -> 
     dx = 1.0 / sample_rate
     kept_volume = float(trapezoid(kept, dx=dx))
     scaled_volume = float(trapezoid(scaled, dx=dx))
-    if scaled_volume == 0.0:
+    small, large = sorted((abs(kept_volume), abs(scaled_volume)))
+    if large == 0.0 or small < MIN_HALF_SHARE * large:
         raise ValueError(
-            "the half to scale holds no volume: every sample lies on one side "
-            "of zero, so in and out cannot be matched."
+            f"one half holds almost no volume or none ({small:.3e} against "
+            f"{large:.3e} flow units x s; the smaller must be at least "
+            f"{MIN_HALF_SHARE * 100:g} percent of the larger), so in and out "
+            "cannot be matched."
         )
     factor = -kept_volume / scaled_volume
     return BalanceResult(
@@ -90,16 +100,18 @@ def balance_halves(flow: NDArray[np.float64], sample_rate: float, keep: str) -> 
 def balance_choices(flow: NDArray[np.float64], sample_rate: float) -> Dict[str, BalanceResult]:
     """Both balances the preview offers, keyed by the half kept, or none.
 
-    When one half holds no volume, keeping the other would scale nothing and
-    keeping the empty one would scale the other to zero. Neither is a breath
-    with in equal to out, so no choice is offered.
+    When one half holds no volume, or less than ``MIN_HALF_SHARE`` of the
+    other, keeping the other would scale residue by a huge factor and keeping
+    the small one would scale the other to almost nothing. Neither is a
+    breath with in equal to out, so no choice is offered.
 
     Args:
         flow: Uniformly sampled flow of one breath.
         sample_rate: Samples per second of ``flow``.
 
     Returns:
-        {"positive": ..., "negative": ...}, or {} when a half holds no volume.
+        {"positive": ..., "negative": ...}, or {} when a half holds almost
+        no volume or none.
     """
     try:
         return {keep: balance_halves(flow, sample_rate, keep) for keep in _HALVES}

@@ -3105,7 +3105,9 @@ class FlowProfileApp(QMainWindow):
             extra += self._extra_flow_frames("parts")
         if extra:
             marks.append(self._extra_flow_words(sorted(extra)))
-        if self._drift_breath() is not None:
+        # The boxes, not _drift_breath(): the study type question is asked
+        # after the box names the new type, where no breath is in force.
+        if self.drift_to_spin.value() > self.drift_from_spin.value():
             marks.append("the drift breath")
         return marks
 
@@ -3237,6 +3239,10 @@ class FlowProfileApp(QMainWindow):
             if self._parts:
                 self._parts = []
                 self._refresh_parts_list()
+        elif not self._ask_before_dropping("Opening the block"):
+            # The same block keeps its parts, but a breath or an extra flow
+            # typed on the overview goes with the redraw.
+            return
         self.col_spin.setValue(col)
         self._plot_selected()
 
@@ -4840,9 +4846,20 @@ class FlowProfileApp(QMainWindow):
         return sorted({f for f in self._ct_cycle_frames if f > grid[2]})
 
     def _remove_last_cycle_label(self) -> None:
-        """Undo the most recently added cycle label."""
+        """Undo the most recently added cycle label.
+
+        An extra flow after that frame goes with it, after a question: left
+        behind, it attached to whatever image became that frame next.
+        """
         if not self._ct_cycle_frames:
             return
+        frame = len(self._ct_cycle_frames)
+        if frame in self._ct_cycle_extra:
+            if not self._confirm_dropping(
+                    f"Removing frame {frame} also removes "
+                    f"{self._extra_flow_words([frame])}."):
+                return
+            del self._ct_cycle_extra[frame]
         removed = self._ct_cycle_frames.pop()
         if self._ct_cycle_artists:
             _remove_all(self._ct_cycle_artists.pop())
@@ -5615,8 +5632,8 @@ class FlowProfileApp(QMainWindow):
             # Known only once the breath is composed, so it is named here and
             # in the preview, whose Export is disabled for it.
             self.status_bar.showMessage(
-                "Nothing was written: every sample of the composed breath lies on "
-                "one side of zero, so in and out cannot be matched.")
+                "Nothing was written: one half of the composed breath holds no "
+                "volume or almost none, so in and out cannot be matched.")
             return
         if not accepted:
             self.status_bar.showMessage("Export cancelled. No file was written.")
